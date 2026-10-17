@@ -20,6 +20,7 @@ env:
   UV_VERSION: "0.10.12"
   SEMGREP_VERSION: "1.181.0"
   PIP_AUDIT_VERSION: "2.10.1"
+  GITLEAKS_VERSION: "8.30.1"
 
 jobs:
   test:
@@ -49,9 +50,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Official release binary, checksum-verified. Needs no API token.
+      - name: install gitleaks ${{ env.GITLEAKS_VERSION }}
+        run: |
+          cd /tmp
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSLO "$base/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          sha256sum --check --ignore-missing "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+      - name: scan full history
+        run: /tmp/gitleaks git --redact --verbose --exit-code 1 .
 
   sast:
     name: SAST (semgrep)
@@ -140,6 +149,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # On PRs, check the branch's real commits, not the temporary merge
+          # commit GitHub synthesizes for testing.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - run: scripts/scrub-check.sh
