@@ -13,7 +13,17 @@ services:
     restart: unless-stopped
     environment:
       SOC_ENV: ${SOC_ENV:-prod}
-    # Bound to loopback only. The tunnel or proxy is the one way in.
+      # The digest-pinned reference deploy.sh verified, shown on the console.
+      SOC_IMAGE_REF: ${SOC_API_IMAGE:-}
+    # Optional secrets written by the operator on the host (mode 600), e.g.
+    # the read-only EDR platform key. Absent in local development.
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/lc.env
+        required: false
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/console.env
+        required: false
+    # Bound to loopback only. The public tunnel and the tailnet proxy are the
+    # only ways in, and each exposes a different set of paths.
     ports:
       - "127.0.0.1:8080:8080"
     read_only: true

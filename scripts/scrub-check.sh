@@ -34,7 +34,7 @@ done
 
 # Email addresses, except GitHub noreply and documentation domains.
 if hits=$(files | xargs -0 grep -nIoE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \
-    | grep -vE '@(users\.noreply\.github\.com|example\.(com|org|net))$'); then
+    | grep -viE '@(users\.noreply\.github\.com|example\.(com|org|net))$'); then
   report "email address in tracked files"; echo "$hits"
 fi
 
