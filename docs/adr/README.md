@@ -12,3 +12,4 @@ superseded record stays in place and links to the one that replaces it.
 | [0005](0005-supply-chain-controls.md) | Pinned actions, signed images, SBOMs, verify before deploy | accepted |
 | [0006](0006-security-features-while-private.md) | Compensating controls while the repo is private on a free plan | accepted |
 | [0007](0007-integration-vendor-names.md) | Integration vendors may be named in public code; identifiers stay private | accepted |
+| [0008](0008-own-case-store-link-platform-cases.md) | Own case store is the system of record; incidents link a platform case for investigation | accepted |
