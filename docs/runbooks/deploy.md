@@ -2,9 +2,11 @@
 
 ## What a deploy guarantees
 Only an image signed by this repository's release workflow (on `main` or a
-version tag) can run. The deploy pins to the verified **digest**, checks the
-signed SBOM attestation, waits for health, and confirms `/version` reports the
-signed commit. Any failure rolls back to the previous digest.
+version tag, triggered by a push) can run. The deploy pins to the verified
+**digest**, checks the signed SBOM attestation, waits for health, and confirms
+the running container's image digest is exactly the verified one. Any failure
+rolls back to the previous digest. The build's commit (from `/version`) is
+recorded in the deploy log.
 
 ## Host layout (Stage A container)
 | Path | Contents | Mode |
