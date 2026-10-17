@@ -1,6 +1,6 @@
 # 0006: Compensating controls while private
 
-**Status:** accepted · **Date:** 2026-10-17
+**Status:** completed 2026-10-17 (repository is public) · **Date:** 2026-10-17
 
 ## Context
 The repository starts private and becomes public after a scrub review at the
@@ -21,3 +21,23 @@ requests, passing checks and signed commits.
 ## Consequences
 For a short window, merge rules are discipline rather than enforcement. CI
 still reports every failure.
+
+## Outcome (2026-10-17)
+Made public after a pre-flight review of everything that becomes visible with
+the code, not only the files:
+- **History:** all commits and messages scanned against the private denylist
+  and generic patterns: clean; authors are noreply only.
+- **Pull requests and comments:** clean.
+- **CI run logs:** six early runs contained the account's primary email,
+  printed from the push event payload before email privacy was enabled.
+  Those runs' logs were deleted; the runs and their results remain.
+- **Actions:** only GitHub-owned actions and the ten third-party actions this
+  repo uses may run; fork pull requests need approval before workflows run;
+  the default token is read-only.
+- **Container image:** remains private.
+
+Enabled on the public repo: CodeQL (extended queries), secret scanning with
+push protection, validity checks and generic patterns, Dependabot alerts and
+security updates, private vulnerability reporting, and a `main` ruleset
+(pull request required, squash only, all seven checks required, signed
+commits, linear history, no force-push or deletion, no bypass).
