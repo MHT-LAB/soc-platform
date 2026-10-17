@@ -17,7 +17,7 @@ before any paging or automation exists. Method: [design note 02](../design/02-ph
 ## By rule
 | Rule family | Source | n | Cause | Fix |
 |---|---|---|---|---|
-| Host firewall disabled | managed pack | 15 | The host firewall's own reload flushes and rebuilds its private chains (14 in 5 seconds) | Narrow false-positive exception: exact chain names, root, Linux. Managed rules can't be edited, so an exception is the only option |
+| Host firewall disabled | managed pack | 15 | The host firewall flushes and rebuilds its own chains on every rule change and reload (14 in 5 seconds; a full reload flushes ~40 chains twice) | False-positive exception: root flushing a single firewall-owned chain, nothing else on the line. Opening the firewall (`-F INPUT`, flush-all, `-P ACCEPT`), chained commands, impostor binaries and non-root still fire. Managed rules can't be edited, so an exception is the only option |
 | Recon burst | custom | 15 | Hourly boot-snapshot hook calling an architecture check (8); interactive admin sessions (7) | Exact-command exclusion in the rule (shipped, verified: no repeats since); lineage gate for the rest |
 | Canary file touched + file integrity hit | custom | 7 + 7 | One SSH-hardening session. Each file-integrity event fired **two** rules | Isolation removed from the Linux branch; the duplicate rule is retired |
 | Reverse shell | custom | 4 | The operator's AI agent probing a service port with `/dev/tcp`; a simulation | **Leave alone.** Must stay visible; lineage gate only |
@@ -34,3 +34,12 @@ before any paging or automation exists. Method: [design note 02](../design/02-ph
 - Page-lane volume on a normal operator day down by **70%**: rule fixes reach 52%; the work registry carries the rest. Until it ships, paging is limited by dedupe and severity.
 - No rule loses coverage of a recorded true-positive test: none of the fixes touch the reverse-shell, pipe-to-shell, scanner or persistence rules.
 - Every live change is approved by the owner before deployment.
+
+## Correction: the first exception was too narrow
+The first version excepted four chain names seen in the baseline. A live reload
+then flushed about forty firewall-owned chains and produced 50+ detections.
+The first "zero detections" check had run a minute after the reload, before
+the platform had indexed them. Two fixes: the exception now matches any single
+firewall-owned chain (tested against attack cases that must still fire), and
+every "no detections" check now waits five minutes. Re-test: the reload ran,
+zero detections.
