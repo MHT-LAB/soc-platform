@@ -7,8 +7,9 @@ in one console. An LLM analyst triages each case: whether it's the operator's
 own work, the indicators, related activity, ATT&CK mapping, and a short brief.
 A human incident commander gets paged immediately and makes the calls.
 
-> **Status:** Sprint 0, foundations. The pipeline, repo controls and a
-> health-check service are in place; no security data flows yet.
+> **Status:** Sprint 0 complete. Signed pipeline, hardened host, one public
+> path, and a tailnet-only console with live sensor status. Sprint 1 (alerts to
+> phone, case store) is next.
 > Twelve one-week sprints; progress is logged in [`docs/sprint-reviews/`](docs/sprint-reviews/README.md).
 
 ## Principles the code enforces
