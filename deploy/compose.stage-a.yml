@@ -1,0 +1,22 @@
+# Stage A edge: an outbound-only Cloudflare Tunnel from the self-hosted
+# container. No inbound ports are opened on the host or the router.
+# Stage B (VPS) swaps this file for a reverse-proxy overlay; nothing else changes.
+services:
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.1@sha256:a15a3b50b8dabd57ac2090e9484c0247dba9dfa1f0df4d298d4317f9d69eb2d5
+    command: ["tunnel", "--no-autoupdate", "run"]
+    restart: unless-stopped
+    # TUNNEL_TOKEN lives in a mode-600 file outside the repo, written by the
+    # operator from the secrets manager. It never appears in this file.
+    env_file:
+      - ${SOC_STATE_DIR:-/srv/soc}/env/tunnel.env
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 128m
