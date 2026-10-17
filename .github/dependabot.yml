@@ -11,6 +11,11 @@ updates:
     directory: /api
     schedule:
       interval: weekly
+    # The Python line is a deliberate decision (ADR 0003, requires-python);
+    # take digest and patch refreshes only, move minor versions by hand.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
