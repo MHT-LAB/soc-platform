@@ -61,8 +61,10 @@ if [[ -n "$denylist" ]]; then
       report "private denylist matched (terms hidden):"
       files | xargs -0 grep -nIiF -l -f "$terms" 2>/dev/null | sed 's/^/  in /'
     fi
-    if git log --format='%an%n%cn%n%s%n%b' 2>/dev/null | grep -qiF -f "$terms"; then
-      report "private denylist matched in commit messages or names (terms hidden)"
+    # Messages only. Author names are the public account profile name;
+    # author emails are enforced by the noreply rule above.
+    if git log --format='%s%n%b' 2>/dev/null | grep -qiF -f "$terms"; then
+      report "private denylist matched in commit messages (terms hidden)"
     fi
   fi
 else
