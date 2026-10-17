@@ -35,7 +35,16 @@ def tailnet_user(
 ) -> str:
     login = (tailscale_user_login or "").strip().lower()
     if not login:
-        raise HTTPException(status_code=403, detail="console is only available on the tailnet")
+        # No identity means either the request didn't come through the tailnet
+        # proxy, or it came from a tagged device, which acts as a service rather
+        # than a person. Both are refused; say so in a way an operator can act on.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "no tailnet user identity: open the console over Tailscale from a "
+                "personal (untagged) device"
+            ),
+        )
     allow = settings.console_allowlist
     if allow and login not in allow:
         raise HTTPException(status_code=403, detail="not on the console allowlist")
