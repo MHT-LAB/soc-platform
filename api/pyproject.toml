@@ -1,0 +1,46 @@
+[project]
+name = "soc-api"
+version = "0.0.1"
+description = "Ingest, case and console API for an AI-assisted SOC"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.143,<0.144",
+    "uvicorn[standard]>=0.54,<0.55",
+    "pydantic-settings>=2.16,<3",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13,<3",
+    "mypy>=2.4,<3",
+    "pytest>=9.1,<10",
+    "ruff>=0.17,<0.18",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/soc_api"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F: errors, I: import order, B: bugbear, S: bandit security rules, UP: modern syntax
+select = ["E", "F", "I", "B", "S", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # assert is how pytest works
+
+[tool.mypy]
+strict = true
+packages = ["soc_api"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

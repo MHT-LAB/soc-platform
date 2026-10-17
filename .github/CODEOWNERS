@@ -1,0 +1,5 @@
+# Every change needs the owner's review. Detection rules and CI definitions
+# are listed separately so the rule stays explicit as reviewers are added.
+*                   @MHT-LAB
+/detections/        @MHT-LAB
+/.github/           @MHT-LAB

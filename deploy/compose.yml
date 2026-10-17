@@ -1,0 +1,33 @@
+# One compose file for dev and prod. Stage-specific edges (tunnel now, reverse
+# proxy on a VPS later) are added with an override file, so moving hosts is
+# a data copy plus swapping one service.
+name: soc
+
+services:
+  api:
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    build:
+      context: ../api
+      args:
+        VERSION: dev
+    restart: unless-stopped
+    environment:
+      SOC_ENV: ${SOC_ENV:-prod}
+    # Bound to loopback only. The tunnel or proxy is the one way in.
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).status == 200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

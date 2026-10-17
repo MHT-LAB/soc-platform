@@ -1,0 +1,38 @@
+# secrets and local config: never committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+*.denylist
+denylist.txt
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# node (console, Sprint 3)
+node_modules/
+web/dist/
+
+# build and scan output
+sbom*.json
+*.sarif
+
+# runtime state (lives in /srv/soc on the host, never in the repo)
+state/
+backups/
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
