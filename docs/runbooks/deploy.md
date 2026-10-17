@@ -33,3 +33,21 @@ deploy/deploy.sh sha-<previous>
 `signature verification failed` means the image was not produced by the
 release workflow. **Treat that as a security event, not a glitch.** Don't
 bypass it. Check the release run in Actions and the registry's package history.
+
+## Console (tailnet only)
+The operations console is served at `/console` and is reachable **only** over
+the tailnet: `tailscale serve` on the host terminates HTTPS and forwards to the
+API on loopback, adding the caller's verified login. The public edge routes
+`/healthz` only, so `/console` returns 404 from the internet.
+
+```bash
+tailscale serve --bg http://127.0.0.1:8080     # once, on the host
+tailscale serve status                         # shows the tailnet URL
+```
+
+Optional host files (mode 600) read by the API container:
+
+| File | Contents |
+|---|---|
+| `/srv/soc/env/console.env` | `SOC_CONSOLE_USERS=login@example.com` to restrict console access |
+| `/srv/soc/env/lc.env` | `SOC_LC_OID=…` and `SOC_LC_API_KEY=…` (read-only key) for the sensor fleet panel |

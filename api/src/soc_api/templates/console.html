@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<meta name="robots" content="noindex, nofollow">
+<title>SOC Console</title>
+<link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true">
+      <circle cx="15" cy="15" r="13" class="ring1"></circle>
+      <circle cx="15" cy="15" r="8" class="ring2"></circle>
+      <circle cx="15" cy="15" r="3.2" class="core"></circle>
+    </svg>
+    <div><strong>SOC Console</strong><span>operations · v0</span></div>
+  </div>
+  <nav aria-label="Views">
+    <a class="on" href="/console">Operations</a>
+    <span class="soon">Cases</span>
+    <span class="soon">Fleet</span>
+    <span class="soon">Sources</span>
+  </nav>
+  <div class="right">
+    <span class="pill tailnet" title="Verified by Tailscale">tailnet · {{ user }}</span>
+    <span class="clock">{{ now }}</span>
+  </div>
+</header>
+
+<main>
+  <div class="head">
+    <h1>Operations</h1>
+    <p>Live state of the pipeline. Stages that aren't built yet say so.</p>
+  </div>
+
+  <section class="strip" aria-label="Summary">
+    <div class="tile">
+      <span class="label">Edge tunnel</span>
+      <strong class="{{ tunnel.state }}">{{ tunnel.state | upper }}</strong>
+      <span class="note">{% if tunnel.state == "up" %}{{ tunnel.connections }} connections{% else %}{{ tunnel.detail or "no connection" }}{% endif %}</span>
+    </div>
+    <div class="tile">
+      <span class="label">Sensors reporting</span>
+      {% if fleet.configured and not fleet.error %}
+      <strong class="{{ 'up' if fleet.online == fleet.sensors|length else 'warn' }}">{{ fleet.online }}/{{ fleet.sensors|length }}</strong>
+      <span class="note">endpoints and adapters</span>
+      {% elif fleet.error %}
+      <strong class="down">ERROR</strong><span class="note">{{ fleet.error }}</span>
+      {% else %}
+      <strong class="setup">SETUP</strong><span class="note">read-only key not connected</span>
+      {% endif %}
+    </div>
+    <div class="tile">
+      <span class="label">Running build</span>
+      <strong class="up mono">{{ settings.git_sha[:7] }}</strong>
+      <span class="note">{{ settings.version }}{% if digest %} · signature verified at deploy{% endif %}</span>
+    </div>
+    <div class="tile">
+      <span class="label">Sprint</span>
+      <strong class="accent">S0</strong>
+      <span class="note">foundations, in progress</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Pipeline</h2><span class="meta">refreshes every 30 s</span></div>
+    <ol class="flow">
+      {% for s in stages %}
+      <li class="stage {{ s.state }}">
+        <span class="dot"></span>
+        <strong>{{ s.name }}</strong>
+        <span class="state">{{ s.state }}</span>
+        <span class="note">{{ s.note }}</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </section>
+
+  <div class="cols">
+    <section class="card">
+      <div class="card-head"><h2>Sensor fleet</h2><span class="meta">read-only · cached 60 s</span></div>
+      {% if not fleet.configured %}
+      <div class="empty">
+        <strong>Connect the EDR platform</strong>
+        <p>Create a read-only API key, save it on the host as <code>/srv/soc/env/lc.env</code>, and redeploy. Sensors appear here with their platform and status.</p>
+      </div>
+      {% elif fleet.error %}
+      <div class="empty"><strong>Couldn't reach the sensor API</strong><p>{{ fleet.error }}. The rest of the console keeps working.</p></div>
+      {% else %}
+      <table>
+        <thead><tr><th>Sensor</th><th>Platform</th><th>Status</th><th class="r">Last seen (UTC)</th></tr></thead>
+        <tbody>
+        {% for s in fleet.sensors %}
+          <tr>
+            <td class="mono">{{ s.hostname }}</td>
+            <td>{{ s.platform }}</td>
+            <td><span class="chip {{ 'up' if s.online else 'down' }}">{{ 'online' if s.online else 'offline' }}</span></td>
+            <td class="r mono dim">{{ s.last_seen }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Build and deploy</h2></div>
+      <dl class="kv">
+        <dt>Version</dt><dd class="mono">{{ settings.version }}</dd>
+        <dt>Commit</dt><dd class="mono">{{ settings.git_sha[:12] }}</dd>
+        <dt>Image digest</dt><dd class="mono">{% if digest %}{{ digest[:19] }}…{% else %}local build{% endif %}</dd>
+        <dt>Verified by</dt><dd>signature, SBOM attestation, running digest</dd>
+        <dt>Public paths</dt><dd class="mono">/healthz only</dd>
+      </dl>
+      <div class="card-head sub"><h2>Sprints</h2></div>
+      <ol class="sprints">
+        {% for n, title, state in sprints %}
+        <li class="{{ state }}"><span class="mono">{{ n }}</span>{{ title }}<em>{{ state }}</em></li>
+        {% endfor %}
+      </ol>
+    </section>
+  </div>
+
+  <footer>Tailnet only. Not reachable from the public internet.</footer>
+</main>
+</body>
+</html>

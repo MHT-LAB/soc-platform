@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
 
+from soc_api import console
 from soc_api.config import Settings, get_settings
 
 # Sent on every response. The API serves JSON only, so the content policy can
@@ -39,8 +40,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         response = await call_next(request)
-        response.headers.update(SECURITY_HEADERS)
+        # A route may set a narrower policy of its own (the console does);
+        # every other response gets the deny-everything default.
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
         return response
+
+    # Routes that depend on settings see the same instance the app was built with.
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.include_router(console.router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
