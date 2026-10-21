@@ -5,7 +5,10 @@ from soc_api.main import SECURITY_HEADERS, create_app
 
 
 def client(env: str = "prod") -> TestClient:
-    return TestClient(create_app(Settings(env=env, version="1.2.3", git_sha="abc1234")))
+    settings = Settings(
+        env=env, console_users="operator@example.com", version="1.2.3", git_sha="abc1234"
+    )
+    return TestClient(create_app(settings))
 
 
 def test_healthz_ok() -> None:

@@ -54,6 +54,11 @@ IDENTITY=(
 mkdir -p "$STATE/env"
 touch "$LOG"
 
+# The API refuses to start in prod without a console allowlist. Say so here,
+# before anything on the host changes, instead of via a failed health check.
+grep -qE '^SOC_CONSOLE_USERS=.*[^[:space:],]' "$STATE/env/console.env" 2>/dev/null \
+  || die "$STATE/env/console.env must set SOC_CONSOLE_USERS=<login>[,<login>...]"
+
 # --- 1-2. verify signature and SBOM attestation ---------------------------------
 log "verifying $REPO:$TAG"
 verified="$(cosign verify "${IDENTITY[@]}" --output json "$REPO:$TAG")" \
