@@ -164,6 +164,18 @@ echo "more" >> "$R/a.txt"; git -C "$R" add -A
 GIT_AUTHOR_EMAIL="$BAD_EMAIL" GIT_COMMITTER_EMAIL="$BAD_EMAIL" git -C "$R" commit -q -m "wrong author"
 gate; check "non-noreply author or committer fails" 1
 
+# Dependabot signs off as support@github.com; that must not fail its PRs.
+new_repo dependabot-signoff;  commit api/uv.lock "bump" "Bump x from 1 to 2
+
+Signed-off-by: dependabot[bot] <support${AT}github.com>"
+gate; check "Dependabot sign-off address is allowed" 0
+
+# --- .gitattributes must not blind the gate ---------------------------------------
+new_repo attrs-tree;          commit .gitattributes "* -diff";  commit notes.txt "server $PRIVATE_IP"
+gate; check "private IP in a file marked binary by .gitattributes fails" 1
+new_repo attrs-diff;          commit .gitattributes "* -diff";  commit leak.txt "has $TERM_X";  remove leak.txt
+gate; check "term added then removed under '* -diff' still fails" 1
+
 # --- S8: CI logs must not echo the matched text -----------------------------------
 new_repo quiet;               commit leak.txt "server at $PRIVATE_IP and $TERM_X"
 gate GITHUB_ACTIONS=true;     check "leak fails in CI" 1

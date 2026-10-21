@@ -29,6 +29,9 @@
 #   - Anything that cannot run is a failure, never a pass.
 #   - In CI the log is public and outlives a force-push, so never print matched
 #     text there. Locally, print it so the fix is obvious.
+#   - Scan everything as text. A one-line .gitattributes ("* -diff") makes git
+#     treat files as binary, which would hide them from `git grep -I` and from
+#     the diff; --text / -a close that.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -53,9 +56,10 @@ generic=(
   '(^|[^0-9.])172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}'  # RFC 1918
   '(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}'  # CGNAT / mesh VPN
 )
-# Email addresses, except GitHub noreply and documentation domains.
+# Email addresses, except GitHub noreply, documentation domains, and GitHub's own
+# addresses (Dependabot signs off its commits as support@github.com).
 email_re='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
-email_ok='@(users\.noreply\.github\.com|example\.(com|org|net))$'
+email_ok='@(users\.noreply\.github\.com|example\.(com|org|net))$|(^|:)(noreply|support)@github\.com$'
 
 # --- denylist ------------------------------------------------------------------
 terms="$tmp/terms"
@@ -113,7 +117,7 @@ fi
 tree_grep() {
   local label="$1" out rc=0
   shift
-  out="$(git grep -nI "$@" -- . "${excl[@]}")" || rc=$?
+  out="$(git grep -n --text "$@" -- . "${excl[@]}")" || rc=$?
   if [[ $rc -gt 1 ]]; then
     report "git grep failed (exit $rc) while checking files: $label"
   elif [[ -n "$out" ]]; then
@@ -131,7 +135,7 @@ for pattern in "${generic[@]}"; do
 done
 
 rc=0
-emails="$(git grep -nIoE -e "$email_re" -- . "${excl[@]}")" || rc=$?
+emails="$(git grep -n --text -oE -e "$email_re" -- . "${excl[@]}")" || rc=$?
 if [[ $rc -gt 1 ]]; then
   report "git grep failed while checking email addresses"
 else
@@ -144,7 +148,7 @@ fi
 
 if [[ -s "$terms" ]]; then
   rc=0
-  out="$(git grep -nIiF -l -f "$terms" -- . "${excl[@]}")" || rc=$?
+  out="$(git grep -n --text -iF -l -f "$terms" -- . "${excl[@]}")" || rc=$?
   if [[ $rc -gt 1 ]]; then
     report "git grep failed while checking the denylist"
   elif [[ -n "$out" ]]; then
@@ -159,17 +163,17 @@ check_text() {
   local label="$1" file="$2" pattern found
   [[ -s "$file" ]] || return 0
   for pattern in "${generic[@]}"; do
-    if grep -qE -e "$pattern" "$file"; then
+    if grep -qaE -e "$pattern" "$file"; then
       report "$label: generic pattern matched ($pattern)"
-      if [[ -z "$in_ci" ]]; then grep -nE -e "$pattern" "$file" | head -5; fi
+      if [[ -z "$in_ci" ]]; then grep -naE -e "$pattern" "$file" | head -5; fi
     fi
   done
-  found="$(grep -oE "$email_re" "$file" | grep -viE "$email_ok" || true)"
+  found="$(grep -oaE "$email_re" "$file" | grep -viE "$email_ok" || true)"
   if [[ -n "$found" ]]; then
     report "$label: email address"
     if [[ -z "$in_ci" ]]; then printf '%s\n' "$found"; fi
   fi
-  if [[ -s "$terms" ]] && grep -qiF -f "$terms" "$file"; then
+  if [[ -s "$terms" ]] && grep -qaiF -f "$terms" "$file"; then
     report "$label: private denylist matched (terms hidden)"
   fi
 }
@@ -177,7 +181,7 @@ check_text() {
 # Lines added by any commit in the range, found by walking each diff: a "+"
 # line only counts after its "@@" header, so file headers are not mistaken for
 # content. A line added then removed in the same range still appears here.
-git log -p -U0 --no-renames --no-color --no-ext-diff --format= "$range" > "$tmp/patch"
+git log -p -U0 --text --no-textconv --no-renames --no-color --no-ext-diff --format= "$range" > "$tmp/patch"
 awk '/^diff --git /{h=0;next} /^@@ /{h=1;next} h && /^\+/ {print substr($0,2)}' "$tmp/patch" > "$tmp/added"
 check_text "added lines in commits $range" "$tmp/added"
 
