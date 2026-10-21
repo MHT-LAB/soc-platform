@@ -3,10 +3,13 @@
 #
 #   check-tag-on-main.sh <commit> [main-ref]     (main-ref defaults to origin/main)
 #
-# deploy.sh trusts any image signed by release.yml on a v*.*.* tag. Without this
-# check, a tag pushed on an unmerged PR commit would be built, signed and
-# deployable even though it never passed review. Anything that cannot be
-# checked (missing ref, shallow clone) is a failure, never a pass.
+# Catches a mistake: tagging a commit that is not on main (unreviewed, unmerged).
+# It is NOT a security boundary on its own. On a tag push GitHub runs the
+# release.yml stored in the tagged commit, so whoever can tag an arbitrary
+# commit also controls whether this check runs. The boundaries are the tag
+# rulesets (who may create v*.*.* tags) and deploy.sh refusing images whose
+# signed source commit is not on main. Anything that cannot be checked
+# (missing ref, shallow clone) is a failure, never a pass.
 set -euo pipefail
 
 sha="${1:?usage: check-tag-on-main.sh <commit> [main-ref]}"

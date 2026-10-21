@@ -1,13 +1,14 @@
 # Release runbook
 
 `deploy.sh` trusts any image signed by `release.yml` on `main` or on a `v*.*.*`
-tag. Three controls keep a tag from being a back door:
+tag. These controls keep a tag from being a back door:
 
 | Control | Where | What it stops |
 |---|---|---|
-| Tag guard | `scripts/check-tag-on-main.sh`, first step of `release.yml` on tag pushes | A tag on a commit that is not on `main` (unreviewed, unmerged) being built and signed |
+| Tag guard | `scripts/check-tag-on-main.sh`, first step of `release.yml` on tag pushes | **Mistakes only:** tagging a commit that is not on `main`. It cannot stop a deliberate bypass, because GitHub runs the `release.yml` stored in the tagged commit, and that copy can leave the guard out. |
 | Image scan | `release.yml`, between push and sign | A pushed image with a fixable CRITICAL or HIGH vulnerability getting a signature. No signature means `deploy.sh` refuses it |
-| Tag rulesets | `.github/rulesets/*.json` | Moving or deleting a published version tag; creating one without repo-admin rights |
+| Tag rulesets | `.github/rulesets/*.json` | Moving or deleting a published version tag; creating one without repo-admin rights. **This is the boundary today.** |
+| Deploy-side source check | `deploy.sh` (planned) | An image whose signed source commit is not on `main`. Checked on the host, where a branch cannot change it. |
 
 ## Apply the tag rulesets (repo admin, once)
 

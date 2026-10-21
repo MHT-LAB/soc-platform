@@ -29,8 +29,8 @@ jobs:
           persist-credentials: false
           fetch-depth: 0   # the tag guard below needs main's history
 
-      # deploy.sh trusts anything signed here on a v*.*.* tag, so a tag must
-      # point at a commit that is already on main (reviewed and merged).
+      # Catches tagging a commit that is not on main. Not a boundary by itself:
+      # a tagged commit carries its own copy of this file. See docs/runbooks/release.md.
       - name: release tags must point at a commit on main
         if: startsWith(github.ref, 'refs/tags/')
         run: scripts/check-tag-on-main.sh "$GITHUB_SHA"
