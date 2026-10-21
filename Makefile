@@ -1,4 +1,4 @@
-.PHONY: setup test lint scrub up down
+.PHONY: setup test lint scrub test-scrub up down
 
 setup:            ## install dev dependencies and git hooks
 	cd api && uv sync
@@ -13,6 +13,9 @@ lint:             ## ruff, formatting, strict types, Dockerfile lint
 
 scrub:            ## block private identifiers
 	scripts/scrub-check.sh
+
+test-scrub:       ## tests for the scrub gate itself (about a minute)
+	scripts/test-scrub-check.sh
 
 up:               ## run the stack locally (needs Docker)
 	docker compose -f deploy/compose.yml up -d --build

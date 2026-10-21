@@ -5,6 +5,9 @@ name: ci
 
 on:
   pull_request:
+    # "edited" re-runs the gate when a PR title or body changes: on squash merge
+    # they become the commit message on main, so they must be scanned too.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
   workflow_dispatch:
@@ -163,6 +166,14 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: scrub gate self-test
+        run: scripts/test-scrub-check.sh
       - run: scripts/scrub-check.sh
+        # Values go in through env, never inline in the script: PR text is
+        # attacker-controlled and must not be parsed as shell.
         env:
           SCRUB_DENYLIST: ${{ secrets.SCRUB_DENYLIST }}
+          SCRUB_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SCRUB_DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && '1' || '' }}
+          SCRUB_PR_TITLE: ${{ github.event.pull_request.title }}
+          SCRUB_PR_BODY: ${{ github.event.pull_request.body }}
