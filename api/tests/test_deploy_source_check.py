@@ -7,7 +7,6 @@ host changes: no image.env, no compose call.
 """
 
 import json
-import os
 import shutil
 import stat
 import subprocess
@@ -228,8 +227,11 @@ def test_the_label_text_is_never_echoed(tmp_path: Path) -> None:
     assert "evil-injected-text" not in r.stdout + r.stderr
 
 
-def test_test_bin_is_not_set_by_the_script_itself() -> None:
-    """SOC_TEST_BIN must only come from the caller's environment."""
+def test_the_test_hook_is_refused_for_root_before_path_changes() -> None:
+    """The real deploy runs as root; the PATH hook must be dead there. (Tests never
+    run as root, so this checks the guard is present and comes first.)"""
     text = DEPLOY.read_text()
-    assert "SOC_TEST_BIN=" not in text
-    assert os.environ.get("SOC_TEST_BIN") is None
+    guard = text.index('if [[ -n "${SOC_TEST_BIN:-}" && "$EUID" -eq 0 ]]')
+    path = text.index("export PATH=")
+    assert guard < path
+    assert "SOC_TEST_BIN=" not in text  # the script never sets it itself

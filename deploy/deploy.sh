@@ -25,8 +25,14 @@
 #   SOC_TEST_BIN    TESTS ONLY: directory searched first for cosign, docker, curl
 set -euo pipefail
 
+# SOC_TEST_BIN lets the tests put fake cosign/docker first. It is refused for
+# root, which is how the real deploy runs, so it can never swap tools on a host.
+# $EUID is a bash builtin, checked before PATH changes, so no fake "id" can lie.
+if [[ -n "${SOC_TEST_BIN:-}" && "$EUID" -eq 0 ]]; then
+  echo "FAILED: SOC_TEST_BIN is for tests only and is refused for root" >&2
+  exit 1
+fi
 # Don't depend on how the shell was opened (pct enter gives a minimal PATH).
-# SOC_TEST_BIN lets the tests put fake cosign/docker first; it is unset in use.
 export PATH="${SOC_TEST_BIN:+$SOC_TEST_BIN:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Compose reads SOC_ENV from the shell; never let a stray SOC_ENV=dev in the
 # operator's terminal turn the allowlist off and the API docs on.
