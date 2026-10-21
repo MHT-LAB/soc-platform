@@ -20,7 +20,16 @@ Split the project in two:
 A scrub gate (`scripts/scrub-check.sh`) runs in pre-commit and CI. It checks
 generic patterns (private addresses, home paths, stray emails, commit author
 addresses) plus a private denylist that is passed in as a CI secret and never
-printed.
+printed. It scans the tracked files, every line added by every commit in the
+pull request (so a name added and removed within one PR is still caught, since
+it would stay public in the PR ref), the commit messages, and the PR title and
+body (a squash merge turns them into the commit message on `main`).
+
+The gate fails closed. In CI a missing or empty denylist fails the check; the
+only exception is a Dependabot PR that changes dependency files alone. Anything
+the gate cannot run is a failure, not a pass. In CI it never prints the matched
+text, because public CI logs outlive a force-push. `scripts/test-scrub-check.sh`
+tests the gate itself against planted leaks and runs in CI (`make test-scrub`).
 
 ## Consequences
 - Going public is flipping a switch, not rewriting history.
