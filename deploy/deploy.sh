@@ -7,6 +7,10 @@
 #    from this repository's release workflow, on main or a version tag, run by a
 #    push. Anything else is refused.
 # 2. Verify the signed SBOM attestation on the same image.
+# 2b. Require the commit the image was built from to be on main in this host's
+#    clone, and make cosign prove the signature names exactly that commit. A
+#    tag or branch run of the release workflow also gets a valid signature, so
+#    the signature alone doesn't prove the code was reviewed and merged.
 # 3. Pin the deployment to the verified digest (never the mutable tag), so the
 #    image can't be swapped between verification and pull.
 # 4. Start the stack, wait for health, and confirm the running container uses
@@ -17,10 +21,13 @@
 #   SOC_REPO        image repository     ghcr.io/mht-lab/soc-api
 #   SOC_SOURCE      source repository    MHT-LAB/soc-platform
 #   SOC_OVERLAY     edge overlay file    compose.stage-a.yml
+#   SOC_SOURCE_DIR  git clone to check   the repository this script lives in
+#   SOC_TEST_BIN    TESTS ONLY: directory searched first for cosign, docker, curl
 set -euo pipefail
 
 # Don't depend on how the shell was opened (pct enter gives a minimal PATH).
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# SOC_TEST_BIN lets the tests put fake cosign/docker first; it is unset in use.
+export PATH="${SOC_TEST_BIN:+$SOC_TEST_BIN:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Compose reads SOC_ENV from the shell; never let a stray SOC_ENV=dev in the
 # operator's terminal turn the allowlist off and the API docs on.
 export SOC_ENV=prod
@@ -75,6 +82,25 @@ DIGEST="$(printf '%s' "$verified" | python3 -c 'import sys, json; print(json.loa
 cosign verify-attestation --type spdxjson "${IDENTITY[@]}" "$REPO@$DIGEST" > /dev/null \
   || die "SBOM attestation verification failed"
 log "verified $REPO@$DIGEST"
+
+# --- 2b. the signed image must come from a commit that is on main -----------------
+# The image records the commit it was built from. Trust that label only after
+# both checks: the commit is on main in this host's clone, and cosign confirms the
+# signing certificate names that exact commit (a forged label fails there).
+# Nothing on the host has changed yet, so a refusal here leaves it as it was.
+SRC_DIR="${SOC_SOURCE_DIR:-$HERE/..}"
+REV="$(docker buildx imagetools inspect "$REPO@$DIGEST" --format '{{json .Image.Config.Labels}}' \
+  | python3 -c 'import sys, json; print(json.load(sys.stdin).get("org.opencontainers.image.revision", ""))')" \
+  || die "could not read the image's source commit label"
+# Never echo the label: it is attacker-controlled text until it passes this check.
+[[ "$REV" =~ ^[0-9a-f]{40}$ ]] || die "the image has no valid source commit label"
+git -C "$SRC_DIR" fetch -q origin main \
+  || die "could not fetch origin/main in $SRC_DIR to check the image's source commit"
+git -C "$SRC_DIR" merge-base --is-ancestor "$REV" origin/main \
+  || die "the image was built from $REV, which is not on main"
+cosign verify "${IDENTITY[@]}" --certificate-github-workflow-sha "$REV" "$REPO@$DIGEST" > /dev/null \
+  || die "the signature does not name commit $REV; the image's commit label is not what was signed"
+log "source commit $REV is on main"
 
 # --- 3. pin to the digest, keep the previous one for rollback -----------------------
 PREVIOUS=""
