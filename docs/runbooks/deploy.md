@@ -45,9 +45,9 @@ tailscale serve --bg http://127.0.0.1:8080     # once, on the host
 tailscale serve status                         # shows the tailnet URL
 ```
 
-Optional host files (mode 600) read by the API container:
+Host files (mode 600) read by the API container:
 
 | File | Contents |
 |---|---|
-| `/srv/soc/env/console.env` | `SOC_CONSOLE_USERS=login@example.com` to restrict console access |
-| `/srv/soc/env/lc.env` | `SOC_LC_OID=…` and `SOC_LC_API_KEY=…` (read-only key) for the sensor fleet panel |
+| `/srv/soc/env/console.env` | **Required.** `SOC_CONSOLE_USERS=login@example.com`, the logins allowed into the console. The API refuses to start in prod without it, and `deploy.sh` stops before changing anything if it is missing. |
+| `/srv/soc/env/lc.env` (optional) | `SOC_LC_OID=…` and `SOC_LC_API_KEY=…` (read-only key) for the sensor fleet panel |

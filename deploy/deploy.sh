@@ -21,6 +21,9 @@ set -euo pipefail
 
 # Don't depend on how the shell was opened (pct enter gives a minimal PATH).
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Compose reads SOC_ENV from the shell; never let a stray SOC_ENV=dev in the
+# operator's terminal turn the allowlist off and the API docs on.
+export SOC_ENV=prod
 
 TAG="${1:?usage: deploy.sh <tag>}"
 STATE="${SOC_STATE_DIR:-/srv/soc}"
@@ -53,6 +56,13 @@ IDENTITY=(
 
 mkdir -p "$STATE/env"
 touch "$LOG"
+
+# The API refuses to start in prod without a console allowlist. Say so here,
+# before anything on the host changes, instead of via a failed health check.
+# A login is anything other than quotes, spaces and commas after the "=".
+CONSOLE_USERS_LINE="^SOC_CONSOLE_USERS=[[:space:]\"']*[^[:space:],\"']"
+grep -qE "$CONSOLE_USERS_LINE" "$STATE/env/console.env" 2>/dev/null \
+  || die "$STATE/env/console.env must set SOC_CONSOLE_USERS=<login>[,<login>...]"
 
 # --- 1-2. verify signature and SBOM attestation ---------------------------------
 log "verifying $REPO:$TAG"

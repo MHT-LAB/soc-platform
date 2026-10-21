@@ -94,3 +94,39 @@ def test_partial_fleet_is_flagged_on_the_console(monkeypatch: pytest.MonkeyPatch
     r = client().get("/console", headers=TAILNET)
     assert r.status_code == 200
     assert "Partial fleet" in r.text and "1/1+" in r.text
+
+
+# --- identity: a forged Tailscale-User-Login header must not get anyone in ----------
+
+
+def prod_client(users: str = "operator@example.com") -> TestClient:
+    return TestClient(
+        create_app(Settings(env="prod", console_users=users, version="edge", git_sha="a" * 40))
+    )
+
+
+def test_forged_login_header_is_refused_in_prod(fake_probes: None) -> None:
+    c = prod_client()
+    forged = [
+        "attacker@example.com",
+        "operator@example.org",
+        "evil-operator@example.com",
+        "attacker@example.com, operator@example.com",
+        "operator@example.com,attacker@example.com",
+    ]
+    for login in forged:
+        r = c.get("/console", headers={"Tailscale-User-Login": login})
+        assert r.status_code == 403, login
+        assert "not on the console allowlist" in r.text
+    assert c.get("/console").status_code == 403
+    assert c.get("/console", headers={"Tailscale-User-Login": "  "}).status_code == 403
+    assert (
+        c.get("/console/console.css", headers={"Tailscale-User-Login": forged[0]}).status_code
+        == 403
+    )
+
+
+def test_allowlisted_login_gets_in_ignoring_case_and_spaces(fake_probes: None) -> None:
+    c = prod_client("Operator@Example.com , second@example.com")
+    for login in ("operator@example.com", "OPERATOR@EXAMPLE.COM", "second@example.com"):
+        assert c.get("/console", headers={"Tailscale-User-Login": login}).status_code == 200
