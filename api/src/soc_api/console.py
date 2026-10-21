@@ -2,9 +2,11 @@
 
 Access model: `tailscale serve` terminates HTTPS on the tailnet and forwards to
 the API on loopback, adding the caller's verified login in the
-Tailscale-User-Login header. The public edge only routes /healthz, so these
-paths are unreachable from the internet; requiring the header is the second
-layer. Real logins and roles arrive with SSO in Sprint 3.
+Tailscale-User-Login header and removing any value a client sent itself. The
+header is only trustworthy on that path: the console must never be reachable
+except through `tailscale serve`. Today the public edge's path rule is what
+keeps it off the internet; the allowlist limits who on the tailnet gets in.
+Real logins and roles arrive with SSO in Sprint 3.
 """
 
 from pathlib import Path
