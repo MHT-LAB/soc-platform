@@ -154,7 +154,9 @@ async def sensor_fleet(
         # Never echo response bodies: they could contain tokens or tenant data.
         return Fleet(configured=True, error=type(exc).__name__)
 
-    online_ids = {str(s.get("sid")) for s in online}
+    # A row without a sensor id can't be matched to anything, so it is never
+    # counted online (str(None) would otherwise make every id-less row match).
+    online_ids = {str(s["sid"]) for s in online if s.get("sid") is not None}
     sensors = []
     for s in everyone:
         hostname = str(s.get("hostname", "?"))
@@ -164,7 +166,7 @@ async def sensor_fleet(
             Sensor(
                 hostname=hostname,
                 platform=platform_name(as_int(s.get("plat"))),
-                online=str(s.get("sid")) in online_ids,
+                online=s.get("sid") is not None and str(s["sid"]) in online_ids,
                 last_seen=str(s.get("alive", "")),
             )
         )
