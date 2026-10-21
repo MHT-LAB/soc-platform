@@ -27,6 +27,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0   # the tag guard below needs main's history
+
+      # deploy.sh trusts anything signed here on a v*.*.* tag, so a tag must
+      # point at a commit that is already on main (reviewed and merged).
+      - name: release tags must point at a commit on main
+        if: startsWith(github.ref, 'refs/tags/')
+        run: scripts/check-tag-on-main.sh "$GITHUB_SHA"
 
       - name: lowercase image name
         run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
@@ -58,6 +65,16 @@ jobs:
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             GIT_SHA=${{ github.sha }}
+
+      # Scan the image exactly as pushed, before it is signed. A failed scan stops
+      # the job here, so the image never gets a signature and deploy.sh refuses it.
+      - name: scan the pushed image (trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
 
       - name: SBOM (syft, SPDX)
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
