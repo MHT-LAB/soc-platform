@@ -15,6 +15,7 @@ from soc_api.config import Settings
 
 PROBE_TIMEOUT = 3.0
 FLEET_CACHE_SECONDS = 60
+MAX_PAGES = 50  # hard stop on runaway pagination
 
 LC_JWT_URL = "https://jwt.limacharlie.io"
 LC_API = "https://api.limacharlie.io/v1"
@@ -40,6 +41,18 @@ def platform_name(code: int) -> str:
     return PLATFORMS.get(code, f"Adapter 0x{code:08X}")
 
 
+def as_int(value: object, default: int = 0) -> int:
+    """Best-effort int for values from outside APIs. Odd data (None, a list, text)
+    becomes the default instead of an exception, so it shows up as a red or
+    unknown light rather than a 500."""
+    if isinstance(value, int | float | str):
+        try:
+            return int(value)
+        except (ValueError, OverflowError):
+            pass
+    return default
+
+
 @dataclass
 class TunnelStatus:
     state: str  # "up" | "down" | "unknown"
@@ -61,6 +74,8 @@ class Fleet:
     sensors: list[Sensor] = field(default_factory=list)
     error: str = ""
     checked_at: float = 0.0
+    # True when pagination stopped at MAX_PAGES, so the list may be missing sensors.
+    partial: bool = False
 
     @property
     def online(self) -> int:
@@ -73,7 +88,10 @@ async def tunnel_status(settings: Settings) -> TunnelStatus:
         async with httpx2.AsyncClient(timeout=PROBE_TIMEOUT) as client:
             r = await client.get(settings.tunnel_ready_url)
         body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        n = int(body.get("readyConnections", 0))
+        # A 200 with a body we can't read says nothing about the tunnel: unknown, not down.
+        n = as_int(body.get("readyConnections", 0), -1) if isinstance(body, dict) else -1
+        if n < 0:
+            return TunnelStatus("unknown", 0, "unexpected response")
         if r.status_code == 200 and n > 0:
             return TunnelStatus("up", n)
         return TunnelStatus("down", n, f"HTTP {r.status_code}")
@@ -86,22 +104,27 @@ _fleet_cache: Fleet | None = None
 
 async def _list_sensors(
     client: httpx2.AsyncClient, oid: str, headers: dict[str, str], online_only: bool
-) -> list[dict[str, object]]:
-    """All pages of GET /sensors/{oid}. The online filter is `is_online_only`;
-    unknown parameters are silently ignored by the API, so a wrong name returns
-    every sensor (a bug this project shipped once; see test_fleet.py)."""
+) -> tuple[list[dict[str, object]], bool]:
+    """All pages of GET /sensors/{oid}, plus whether the list is complete. The
+    online filter is `is_online_only`; unknown parameters are silently ignored by
+    the API, so a wrong name returns every sensor (a bug this project shipped
+    once; see test_fleet.py). Rows that are not objects are skipped."""
     out: list[dict[str, object]] = []
     params: dict[str, str] = {"is_online_only": "true"} if online_only else {}
-    for _ in range(50):  # hard stop on runaway pagination
+    for _ in range(MAX_PAGES):
         r = await client.get(f"{LC_API}/sensors/{oid}", headers=headers, params=params)
         r.raise_for_status()
         body = r.json()
-        out.extend(body.get("sensors", []))
+        if not isinstance(body, dict):
+            raise ValueError("unexpected response shape")
+        rows = body.get("sensors", [])
+        if isinstance(rows, list):
+            out.extend(row for row in rows if isinstance(row, dict))
         token = body.get("continuation_token")
         if not token:
-            break
-        params = {**params, "continuation_token": token}
-    return out
+            return out, True
+        params = {**params, "continuation_token": str(token)}
+    return out, False
 
 
 async def sensor_fleet(
@@ -123,13 +146,15 @@ async def sensor_fleet(
             )
             tok.raise_for_status()
             headers = {"Authorization": f"Bearer {tok.json()['jwt']}"}
-            everyone = await _list_sensors(client, oid, headers, online_only=False)
-            online = await _list_sensors(client, oid, headers, online_only=True)
-    except (httpx2.HTTPError, KeyError, ValueError) as exc:
+            everyone, everyone_complete = await _list_sensors(
+                client, oid, headers, online_only=False
+            )
+            online, online_complete = await _list_sensors(client, oid, headers, online_only=True)
+    except (httpx2.HTTPError, KeyError, ValueError, TypeError) as exc:
         # Never echo response bodies: they could contain tokens or tenant data.
         return Fleet(configured=True, error=type(exc).__name__)
 
-    online_ids = {s.get("sid") for s in online}
+    online_ids = {str(s.get("sid")) for s in online}
     sensors = []
     for s in everyone:
         hostname = str(s.get("hostname", "?"))
@@ -138,13 +163,18 @@ async def sensor_fleet(
         sensors.append(
             Sensor(
                 hostname=hostname,
-                platform=platform_name(int(str(s.get("plat", 0)))),
-                online=s.get("sid") in online_ids,
+                platform=platform_name(as_int(s.get("plat"))),
+                online=str(s.get("sid")) in online_ids,
                 last_seen=str(s.get("alive", "")),
             )
         )
     sensors.sort(key=lambda s: (not s.online, s.hostname))
-    _fleet_cache = Fleet(configured=True, sensors=sensors, checked_at=time.monotonic())
+    _fleet_cache = Fleet(
+        configured=True,
+        sensors=sensors,
+        checked_at=time.monotonic(),
+        partial=not (everyone_complete and online_complete),
+    )
     return _fleet_cache
 
 

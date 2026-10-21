@@ -76,3 +76,21 @@ def test_unconfigured_fleet_shows_setup_state(monkeypatch: pytest.MonkeyPatch) -
     assert r.status_code == 200
     assert "Connect the EDR platform" in r.text
     assert "UNKNOWN" in r.text
+
+
+def test_partial_fleet_is_flagged_on_the_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def tunnel(_: Settings) -> status.TunnelStatus:
+        return status.TunnelStatus("up", 4)
+
+    async def fleet(_: Settings) -> status.Fleet:
+        return status.Fleet(
+            configured=True,
+            sensors=[status.Sensor("ws-demo-01", "Linux", True, "2026-10-17 18:00:00")],
+            partial=True,
+        )
+
+    monkeypatch.setattr(status, "tunnel_status", tunnel)
+    monkeypatch.setattr(status, "sensor_fleet", fleet)
+    r = client().get("/console", headers=TAILNET)
+    assert r.status_code == 200
+    assert "Partial fleet" in r.text and "1/1+" in r.text
