@@ -55,7 +55,15 @@ tailscale serve status                         # shows the tailnet URL
 makes `/console` on port 8080 disappear. Repoint `tailscale serve` to 8081 right
 after the deploy (`tailscale serve reset` then the command above), or the tailnet
 URL will return 404 until you do. The tunnel's readiness endpoint is now published
-on `127.0.0.1:2000` for the console to read.
+on `127.0.0.1:2000` for the console to read. `tailscale serve reset` clears every
+serve rule on the host; check `tailscale serve status` first and re-add any others.
+
+**Rollback across this change is partial.** The compose files come from the host's
+clone, so a rollback to an image built before console isolation starts the public
+app fine but the `console` service fails (that image has no `soc_api.console_main`),
+and `deploy.sh` logs "rollback ALSO unhealthy". The public edge keeps serving
+`/healthz`; only the console is down. Fix forward, or check out the older commit in
+`/opt/soc-platform` before rolling back.
 
 Acceptance checks on the host after a deploy (all must hold):
 

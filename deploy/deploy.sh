@@ -14,7 +14,8 @@
 # 3. Pin the deployment to the verified digest (never the mutable tag), so the
 #    image can't be swapped between verification and pull.
 # 4. Start the stack (public api and host-network console), wait for both to be
-#    healthy, and confirm both containers use exactly the verified digest. On any failure, roll back to the previous one.
+#    healthy, and confirm both containers use exactly the verified digest. On any
+#    failure, roll back to the previous one.
 #
 # Environment (defaults suit the Stage A container):
 #   SOC_STATE_DIR   state root           /srv/soc

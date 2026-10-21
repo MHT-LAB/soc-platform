@@ -146,7 +146,10 @@ jobs:
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 1; done
           docker logs smoke; exit 1
       - name: console isolation (compose services, tunnel-side probe)
-        run: scripts/test-console-isolation.sh soc-api:ci
+        run: |
+          # The smoke container holds 127.0.0.1:8080, which compose's api needs.
+          docker rm -f smoke > /dev/null
+          scripts/test-console-isolation.sh soc-api:ci
       - name: public app starts in prod without a console allowlist
         run: |
           docker run -d --name pubnoallow --read-only --tmpfs /tmp --cap-drop ALL -p 127.0.0.1:8090:8080 soc-api:ci
