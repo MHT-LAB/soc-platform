@@ -86,3 +86,96 @@ def test_api_failure_reports_error_without_leaking_body() -> None:
 def test_unconfigured_without_key() -> None:
     fleet = asyncio.run(status.sensor_fleet(Settings()))
     assert fleet.configured is False
+
+
+def run_fleet(handler: object) -> status.Fleet:
+    transport = httpx2.MockTransport(handler)  # type: ignore[arg-type]
+    return asyncio.run(status.sensor_fleet(settings(), transport=transport))
+
+
+def test_odd_sensor_values_degrade_instead_of_raising() -> None:
+    rows = [
+        {"sid": "s1", "hostname": "ws-demo-01", "plat": None, "alive": "2026-10-17 18:00:00"},
+        {"sid": ["not", "hashable"], "hostname": "ws-demo-02", "plat": "linux"},
+        {"sid": "s3", "hostname": "gw-demo", "plat": [1]},
+        "not an object",
+    ]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "jwt.limacharlie.io":
+            return httpx2.Response(200, json={"jwt": "test-token"})
+        return httpx2.Response(200, json={"sensors": rows})
+
+    fleet = run_fleet(handler)
+    assert fleet.error == "" and len(fleet.sensors) == 3
+    assert {s.platform for s in fleet.sensors} == {"Adapter 0x00000000"}
+
+
+def test_unexpected_response_shape_is_an_error_light_not_a_crash() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "jwt.limacharlie.io":
+            return httpx2.Response(200, json={"jwt": "test-token"})
+        return httpx2.Response(200, json=["a", "list"])
+
+    fleet = run_fleet(handler)
+    assert fleet.configured and fleet.error == "ValueError"
+
+
+def test_non_object_token_response_is_an_error_light() -> None:
+    fleet = run_fleet(lambda _: httpx2.Response(200, json=["no", "jwt"]))
+    assert fleet.configured and fleet.error == "TypeError"
+
+
+def test_fleet_is_marked_partial_when_pagination_hits_the_cap() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "jwt.limacharlie.io":
+            return httpx2.Response(200, json={"jwt": "test-token"})
+        return httpx2.Response(
+            200,
+            json={"sensors": [{"sid": "s1", "hostname": "ws-demo-01"}], "continuation_token": "x"},
+        )
+
+    fleet = run_fleet(handler)
+    assert fleet.partial is True and fleet.error == ""
+
+
+def test_complete_fleet_is_not_partial() -> None:
+    fleet = asyncio.run(status.sensor_fleet(settings(), transport=fake_api([])))
+    assert fleet.partial is False
+
+
+@pytest.mark.parametrize(
+    "payload", [{"readyConnections": None}, ["a", "list"], {"readyConnections": "many"}]
+)
+def test_tunnel_status_tolerates_odd_ready_payloads(
+    payload: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_client = httpx2.AsyncClient
+    transport = httpx2.MockTransport(lambda _: httpx2.Response(200, json=payload))
+    monkeypatch.setattr(
+        status.httpx2, "AsyncClient", lambda **kw: real_client(transport=transport, **kw)
+    )
+    result = asyncio.run(status.tunnel_status(Settings()))
+    assert result.state == "unknown" and result.detail == "unexpected response"
+
+
+def test_sensor_without_an_id_is_never_online() -> None:
+    """str(None) == "None" must not make id-less rows match each other."""
+    rows = [
+        {"sid": "s1", "hostname": "ws-demo-01"},
+        {"hostname": "no-id-offline"},
+        {"sid": None, "hostname": "null-id-offline"},
+    ]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "jwt.limacharlie.io":
+            return httpx2.Response(200, json={"jwt": "test-token"})
+        online_only = request.url.params.get("is_online_only") == "true"
+        # The online list contains an id-less row as well as the real online sensor.
+        return httpx2.Response(200, json={"sensors": [rows[0], rows[1]] if online_only else rows})
+
+    fleet = run_fleet(handler)
+    by_name = {s.hostname: s for s in fleet.sensors}
+    assert by_name["ws-demo-01"].online is True
+    assert by_name["no-id-offline"].online is False
+    assert by_name["null-id-offline"].online is False

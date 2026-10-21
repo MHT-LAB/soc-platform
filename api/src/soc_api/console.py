@@ -59,7 +59,10 @@ def pipeline(tunnel: status.TunnelStatus, fleet: status.Fleet) -> list[dict[str,
     elif fleet.error:
         src_state, src_note = "down", f"API error ({fleet.error})"
     else:
-        src_state, src_note = "up", f"{fleet.online} of {len(fleet.sensors)} reporting"
+        src_state = "unknown" if fleet.partial else "up"
+        src_note = f"{fleet.online} of {len(fleet.sensors)}{'+' if fleet.partial else ''} reporting"
+        if fleet.partial:
+            src_note += " (partial list)"
     edge_state = {"up": "up", "down": "down"}.get(tunnel.state, "unknown")
     edge_note = (
         f"{tunnel.connections} edge connections" if tunnel.state == "up" else "not connected"
