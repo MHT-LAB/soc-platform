@@ -13,8 +13,8 @@
 #    the signature alone doesn't prove the code was reviewed and merged.
 # 3. Pin the deployment to the verified digest (never the mutable tag), so the
 #    image can't be swapped between verification and pull.
-# 4. Start the stack, wait for health, and confirm the running container uses
-#    exactly the verified digest. On any failure, roll back to the previous one.
+# 4. Start the stack (public api and host-network console), wait for both to be
+#    healthy, and confirm both containers use exactly the verified digest. On any failure, roll back to the previous one.
 #
 # Environment (defaults suit the Stage A container):
 #   SOC_STATE_DIR   state root           /srv/soc
@@ -115,16 +115,20 @@ write_image() { umask 077; printf 'SOC_API_IMAGE=%s\nSOC_STATE_DIR=%s\n' "$1" "$
 write_image "$REPO@$DIGEST"
 
 # --- 4. start, wait for health, confirm the running image is the verified one -------
+# Both services (public api, host-network console) must run the verified image.
 running_digest_ok() {
-  local cid img
-  cid="$(compose ps -q api)" && [[ -n "$cid" ]] || return 1
-  img="$(docker inspect --format '{{.Image}}' "$cid")"
-  docker image inspect --format '{{join .RepoDigests "\n"}}' "$img" | grep -qxF "$1"
+  local svc cid img
+  for svc in api console; do
+    cid="$(compose ps -q "$svc")" && [[ -n "$cid" ]] || return 1
+    img="$(docker inspect --format '{{.Image}}' "$cid")"
+    docker image inspect --format '{{join .RepoDigests "\n"}}' "$img" | grep -qxF "$1" || return 1
+  done
 }
 
 healthy() {
   for _ in $(seq 1 30); do
-    if curl -fsS --max-time 2 http://127.0.0.1:8080/healthz > /dev/null 2>&1; then
+    if curl -fsS --max-time 2 http://127.0.0.1:8080/healthz > /dev/null 2>&1 \
+      && curl -fsS --max-time 2 http://127.0.0.1:8081/healthz > /dev/null 2>&1; then
       return 0
     fi
     sleep 2

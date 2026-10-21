@@ -1,10 +1,12 @@
+from typing import Literal
+
 import pytest
 from fastapi.testclient import TestClient
 
 from soc_api import status
 from soc_api.config import Settings
 from soc_api.console import CONSOLE_CSP
-from soc_api.main import create_app
+from soc_api.main import create_app, create_console_app
 
 TAILNET = {"Tailscale-User-Login": "operator@example.com"}
 
@@ -29,7 +31,7 @@ def fake_probes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def client(**overrides: str) -> TestClient:
-    return TestClient(create_app(Settings(version="edge", git_sha="a" * 40, **overrides)))
+    return TestClient(create_console_app(Settings(version="edge", git_sha="a" * 40, **overrides)))
 
 
 def test_console_refuses_requests_without_tailnet_identity(fake_probes: None) -> None:
@@ -100,9 +102,8 @@ def test_partial_fleet_is_flagged_on_the_console(monkeypatch: pytest.MonkeyPatch
 
 
 def prod_client(users: str = "operator@example.com") -> TestClient:
-    return TestClient(
-        create_app(Settings(env="prod", console_users=users, version="edge", git_sha="a" * 40))
-    )
+    settings = Settings(env="prod", console_users=users, version="edge", git_sha="a" * 40)
+    return TestClient(create_console_app(settings))
 
 
 def test_forged_login_header_is_refused_in_prod(fake_probes: None) -> None:
@@ -130,3 +131,36 @@ def test_allowlisted_login_gets_in_ignoring_case_and_spaces(fake_probes: None) -
     c = prod_client("Operator@Example.com , second@example.com")
     for login in ("operator@example.com", "OPERATOR@EXAMPLE.COM", "second@example.com"):
         assert c.get("/console", headers={"Tailscale-User-Login": login}).status_code == 200
+
+
+# --- isolation: the public app has no console, whatever the request says -------------
+
+
+def public_client(env: Literal["dev", "prod"] = "prod") -> TestClient:
+    settings = Settings(
+        env=env, console_users="operator@example.com", version="edge", git_sha="a" * 40
+    )
+    return TestClient(create_app(settings))
+
+
+def test_public_app_has_no_console_even_with_a_forged_identity(fake_probes: None) -> None:
+    for env in ("prod", "dev"):
+        c = public_client(env)
+        for path in ("/console", "/console/", "/console/console.css"):
+            for headers in ({}, TAILNET, {"Tailscale-User-Login": "operator@example.com"}):
+                r = c.get(path, headers=headers)
+                assert r.status_code == 404, (env, path)
+                assert "Operations" not in r.text and "operator@example.com" not in r.text
+
+
+def test_public_app_routes_are_exactly_the_public_ones() -> None:
+    # dev exposes /openapi.json, which lists every route the app really has.
+    r = public_client("dev").get("/openapi.json")
+    assert set(r.json()["paths"]) == {"/healthz", "/version"}
+
+
+def test_console_app_serves_only_console_and_healthz() -> None:
+    settings = Settings(env="dev", version="edge", git_sha="a" * 40)
+    r = TestClient(create_console_app(settings)).get("/openapi.json")
+    assert set(r.json()["paths"]) == {"/healthz", "/console", "/console/console.css"}
+    assert prod_client().get("/version").status_code == 404

@@ -59,6 +59,7 @@ make test      # unit tests, warnings are errors
 make lint      # ruff, strict mypy, hadolint
 make up        # run the stack locally with Docker
 curl -s localhost:8080/healthz
+# The console service uses host networking (Linux); on Docker Desktop it is not reachable from the Mac.
 ```
 
 ## Security pipeline
@@ -69,7 +70,7 @@ curl -s localhost:8080/healthz
 | Pull request | tests, strict typing, Semgrep, pip-audit, Checkov, Trivy image scan, smoke test, scrub gate |
 | Release | SBOM (Syft), cosign keyless signing, SBOM attestation, GHCR |
 | Deploy | signature verified before run, health check, rollback |
-| Runtime | non-root, read-only filesystem, no Linux capabilities, loopback-only port |
+| Runtime | non-root, read-only filesystem, no Linux capabilities, loopback-only ports; the console is a separate service the public tunnel cannot reach |
 
 Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
