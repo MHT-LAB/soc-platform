@@ -1,11 +1,12 @@
 """Operations console (v0), reachable only over the tailnet.
 
 Access model: `tailscale serve` terminates HTTPS on the tailnet and forwards to
-the API on loopback, adding the caller's verified login in the
-Tailscale-User-Login header and removing any value a client sent itself. The
-header is only trustworthy on that path: the console must never be reachable
-except through `tailscale serve`. Today the public edge's path rule is what
-keeps it off the internet; the allowlist limits who on the tailnet gets in.
+the console service on the host's loopback, adding the caller's verified login
+in the Tailscale-User-Login header and removing any value a client sent itself.
+The header is only trustworthy on that path. The console therefore runs as its
+own app (soc_api.console_main) in its own service on the host network, where
+the public tunnel container cannot connect, and the public app does not include
+this router at all. The allowlist limits who on the tailnet gets in.
 Real logins and roles arrive with SSO in Sprint 3.
 """
 

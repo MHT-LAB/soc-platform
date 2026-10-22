@@ -145,11 +145,21 @@ jobs:
           docker run -d --name smoke --read-only --tmpfs /tmp --cap-drop ALL -e SOC_CONSOLE_USERS=ci@example.com -p 127.0.0.1:8080:8080 soc-api:ci
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 1; done
           docker logs smoke; exit 1
-      - name: image refuses to start in prod without a console allowlist
+      - name: console isolation (compose services, tunnel-side probe)
+        run: |
+          # The smoke container holds 127.0.0.1:8080, which compose's api needs.
+          docker rm -f smoke > /dev/null
+          scripts/test-console-isolation.sh soc-api:ci
+      - name: public app starts in prod without a console allowlist
+        run: |
+          docker run -d --name pubnoallow --read-only --tmpfs /tmp --cap-drop ALL -p 127.0.0.1:8090:8080 soc-api:ci
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8090/healthz && exit 0; sleep 1; done
+          docker logs pubnoallow; exit 1
+      - name: console image refuses to start in prod without a console allowlist
         run: |
           # No SOC_CONSOLE_USERS: the container must exit with an error (not run, not time out).
           rc=0
-          timeout 30 docker run --name noallow --read-only --tmpfs /tmp --cap-drop ALL soc-api:ci > noallow.log 2>&1 || rc=$?
+          timeout 30 docker run --name noallow --read-only --tmpfs /tmp --cap-drop ALL --entrypoint uvicorn soc-api:ci soc_api.console_main:app --port 8081 > noallow.log 2>&1 || rc=$?
           docker rm -f noallow > /dev/null 2>&1 || true
           cat noallow.log
           if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then echo "image started without a console allowlist (rc=$rc)"; exit 1; fi

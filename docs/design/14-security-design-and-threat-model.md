@@ -19,6 +19,8 @@ The SOC holds keys that can isolate endpoints and reads sensitive telemetry, so 
 ## Exposure rule
 The only internet-facing surface is the ingest route behind a tunnel or reverse proxy. The console and API are reachable only over the mesh VPN.
 
+**Console isolation (Sprint 1 hardening).** The console is a separate app and a separate service. The public app contains no console routes. The console service runs on the host network, bound to the host's loopback, so containers (including the tunnel) cannot connect to it; `tailscale serve` is the only path in, and it supplies the verified identity header. Residual risk: host networking gives the console container the host's network view (LAN and loopback services), so it stays non-root, read-only and capability-free, and holds only the console allowlist and the read-only EDR key.
+
 ## Failure of the human link
 Page acknowledgement is tracked; high/critical alerts re-page every ten minutes, then email; an optional second commander removes the single-person bottleneck.
 

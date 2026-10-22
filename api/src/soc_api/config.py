@@ -5,9 +5,9 @@ mounted by the deploy script). Nothing secret is ever baked into the image.
 """
 
 from functools import lru_cache
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,23 +26,17 @@ class Settings(BaseSettings):
 
     # Console access. Requests must arrive through `tailscale serve`, which
     # adds the caller's verified tailnet login. A comma-separated list of the
-    # logins allowed in. Required in prod; only dev may leave it empty.
+    # logins allowed in. Read by the console service only; the console app
+    # refuses to build in prod without it, and only dev may leave it empty.
     console_users: str = ""
 
-    # cloudflared readiness endpoint on the compose network (never published).
-    tunnel_ready_url: str = "http://tunnel:2000/ready"
+    # cloudflared readiness endpoint, published on the host's loopback only. The
+    # console service runs on the host network, so it reaches it there.
+    tunnel_ready_url: str = "http://127.0.0.1:2000/ready"
 
     # Read-only EDR platform API access, for the sensor fleet panel.
     lc_oid: str = ""
     lc_api_key: SecretStr = SecretStr("")
-
-    @model_validator(mode="after")
-    def require_console_users_in_prod(self) -> Self:
-        # An empty allowlist accepts any login header, so prod refuses to start
-        # without one rather than defaulting to open.
-        if self.env == "prod" and not self.console_allowlist:
-            raise ValueError("SOC_CONSOLE_USERS must list at least one login when SOC_ENV=prod")
-        return self
 
     @property
     def console_allowlist(self) -> set[str]:

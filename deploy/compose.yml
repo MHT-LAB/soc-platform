@@ -13,17 +13,9 @@ services:
     restart: unless-stopped
     environment:
       SOC_ENV: ${SOC_ENV:-prod}
-      # The digest-pinned reference deploy.sh verified, shown on the console.
-      SOC_IMAGE_REF: ${SOC_API_IMAGE:-}
-    # Optional secrets written by the operator on the host (mode 600), e.g.
-    # the read-only EDR platform key. Absent in local development.
-    env_file:
-      - path: ${SOC_STATE_DIR:-/srv/soc}/env/lc.env
-        required: false
-      - path: ${SOC_STATE_DIR:-/srv/soc}/env/console.env
-        required: false
-    # Bound to loopback only. The public tunnel and the tailnet proxy are the
-    # only ways in, and each exposes a different set of paths.
+    # The public app: /healthz and /version now, /ingest/ later. It carries no
+    # console code and gets no console or EDR secrets. Bound to loopback only;
+    # the public tunnel is how the internet reaches it.
     ports:
       - "127.0.0.1:8080:8080"
     read_only: true
@@ -37,6 +29,55 @@ services:
     mem_limit: 512m
     healthcheck:
       test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).status == 200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # The operations console: the same image, a different app, and a different
+  # network. Publishing a port on 127.0.0.1 would not keep the tunnel out
+  # (containers on the compose network reach each other directly), so this
+  # service joins the HOST network instead and listens on the host's loopback.
+  # Containers cannot connect to the host's loopback, so the tunnel cannot
+  # reach it; `tailscale serve` on the host is the only way in.
+  # Trade-off: the container sees the host's network (LAN and loopback
+  # services). It stays non-root, read-only and capability-free to limit that.
+  console:
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - uvicorn
+      - soc_api.console_main:app
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8081"
+      - --no-server-header
+    environment:
+      SOC_ENV: ${SOC_ENV:-prod}
+      # The digest-pinned reference deploy.sh verified, shown on the console.
+      SOC_IMAGE_REF: ${SOC_API_IMAGE:-}
+      # cloudflared readiness, published on the host's loopback by the edge overlay.
+      SOC_TUNNEL_READY_URL: ${SOC_TUNNEL_READY_URL:-http://127.0.0.1:2000/ready}
+    # Secrets written by the operator on the host (mode 600): the console
+    # allowlist (required) and the optional read-only EDR key.
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/lc.env
+        required: false
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/console.env
+        required: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).status == 200 else 1)"]
       interval: 30s
       timeout: 3s
       retries: 3
