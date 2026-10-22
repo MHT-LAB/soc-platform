@@ -87,9 +87,11 @@ async def tunnel_status(settings: Settings) -> TunnelStatus:
     try:
         async with httpx2.AsyncClient(timeout=PROBE_TIMEOUT) as client:
             r = await client.get(settings.tunnel_ready_url)
-        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        # cloudflared sends its JSON as text/plain, so parse the body whatever the
+        # content type says (a body that isn't JSON raises ValueError: unknown).
+        body = r.json()
         # A 200 with a body we can't read says nothing about the tunnel: unknown, not down.
-        n = as_int(body.get("readyConnections", 0), -1) if isinstance(body, dict) else -1
+        n = as_int(body.get("readyConnections"), -1) if isinstance(body, dict) else -1
         if n < 0:
             return TunnelStatus("unknown", 0, "unexpected response")
         if r.status_code == 200 and n > 0:
