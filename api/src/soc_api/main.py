@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
 
-from soc_api import console
+from soc_api import console, ingest
 from soc_api.config import Settings, get_settings
 
 # Sent on every response. The API serves JSON only, so the content policy can
@@ -61,10 +61,11 @@ def _base_app(settings: Settings, title: str) -> FastAPI:
     return app
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, store: ingest.AlertStore | None = None) -> FastAPI:
     """The public app. Never mounts the console."""
     settings = settings or get_settings()
     app = _base_app(settings, "SOC API")
+    app.include_router(ingest.build_router(settings, store))
 
     @app.get("/version")
     async def version() -> dict[str, str]:
