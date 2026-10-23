@@ -7,12 +7,14 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 
 | Role | Used by | Can do |
 |---|---|---|
-| owner (deploy-defined) | migrations only | Creates and owns the tables and `ingest_alert()`. Never used by a service. |
+| owner (deploy-defined) | migrations only | Creates and owns the tables. Needs `CREATEROLE` and must own the database; it does **not** need to be, and should not be, a superuser. Never used by a service. |
 | `soc_app` | console, workers | Read and write rows of **one client**: the one in the session setting `app.client_id`. With it unset it sees nothing. No `DELETE`; `case_event` is append-only. |
 | `soc_ingest` | the public ingest handler | **No table privileges.** It can only call `ingest_alert()`, which maps a delivery to a source, attributes it (unknown tenant -> the Unassigned client) and inserts idempotently on `(source, event_id)`. |
+| `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
 
-`soc_app` and `soc_ingest` are created `NOLOGIN` and are never superuser or `BYPASSRLS`
-(the migration re-asserts that on every run). Deploy gives each a login and a password
+All three service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
+`CREATEROLE` or `CREATEDB`. Roles are cluster-wide, so they can already exist: if one has
+any of those (or `soc_ingest_writer` can log in), the migration stops instead of reusing it. Deploy gives each a login and a password
 from the secrets manager; no credential is in this repo.
 
 The owner bypasses RLS (policies are not forced on it), so the app must never connect

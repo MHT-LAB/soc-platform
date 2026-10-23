@@ -5,11 +5,14 @@ database; the roles are logged into for real, not simulated with SET ROLE.
 """
 
 import json
+import os
 import uuid
 
 import psycopg
 import pytest
-from conftest import SEED_FILE, TestDb
+import sqlalchemy.exc
+from conftest import ROLE_PASSWORD, SEED_FILE, TestDb
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from soc_api import db as soc_db
 from soc_api.seed import seed_demo
@@ -393,3 +396,133 @@ def test_table_checks_back_up_the_function(db: TestDb) -> None:
                 "VALUES (%s, %s, %s, %s, '{}')",
                 (src[1], src[0], str(uuid.uuid4()), "y" * 2001),
             )
+
+
+# ---- who ingest_alert() runs as ----
+
+
+def test_ingest_function_runs_as_a_least_privileged_role(db: TestDb) -> None:
+    """The definer is soc_ingest_writer, never the (possibly superuser) owner."""
+    with db.connect() as c:
+        owner = c.execute(
+            "SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcanlogin "
+            "FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.proname = 'ingest_alert'"
+        ).fetchone()
+        owned = c.execute(
+            "SELECT count(*) FROM pg_class WHERE relowner = 'soc_ingest_writer'::regrole"
+        ).fetchone()
+        privileges = {
+            table: c.execute(
+                "SELECT has_table_privilege('soc_ingest_writer', %s, 'SELECT'), "
+                "has_table_privilege('soc_ingest_writer', %s, 'INSERT'), "
+                "has_table_privilege('soc_ingest_writer', %s, 'UPDATE')",
+                (table, table, table),
+            ).fetchone()
+            for table in ALL_TABLES
+        }
+    assert owner == ("soc_ingest_writer", False, False, False)
+    assert owned == (0,)
+    assert privileges.pop("source") == (True, False, False)
+    assert privileges.pop("alert") == (False, True, False)
+    assert all(p == (False, False, False) for p in privileges.values())
+
+
+def test_ingest_writer_cannot_attribute_an_alert_to_another_client(db: TestDb) -> None:
+    """The insert policy holds even if the function's attribution logic breaks."""
+    _, b = two_clients(db)
+    with db.connect() as c:
+        src = c.execute("SELECT id FROM source WHERE slug = 'src-a'").fetchone()
+        assert src is not None
+        c.execute("SET ROLE soc_ingest_writer")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            c.execute(
+                "INSERT INTO alert (client_id, source_id, event_id, raw) "
+                "VALUES (%s, %s, 'crossed', '{}')",
+                (b, src[0]),
+            )
+        c.execute(
+            "INSERT INTO alert (client_id, source_id, event_id, raw) "
+            "VALUES (%s, %s, 'parked', '{}')",
+            (UNASSIGNED, src[0]),
+        )
+
+
+# ---- migrations without a superuser ----
+
+SERVICE_ROLES = ("soc_app", "soc_ingest", "soc_ingest_writer")
+
+
+def _admin_params() -> dict[str, str]:
+    url = os.environ.get("SOC_TEST_DATABASE_URL")
+    if not url:
+        if os.environ.get("SOC_REQUIRE_DB"):
+            pytest.fail("SOC_REQUIRE_DB is set but SOC_TEST_DATABASE_URL is not")
+        pytest.skip("SOC_TEST_DATABASE_URL not set")
+    return {k: str(v) for k, v in conninfo_to_dict(url).items() if v is not None}
+
+
+def test_migrations_run_as_a_non_superuser_owner() -> None:
+    """The deploy owner needs CREATEROLE, not SUPERUSER, and ingest works after."""
+    params = _admin_params()
+    suffix = uuid.uuid4().hex[:12]
+    owner, name = f"soc_owner_{suffix}", f"soc_test_{suffix}"
+    admin_info = make_conninfo(**params)
+    with psycopg.connect(admin_info, autocommit=True) as admin:
+        for role in SERVICE_ROLES:  # exercise the create path, not the "already there" one
+            admin.execute(f"DROP ROLE IF EXISTS {role}")
+        admin.execute(
+            f"CREATE ROLE {owner} LOGIN CREATEROLE NOSUPERUSER PASSWORD '{ROLE_PASSWORD}'"
+        )
+        admin.execute(f'CREATE DATABASE "{name}" OWNER {owner}')
+    test_db = TestDb(name=name, params=params)
+    url = test_db.sqlalchemy_url(owner, ROLE_PASSWORD)
+    try:
+        soc_db.upgrade(url)
+        soc_db.downgrade(url, "base")
+        soc_db.upgrade(url)
+        with test_db.connect() as c:
+            c.execute(
+                "INSERT INTO source (client_id, slug, type) VALUES (%s, 's', 'edr')", (UNASSIGNED,)
+            )
+            c.execute(f"ALTER ROLE soc_ingest LOGIN PASSWORD '{ROLE_PASSWORD}'")
+        with test_db.connect("soc_ingest") as c:
+            assert ingest(c, "s", "t", "e") == "inserted"
+            assert ingest(c, "s", "t", "e") == "duplicate"
+    finally:
+        with psycopg.connect(admin_info, autocommit=True) as admin:
+            admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+            for role in (*SERVICE_ROLES, owner):
+                admin.execute(f"DROP ROLE IF EXISTS {role}")
+
+
+@pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS", "CREATEROLE", "CREATEDB"])
+@pytest.mark.parametrize("role", ["soc_app", "soc_ingest"])
+def test_a_privileged_existing_role_stops_the_migration(
+    db: TestDb, role: str, attribute: str
+) -> None:
+    """Roles outlive databases; a privileged leftover must not be reused silently."""
+    params = _admin_params()
+    name = f"soc_test_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(make_conninfo(**params), autocommit=True) as admin:
+        admin.execute(f"ALTER ROLE {role} {attribute}")
+        admin.execute(f'CREATE DATABASE "{name}"')
+        try:
+            with pytest.raises(sqlalchemy.exc.ProgrammingError, match="must not have"):
+                soc_db.upgrade(TestDb(name=name, params=params).sqlalchemy_url())
+        finally:
+            admin.execute(f"ALTER ROLE {role} NO{attribute}")
+            admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+
+
+def test_a_writer_role_that_can_log_in_stops_the_migration(db: TestDb) -> None:
+    params = _admin_params()
+    name = f"soc_test_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(make_conninfo(**params), autocommit=True) as admin:
+        admin.execute("ALTER ROLE soc_ingest_writer LOGIN")
+        admin.execute(f'CREATE DATABASE "{name}"')
+        try:
+            with pytest.raises(sqlalchemy.exc.ProgrammingError, match="must not have"):
+                soc_db.upgrade(TestDb(name=name, params=params).sqlalchemy_url())
+        finally:
+            admin.execute("ALTER ROLE soc_ingest_writer NOLOGIN")
+            admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')

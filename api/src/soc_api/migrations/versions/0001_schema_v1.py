@@ -13,9 +13,13 @@ Isolation model (see docs/adr/0001-postgres-from-day-one.md):
   all. Its single way in is ingest_alert(), a SECURITY DEFINER function that
   maps a delivery to a source, attributes it (unknown tenant -> Unassigned),
   and inserts idempotently. It reads nothing back, ignores app.client_id, and
-  pins its search_path.
-* Roles are created NOLOGIN. Deploy gives them a login and password (private
-  repo); this migration never holds a credential.
+  pins its search_path. It runs as soc_ingest_writer (NOLOGIN, can read source
+  and insert alert, nothing else), not as the owner, and an RLS policy keeps
+  each alert with its source's client or Unassigned.
+* Roles are created NOLOGIN. Deploy gives soc_app and soc_ingest a login and
+  password (private repo); this migration never holds a credential.
+* The owner needs CREATEROLE, not SUPERUSER. A pre-existing service role with
+  extra privileges stops the migration.
 
 Tables are named after the design; the two SQL reserved words are prefixed
 (soc_case, soc_user) so nothing needs quoting.
@@ -44,22 +48,31 @@ TENANT_TABLES = [
 
 def upgrade() -> None:
     op.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+    # Roles are cluster-wide, so they may already exist. A privileged one stops
+    # the migration (changing those attributes would need a superuser, and the
+    # owner should not be one). soc_ingest_writer only owns ingest_alert() and
+    # never logs in.
     op.execute(
         """
         DO $$
+        DECLARE
+            r text;
         BEGIN
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'soc_app') THEN
-                CREATE ROLE soc_app NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
-            END IF;
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'soc_ingest') THEN
-                CREATE ROLE soc_ingest NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
-            END IF;
+            FOREACH r IN ARRAY ARRAY['soc_app', 'soc_ingest', 'soc_ingest_writer'] LOOP
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = r) THEN
+                    EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOBYPASSRLS '
+                                   'NOCREATEDB NOCREATEROLE', r);
+                ELSIF EXISTS (
+                    SELECT FROM pg_roles WHERE rolname = r
+                    AND (rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole
+                         OR (r = 'soc_ingest_writer' AND rolcanlogin))
+                ) THEN
+                    RAISE EXCEPTION 'role % has privileges it must not have', r;
+                END IF;
+            END LOOP;
         END $$
         """
     )
-    # Also for roles that already exist: the service roles never get these.
-    for role in ("soc_app", "soc_ingest"):
-        op.execute(f"ALTER ROLE {role} NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE")
 
     op.execute(
         """
@@ -273,6 +286,22 @@ def upgrade() -> None:
     op.execute("GRANT EXECUTE ON FUNCTION app_client_id() TO soc_app")
 
     # ---- ingest: one function, no table privileges ----
+    # The function runs as soc_ingest_writer, not as the owner: it can read
+    # sources and insert alerts, nothing else, and RLS still applies to it. The
+    # insert policy pins attribution in the database too: an alert belongs to its
+    # source's client or to Unassigned.
+    op.execute("GRANT SELECT ON source TO soc_ingest_writer")
+    op.execute("GRANT INSERT ON alert TO soc_ingest_writer")
+    op.execute("CREATE POLICY ingest_read ON source FOR SELECT TO soc_ingest_writer USING (true)")
+    op.execute(
+        f"""
+        CREATE POLICY ingest_insert ON alert FOR INSERT TO soc_ingest_writer
+        WITH CHECK (
+            client_id = '{UNASSIGNED}'::uuid
+            OR client_id = (SELECT s.client_id FROM source s WHERE s.id = source_id)
+        )
+        """
+    )
     op.execute(
         f"""
         CREATE FUNCTION ingest_alert(
@@ -285,7 +314,6 @@ def upgrade() -> None:
         DECLARE
             src record;
             cid uuid;
-            n integer;
         BEGIN
             SELECT id, client_id, external_id INTO src
             FROM source WHERE slug = p_source AND enabled;
@@ -303,21 +331,29 @@ def upgrade() -> None:
             ELSE
                 cid := '{UNASSIGNED}'::uuid;
             END IF;
+            -- Not ON CONFLICT: that would need read access to alert. The only
+            -- unique key a caller controls is (source_id, event_id).
             INSERT INTO alert (client_id, source_id, event_id, rule, severity, summary,
                                actor, mitre_hint, detected_at, raw)
             VALUES (cid, src.id, p_event_id, left(p_rule, 256),
                     CASE WHEN p_severity IN ('info', 'low', 'medium', 'high', 'critical')
                          THEN p_severity ELSE 'medium' END,
                     left(p_summary, 2000), left(p_actor, 512), left(p_mitre, 256),
-                    p_detected_at, p_raw)
-            ON CONFLICT (source_id, event_id) DO NOTHING;
-            GET DIAGNOSTICS n = ROW_COUNT;
-            RETURN CASE WHEN n = 1 THEN 'inserted' ELSE 'duplicate' END;
+                    p_detected_at, p_raw);
+            RETURN 'inserted';
+        EXCEPTION WHEN unique_violation THEN
+            RETURN 'duplicate';
         END
         $$
         """
     )
     op.execute("REVOKE ALL ON FUNCTION ingest_alert FROM PUBLIC")
+    # Handing the function over needs SET on the role and, for the new owner,
+    # CREATE on the schema; the latter is taken back in the same transaction.
+    op.execute("GRANT soc_ingest_writer TO current_user")
+    op.execute("GRANT CREATE ON SCHEMA public TO soc_ingest_writer")
+    op.execute("ALTER FUNCTION ingest_alert OWNER TO soc_ingest_writer")
+    op.execute("REVOKE CREATE ON SCHEMA public FROM soc_ingest_writer")
     op.execute("GRANT EXECUTE ON FUNCTION ingest_alert TO soc_ingest")
 
 
