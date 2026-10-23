@@ -78,6 +78,22 @@ CONSOLE_USERS_LINE="^SOC_CONSOLE_USERS=[[:space:]\"']*[^[:space:],\"']"
 grep -qE "$CONSOLE_USERS_LINE" "$STATE/env/console.env" 2>/dev/null \
   || die "$STATE/env/console.env must set SOC_CONSOLE_USERS=<login>[,<login>...]"
 
+# The Stage A edge is a locally managed tunnel. Without its config and
+# credentials the tunnel would crash-loop after the swap; stop here instead.
+# cloudflared requires a catch-all; this checks it exists (order is checked in
+# the deploy repo's CI with `cloudflared tunnel ingress rule`).
+if [[ "$OVERLAY" == compose.stage-a.yml ]]; then
+  TUNNEL_DIR="$STATE/tunnel"
+  [[ -s "$TUNNEL_DIR/config.yml" ]] \
+    || die "$TUNNEL_DIR/config.yml is missing (install it from the deploy repo)"
+  CREDS="$(sed -nE 's#^credentials-file:[[:space:]]*/etc/cloudflared/([A-Za-z0-9-]+\.json)[[:space:]]*$#\1#p' "$TUNNEL_DIR/config.yml")"
+  [[ -n "$CREDS" ]] \
+    || die "$TUNNEL_DIR/config.yml must set credentials-file: /etc/cloudflared/<tunnel id>.json"
+  [[ -s "$TUNNEL_DIR/$CREDS" ]] || die "tunnel credentials $TUNNEL_DIR/$CREDS are missing"
+  grep -qE '^[[:space:]]*-[[:space:]]*service:[[:space:]]*http_status:404[[:space:]]*$' "$TUNNEL_DIR/config.yml" \
+    || die "$TUNNEL_DIR/config.yml must include the catch-all rule '- service: http_status:404'"
+fi
+
 # --- 1-2. verify signature and SBOM attestation ---------------------------------
 log "verifying $REPO:$TAG"
 verified="$(cosign verify "${IDENTITY[@]}" --output json "$REPO:$TAG")" \

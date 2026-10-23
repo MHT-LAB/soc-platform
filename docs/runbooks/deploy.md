@@ -12,11 +12,27 @@ recorded in the deploy log.
 | Path | Contents | Mode |
 |---|---|---|
 | `/opt/soc-platform` | read-only clone of this repo (deploy key) | root |
-| `/srv/soc/env/tunnel.env` | `TUNNEL_TOKEN=…` from the secrets manager | 600 |
+| `/srv/soc/tunnel/config.yml` | the tunnel's ingress rules, installed from the private deploy repo | 644 |
+| `/srv/soc/tunnel/<tunnel id>.json` | the tunnel's credentials (runs this one tunnel, nothing else), owned by the cloudflared container user | 400 |
 | `/srv/soc/env/image.env` | the verified image digest, written by `deploy.sh` | 600 |
 | `/srv/soc/deploy.log` | every verification and deploy, with digests | 644 |
 
-## Deploy
+## Edge tunnel (Stage A)
+The tunnel is **locally managed**: its routes come only from
+`/srv/soc/tunnel/config.yml`, which is kept under version control in the private
+deploy repo and checked there in CI with `cloudflared tunnel ingress validate` and
+`cloudflared tunnel ingress rule`. The dashboard cannot change a locally managed
+tunnel, so opening a public path takes a reviewed change. Rules:
+
+- `/healthz` (and, when Sprint 1 ingest is ready, `/ingest/<source>`) to the public
+  app, `http://api:8080`, only.
+- Then the catch-all `- service: http_status:404`.
+- Never the console service.
+
+`deploy.sh` refuses to start (before changing anything) when `config.yml`, the
+credentials file it names or the catch-all is missing. The account certificate
+(`cert.pem`), which can manage every tunnel, never goes on the host.
+
 ```bash
 cd /opt/soc-platform && git pull --ff-only
 deploy/deploy.sh edge          # latest signed build from main

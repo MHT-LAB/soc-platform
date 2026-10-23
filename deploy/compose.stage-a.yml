@@ -4,16 +4,30 @@
 services:
   tunnel:
     image: cloudflare/cloudflared:2026.10.1@sha256:a15a3b50b8dabd57ac2090e9484c0247dba9dfa1f0df4d298d4317f9d69eb2d5
+    # Locally managed tunnel: its routes come only from config.yml, which the
+    # operator keeps under version control and installs on the host. The
+    # dashboard cannot edit a locally managed tunnel, so nobody can open a new
+    # public path without a reviewed change. config.yml must end with a
+    # catch-all 404 and must never route to the console.
     # Readiness/metrics are published on the host's loopback only, so the
     # console (host network) can show how many edge connections the tunnel holds.
-    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --metrics
+      - 0.0.0.0:2000
+      - --config
+      - /etc/cloudflared/config.yml
+      - run
     ports:
       - "127.0.0.1:2000:2000"
     restart: unless-stopped
-    # TUNNEL_TOKEN lives in a mode-600 file outside the repo, written by the
-    # operator from the secrets manager. It never appears in this file.
-    env_file:
-      - ${SOC_STATE_DIR:-/srv/soc}/env/tunnel.env
+    # config.yml and the tunnel's credentials file (<tunnel id>.json, readable
+    # by the container user only) live in this directory on the host, mounted
+    # read-only. The credentials can run this one tunnel and nothing else; the
+    # account certificate that can manage tunnels never goes on the host.
+    volumes:
+      - ${SOC_STATE_DIR:-/srv/soc}/tunnel:/etc/cloudflared:ro
     depends_on:
       api:
         condition: service_healthy

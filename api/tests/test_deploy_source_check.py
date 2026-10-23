@@ -99,6 +99,13 @@ class Host:
         self.state = tmp / "state"
         (self.state / "env").mkdir(parents=True)
         (self.state / "env" / "console.env").write_text("SOC_CONSOLE_USERS=a@example.com\n")
+        tunnel = self.state / "tunnel"
+        tunnel.mkdir()
+        (tunnel / "config.yml").write_text(
+            "tunnel: t\ncredentials-file: /etc/cloudflared/t.json\n"
+            "ingress:\n  - service: http_status:404\n"
+        )
+        (tunnel / "t.json").write_text("{}\n")
         self.bin = tmp / "bin"
         self.bin.mkdir()
         for name, body in (("cosign", FAKE_COSIGN), ("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
