@@ -15,6 +15,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from sqlalchemy.engine import URL
 
 from soc_api import db as soc_db
 
@@ -39,10 +40,17 @@ class TestDb:
     params: dict[str, str]
 
     def sqlalchemy_url(self, user: str | None = None, password: str | None = None) -> str:
-        user = user or self.params.get("user", "postgres")
-        auth = f"{user}:{password}" if password else user
-        host, port = self.params.get("host", "127.0.0.1"), self.params.get("port", "5432")
-        return f"postgresql+psycopg://{auth}@{host}:{port}/{self.name}"
+        """The admin's URL by default (with its password, if the server wants one)."""
+        if user is None:
+            user, password = self.params.get("user", "postgres"), self.params.get("password")
+        return URL.create(
+            "postgresql+psycopg",
+            username=user,
+            password=password,
+            host=self.params.get("host", "127.0.0.1"),
+            port=int(self.params.get("port", "5432")),
+            database=self.name,
+        ).render_as_string(hide_password=False)
 
     def connect(self, role: str | None = None) -> psycopg.Connection:
         """Connect as the admin (role=None) or really log in as an app role."""

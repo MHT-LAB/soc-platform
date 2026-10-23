@@ -6,8 +6,13 @@ if not url:
     raise RuntimeError("sqlalchemy.url is not set; use soc_api.db")
 
 engine = create_engine(url)
-with engine.connect() as connection:
-    context.configure(connection=connection, target_metadata=None, transaction_per_migration=True)
-    with context.begin_transaction():
-        context.run_migrations()
-engine.dispose()
+try:
+    with engine.connect() as connection:
+        context.configure(
+            connection=connection, target_metadata=None, transaction_per_migration=True
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+finally:
+    # Also when a migration fails, so no connection is left open.
+    engine.dispose()
