@@ -1,0 +1,15 @@
+{
+  "client": {
+    "slug": "acme-demo",
+    "name": "Acme Demo Co",
+    "tenant_id": "00000000-0000-0000-0000-00000000acme",
+    "status": "internal",
+    "timezone": "America/New_York"
+  },
+  "sites": [{"name": "Acme HQ", "controller_site_id": "default"}],
+  "endpoints": [
+    {"sensor_id": "demo-sensor-0001", "hostname": "acme-ws-01", "platform": "windows", "site": "Acme HQ"},
+    {"sensor_id": "demo-sensor-0002", "hostname": "acme-srv-01", "platform": "linux", "site": "Acme HQ"}
+  ],
+  "source": {"slug": "acme-lc", "type": "edr-webhook", "external_id": "00000000-0000-0000-0000-00000000acme"}
+}
