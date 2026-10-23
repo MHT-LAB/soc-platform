@@ -227,6 +227,41 @@ def test_a_source_dir_that_is_not_a_repo_is_a_refusal(tmp_path: Path) -> None:
     assert not host.changed_the_host
 
 
+def test_a_dirty_tree_is_refused(tmp_path: Path) -> None:
+    host = Host(tmp_path)
+    (host.src / "a").write_text("edited on the host")
+    r = host.run(Host.labels(host.main))
+    assert r.returncode == 1 and "uncommitted or untracked" in r.stdout
+    assert not host.changed_the_host
+
+
+def test_an_untracked_file_is_refused(tmp_path: Path) -> None:
+    host = Host(tmp_path)
+    (host.src / "compose.override.yml").write_text("services: {}\n")
+    r = host.run(Host.labels(host.main))
+    assert r.returncode == 1 and "uncommitted or untracked" in r.stdout
+    assert not host.changed_the_host
+
+
+def test_a_clone_behind_origin_main_is_refused(tmp_path: Path) -> None:
+    host = Host(tmp_path)
+    work = tmp_path / "work"
+    git(work, "checkout", "-q", "main")
+    newer = commit(work, "newer")
+    git(work, "push", "-q", "origin", "main")
+    r = host.run(Host.labels(newer))
+    assert r.returncode == 1 and "not at origin/main" in r.stdout
+    assert not host.changed_the_host
+
+
+def test_a_clone_with_local_commits_is_refused(tmp_path: Path) -> None:
+    host = Host(tmp_path)
+    commit(host.src, "local-only")
+    r = host.run(Host.labels(host.main))
+    assert r.returncode == 1 and "not at origin/main" in r.stdout
+    assert not host.changed_the_host
+
+
 def test_the_label_text_is_never_echoed(tmp_path: Path) -> None:
     host = Host(tmp_path)
     r = host.run(Host.labels("evil-injected-text"))

@@ -11,6 +11,9 @@
 #    clone, and make cosign prove the signature names exactly that commit. A
 #    tag or branch run of the release workflow also gets a valid signature, so
 #    the signature alone doesn't prove the code was reviewed and merged.
+# 2c. Require the host's clone (which supplies this script and the compose files)
+#    to be clean and exactly at origin/main, so a stale or edited checkout can't
+#    run a new image with an old or modified compose layout.
 # 3. Pin the deployment to the verified digest (never the mutable tag), so the
 #    image can't be swapped between verification and pull.
 # 4. Start the stack (public api and host-network console), wait for both to be
@@ -119,6 +122,15 @@ REV="$(docker buildx imagetools inspect "$REPO@$DIGEST" --format '{{json .Image.
 [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || die "the image has no valid source commit label"
 git -C "$SRC_DIR" fetch -q origin main \
   || die "could not fetch origin/main in $SRC_DIR to check the image's source commit"
+# --- 2c. the host's working tree must be clean and exactly at origin/main ----------
+# This script and the compose files run from this clone. Untracked files count as
+# dirty (porcelain lists them) so a stray override file is refused too.
+tree_state="$(git -C "$SRC_DIR" status --porcelain)" \
+  || die "could not read the git status of $SRC_DIR"
+[[ -z "$tree_state" ]] \
+  || die "$SRC_DIR has uncommitted or untracked files; restore it to origin/main before deploying"
+[[ "$(git -C "$SRC_DIR" rev-parse HEAD)" == "$(git -C "$SRC_DIR" rev-parse origin/main)" ]] \
+  || die "$SRC_DIR is not at origin/main (behind, ahead or diverged); run git pull --ff-only first"
 git -C "$SRC_DIR" merge-base --is-ancestor "$REV" origin/main \
   || die "the image was built from $REV, which is not on main"
 cosign verify "${IDENTITY[@]}" --certificate-github-workflow-sha "$REV" "$REPO@$DIGEST" > /dev/null \
