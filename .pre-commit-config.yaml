@@ -10,6 +10,8 @@ repos:
       - id: check-added-large-files
       - id: detect-private-key
       - id: end-of-file-fixer
+        # Byte-exact webhook body: a real delivery has no trailing newline and is signed as-is.
+        exclude: ^fixtures/lc-webhook/detect\.json$
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
