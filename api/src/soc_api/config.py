@@ -38,6 +38,21 @@ class Settings(BaseSettings):
     lc_oid: str = ""
     lc_api_key: SecretStr = SecretStr("")
 
+    # Ingest (public app only; read from ingest.env, never from the image).
+    # SOC_INGEST_SECRETS is JSON: {"<source slug>": ["<current>", "<next>"]}. Two
+    # secrets per source let a rotation happen without downtime. A source with no
+    # entry does not exist as far as the internet can tell.
+    ingest_secrets: SecretStr = SecretStr("")
+    # A role that can only call ingest_alert() (soc_ingest). Empty -> every
+    # delivery that passes authentication gets a 503 rather than a lost 200.
+    ingest_database_url: SecretStr = SecretStr("")
+    # Replay window on the signed gen_time (ms epoch inside the body).
+    ingest_max_age_seconds: int = 3600
+    ingest_max_future_seconds: int = 300
+    # Requests per minute, per client IP and per source. Failed auth costs double.
+    ingest_rate_per_ip: int = 60
+    ingest_rate_per_source: int = 600
+
     @property
     def console_allowlist(self) -> set[str]:
         return {u.strip().lower() for u in self.console_users.split(",") if u.strip()}
