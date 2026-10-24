@@ -112,6 +112,12 @@ class RateLimiter:
             self._hits.popitem(last=False)
         return count <= limit
 
+    def refund(self, key: str, cost: int = 1) -> None:
+        """Give back `cost` for `key` (never below zero)."""
+        if key in self._hits:
+            start, count = self._hits[key]
+            self._hits[key] = (start, max(count - cost, 0))
+
 
 @dataclass
 class Alert:
@@ -198,6 +204,25 @@ def _text(value: Any, limit: int) -> str | None:
     if not isinstance(value, str):
         return None
     return value.replace("\x00", "")[:limit] or None
+
+
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def _clean(value: Any) -> Any:
+    """Replace what PostgreSQL cannot store (NUL, unpaired UTF-16 surrogates) with U+FFFD.
+
+    An attacker on an endpoint can put either into a file name or command line; refusing
+    the delivery would let them make their own detection disappear, so it is stored with
+    the character replaced instead.
+    """
+    if isinstance(value, str):
+        return _LONE_SURROGATE.sub("\ufffd", value.replace("\x00", "\ufffd"))
+    if isinstance(value, dict):
+        return {_clean(k): _clean(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_clean(v) for v in value]
+    return value
 
 
 def _reject_constant(name: str) -> None:
@@ -303,7 +328,9 @@ def build_router(settings: Settings, store: AlertStore | None = None) -> APIRout
             return _reply(415, {"detail": "Unsupported Media Type"})
 
         declared = request.headers.get("content-length")
-        if declared is not None and (not declared.isdigit() or int(declared) > MAX_BODY):
+        if declared is not None and (
+            not re.fullmatch(r"[0-9]{1,12}", declared) or int(declared) > MAX_BODY
+        ):
             outcome("too_large", 413, source, request_id, 0)
             return _reply(413, {"detail": "Payload Too Large"})
 
@@ -323,9 +350,13 @@ def build_router(settings: Settings, store: AlertStore | None = None) -> APIRout
             limiter.hit(f"src:{source}", settings.ingest_rate_per_source)
             outcome("bad_signature", 401, source, request_id, len(body))
             return _reply(401, {"detail": "Unauthorized"})
+        # The per-IP bucket is for unauthenticated noise. A burst of real detections
+        # (an incident, a noisy rule) comes from the EDR's few egress IPs and must not
+        # be refused for it; the per-source bucket still bounds authenticated traffic.
+        limiter.refund(f"ip:{ip}")
 
         try:
-            doc = json.loads(body, parse_constant=_reject_constant)
+            doc = _clean(json.loads(body, parse_constant=_reject_constant))
         except (ValueError, RecursionError):
             outcome("bad_json", 400, source, request_id, len(body))
             return _reply(400, {"detail": "Bad Request"})

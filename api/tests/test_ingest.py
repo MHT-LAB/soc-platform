@@ -325,6 +325,20 @@ def test_declared_content_length_over_the_cap_is_refused_before_reading() -> Non
     assert state["read"] == 0
 
 
+@pytest.mark.parametrize("value", ["\u00b2", "-1", "1e3", " 10", "9" * 13])
+def test_odd_content_length_is_a_413_not_a_crash(value: str) -> None:
+    # The server in front normally refuses these; the handler must not rely on that.
+    app = create_app(settings(), FakeStore())
+    state = _asgi_post(
+        app,
+        [(b"content-type", b"application/json"), (b"content-length", value.encode("latin-1"))],
+        chunks=1,
+        size=10,
+    )
+    assert state["status"] == 413
+    assert state["read"] == 0
+
+
 def test_body_at_the_cap_is_still_read_and_judged_on_its_signature() -> None:
     client, store = make()
     r = post(client, b"x" * MAX_BODY, secret=None, headers={"lc-signature": "0" * 64})
@@ -476,6 +490,16 @@ def test_limiter_counts_within_a_window_and_resets_after_it() -> None:
     assert lim.hit("k", 3)
 
 
+def test_limiter_refund_never_goes_below_zero_or_banks_credit() -> None:
+    lim = RateLimiter()
+    lim.refund("never-seen")
+    assert "never-seen" not in lim._hits
+    lim.hit("k", 2)
+    for _ in range(5):
+        lim.refund("k")
+    assert [lim.hit("k", 2) for _ in range(3)] == [True, True, False]
+
+
 def test_limiter_memory_is_bounded() -> None:
     lim = RateLimiter(max_keys=100)
     for i in range(10_000):
@@ -487,19 +511,32 @@ def test_per_ip_limit_is_keyed_on_cf_connecting_ip() -> None:
     client, store = make(ingest_rate_per_ip=3)
     body = delivery()
     a = {"CF-Connecting-IP": "203.0.113.1"}
-    assert [post(client, body, headers=a).status_code for _ in range(4)] == [200, 200, 200, 429]
+    probes = [post(client, body, source="nope", headers=a).status_code for _ in range(4)]
+    assert probes == [404, 404, 404, 429]
+    assert post(client, body, headers=a).status_code == 429  # even a valid one, once over
     assert post(client, body, headers={"CF-Connecting-IP": "203.0.113.2"}).status_code == 200
     assert post(client, body, headers=a).headers["retry-after"] == "60"
+
+
+def test_a_burst_of_valid_deliveries_from_one_ip_is_not_refused() -> None:
+    # The EDR sends from a few egress IPs; an incident is exactly when detections burst.
+    client, store = make(ingest_rate_per_ip=3, ingest_rate_per_source=1000)
+    a = {"CF-Connecting-IP": "203.0.113.9"}
+    codes = [post(client, delivery(detect_id=f"id-{i}"), headers=a).status_code for i in range(10)]
+    assert codes == [200] * 10
+    assert len(store.calls) == 10
 
 
 def test_a_garbage_ip_header_cannot_mint_new_buckets() -> None:
     client, _ = make(ingest_rate_per_ip=2)
     body = delivery()
     codes = [
-        post(client, body, headers={"CF-Connecting-IP": f"evil-{i}-\n<script>"}).status_code
+        post(
+            client, body, source="nope", headers={"CF-Connecting-IP": f"evil-{i}-\n<script>"}
+        ).status_code
         for i in range(4)
     ]
-    assert codes == [200, 200, 429, 429]
+    assert codes == [404, 404, 429, 429]
 
 
 def test_failed_signatures_cost_double() -> None:
@@ -643,12 +680,28 @@ def test_db_unknown_tenant_lands_in_unassigned_and_is_not_dropped(db: TestDb) ->
     assert row == ("unassigned",)
 
 
-def test_db_payload_the_database_refuses_is_a_400_not_a_500(db: TestDb) -> None:
+@pytest.mark.parametrize("bad", ["\u0000", "\ud800", "\udfff"])
+def test_db_characters_postgres_cannot_store_are_replaced_not_dropped(db: TestDb, bad: str) -> None:
+    # An attacker controls file names and command lines on the endpoint. If one odd
+    # character made the delivery a 400, they could make their own detection vanish.
     client, _ = _db_app(db)
-    body = delivery(cat="has a NUL \u0000 inside")  # json.dumps escapes it as \u0000
-    assert b"\\u0000" in body
-    assert post(client, body).status_code == 400
-    assert _alerts(db) == []
+    path = f"C:\\Users\\x\\evil{bad}.exe"
+    body = delivery(
+        detect_mtd={"description": f"cat {bad}"},
+        detect={"event": {"FILE_PATH": path, f"k{bad}": [bad]}},
+    )
+    assert json.dumps(bad)[1:-1].encode() in body  # escaped in the signed bytes
+    assert post(client, body).status_code == 200
+    with db.connect() as c:
+        row = c.execute("SELECT summary, raw -> 'detect' -> 'event' FROM alert").fetchone()
+    assert row is not None
+    assert row[0] == "cat \ufffd"
+    assert row[1] == {"FILE_PATH": "C:\\Users\\x\\evil\ufffd.exe", "k\ufffd": ["\ufffd"]}
+
+
+def test_a_value_the_database_refuses_is_a_400_not_a_500() -> None:
+    client, store = make(FakeStore(result="invalid_payload"))
+    assert post(client, delivery()).status_code == 400
 
 
 def test_db_raw_payload_is_stored_as_data_and_text_is_bounded(db: TestDb) -> None:
