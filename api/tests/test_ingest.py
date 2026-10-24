@@ -591,6 +591,23 @@ def test_logs_carry_no_body_header_secret_or_query_string(caplog: pytest.LogCapt
         assert forbidden not in text
 
 
+def test_logged_source_is_only_ever_a_configured_name(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = make()
+    with caplog.at_level(logging.INFO, logger="soc_api.ingest"):
+        for path in (
+            "/ingest/lc-main%0Aoutcome=forged",
+            "/ingest/lc-main%0D%0Ax",
+            "/ingest/LC-MAIN",
+        ):
+            post(client, delivery(), path=path)
+        post(client, delivery())
+    sources = [r.getMessage().split(" source=", 1)[1].split(" ", 1)[0] for r in caplog.records]
+    assert sources == ["-", "-", "-", "lc-main"]
+    assert all(
+        "\n" not in r.getMessage() and "forged" not in r.getMessage() for r in caplog.records
+    )
+
+
 def down_store() -> FakeStore:  # noqa: N802
     s = FakeStore()
     s.down = True

@@ -279,6 +279,9 @@ def _reply(status: int, body: dict[str, str], **headers: str) -> JSONResponse:
 
 def build_router(settings: Settings, store: AlertStore | None = None) -> APIRouter:
     secrets = parse_secrets(settings.ingest_secrets.get_secret_value())
+    # Our own copy of each configured name. Once a request matches, this copy is what
+    # gets logged and used, never the string from the URL.
+    configured = {name: name for name in secrets}
     if store is None:
         url = settings.ingest_database_url.get_secret_value()
         store = PgStore(url) if url else NoStore()
@@ -287,8 +290,8 @@ def build_router(settings: Settings, store: AlertStore | None = None) -> APIRout
     db: AlertStore = store
 
     def outcome(code: str, status: int, source: str | None, request_id: str, size: int) -> None:
-        # Never the body, headers, query string or any secret. `source` is only
-        # logged once it matched a configured source, so a caller cannot choose
+        # Never the body, headers, query string or any secret. `source` is always
+        # None or our own copy of a configured name, so a caller cannot choose
         # what ends up in the log.
         log.info(
             "ingest outcome=%s status=%d source=%s request_id=%s size=%d",
@@ -314,9 +317,10 @@ def build_router(settings: Settings, store: AlertStore | None = None) -> APIRout
             outcome("rate_limited", 429, None, request_id, 0)
             return _reply(429, {"detail": "Too Many Requests"}, **{"Retry-After": "60"})
 
-        if request.method != "POST" or not SOURCE_RE.match(source) or source not in secrets:
+        if request.method != "POST" or not SOURCE_RE.match(source) or source not in configured:
             outcome("not_found", 404, None, request_id, 0)
             return not_found
+        source = configured[source]
 
         if not limiter.hit(f"src:{source}", settings.ingest_rate_per_source):
             outcome("rate_limited", 429, source, request_id, 0)
