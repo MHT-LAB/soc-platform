@@ -13,9 +13,14 @@ services:
     restart: unless-stopped
     environment:
       SOC_ENV: ${SOC_ENV:-prod}
-    # The public app: /healthz and /version now, /ingest/ later. It carries no
-    # console code and gets no console or EDR secrets. Bound to loopback only;
-    # the public tunnel is how the internet reaches it.
+    # The public app: /healthz, /version and /ingest/<source>. It carries no
+    # console code and gets no console or EDR secrets; its only secrets are
+    # ingest.env (per-source webhook secrets and the soc_ingest database URL,
+    # mode 600). Bound to loopback only; the public tunnel is how the internet
+    # reaches it. Without ingest.env every /ingest/ path is a 404.
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/ingest.env
+        required: false
     ports:
       - "127.0.0.1:8080:8080"
     read_only: true
