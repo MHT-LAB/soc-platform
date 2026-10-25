@@ -4,7 +4,7 @@ A checklist of the controls this project relies on, written as actions to take a
 
 ## Source and review
 - Protect the main branch: pull requests only, signed commits, linear history, required checks, no force-push, no bypass. *Why: every change gets a reviewer of record, and history can't be rewritten.*
-- Check the text that will become the commit message (PR title and body) as well as the files. *Why: squash merging publishes it.*
+- Check the text that will become the commit message (PR title and body, and the author names a squash adds as co-authors) as well as the files. *Why: squash merging publishes it.* Merge bot PRs with a message you wrote, not their generated notes.
 - Scan the added lines of every commit in a PR, not only the final tree. *Why: a value added and removed within one PR still lives in history.*
 - Make checks fail closed. Judge scans by their output, not their exit status, and fail when a required input (such as a denylist) is missing. *Why: a gate that passes when it can't run is not a gate.* Test the gate itself by planting each failure it should catch.
 
