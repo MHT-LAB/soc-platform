@@ -21,6 +21,8 @@
 #   SCRUB_BASE          revision the range starts from (CI: PR base or push "before")
 #   SCRUB_ALL_HISTORY   set to scan every commit instead of only base..HEAD
 #   SCRUB_PR_TITLE, SCRUB_PR_BODY   PR text to check (body ignored for Dependabot)
+#   SCRUB_PR            set on pull requests: also check what a squash merge
+#                       will add to the commit message on main (see below)
 #
 # Implementation rules, learned the hard way (see scripts/test-scrub-check.sh):
 #   - Never judge a pipeline by its exit status: `git log | grep -q` is killed
@@ -196,6 +198,17 @@ if [[ -n "$bad_authors" ]]; then
   if [[ -z "$in_ci" ]]; then printf '%s\n' "$bad_authors"; fi
 fi
 
+# A squash merge adds "Co-authored-by: <name> <email>" to the message on main
+# for every other author in the range. Names are not otherwise checked (GitHub
+# sets the author of every squash commit on main from the merging account), so
+# check them here, on the PR, while it can still be fixed. A GitHub "update
+# branch" merge, for example, carries the account's display name, not the
+# repository's commit identity.
+if [[ "${SCRUB_PR:-}" == "1" ]]; then
+  git log --format='Co-authored-by: %an <%ae>%nCommitter: %cn <%ce>' "$range" | sort -u > "$tmp/trailers"
+  check_text "commit author/committer names (a squash adds them to main)" "$tmp/trailers"
+fi
+
 # PR title and body. The body of a Dependabot PR is generated release notes, not
 # our text, so only its title is checked.
 {
@@ -203,6 +216,22 @@ fi
   if [[ "${SCRUB_DEPENDABOT:-}" != "1" ]]; then printf '%s\n' "${SCRUB_PR_BODY:-}"; fi
 } > "$tmp/prtext"
 check_text "PR title/body" "$tmp/prtext"
+
+# ...but a default squash still copies that body into the message on main, where
+# the push check does fail on it. Warn (never fail: the notes are not ours and
+# cannot be fixed on the PR) so the merge is done with an explicit message.
+if [[ "${SCRUB_DEPENDABOT:-}" == "1" && -n "${SCRUB_PR_BODY:-}" ]]; then
+  printf '%s\n' "${SCRUB_PR_BODY}" > "$tmp/depbody"
+  saved_fail=$fail
+  fail=0
+  check_text "Dependabot release notes" "$tmp/depbody"
+  if [[ $fail -ne 0 ]]; then
+    msg="WARNING, not a failure: the Dependabot release notes above would fail the check on main if a squash copies them. Merge with an explicit message: gh pr merge <n> --squash --body \"<one line>\""
+    echo "$msg"
+    if [[ -n "$in_ci" ]]; then echo "::warning title=scrub gate::$msg"; fi
+  fi
+  fail=$saved_fail
+fi
 
 if [[ $fail -ne 0 ]]; then
   echo "Scrub gate FAILED. Remove or generalize the items above."

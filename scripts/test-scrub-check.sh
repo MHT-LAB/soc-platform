@@ -156,6 +156,36 @@ check "Dependabot PR body is not checked (title is)" 0
 gate SCRUB_PR_TITLE="mentions $TERM_X" SCRUB_PR_BODY="fine" SCRUB_DEPENDABOT=1
 check "Dependabot PR title is checked" 1
 
+# --- S5b: what a squash merge adds to the message on main ------------------------
+# An "update branch" merge commit is authored under the account's display name;
+# the squash turns it into a Co-authored-by line on main.
+new_repo squash-coauthor;     commit a.txt "ok"
+echo "more" >> "$R/a.txt"; git -C "$R" add -A
+GIT_AUTHOR_NAME="Person $TERM_X" git -C "$R" commit -q -m "Merge branch 'main' into feature"
+gate SCRUB_PR=1;              check "author name that a squash would add as Co-authored-by fails on a PR" 1
+gate;                         check "author names are not checked on push (GitHub sets them on main)" 0
+new_repo squash-committer;    commit a.txt "ok"
+echo "more" >> "$R/a.txt"; git -C "$R" add -A
+GIT_COMMITTER_NAME="$TERM_X" git -C "$R" commit -q -m "fine"
+gate SCRUB_PR=1;              check "committer name with a denylist term fails on a PR" 1
+new_repo squash-clean;        commit a.txt "ok"
+gate SCRUB_PR=1 SCRUB_PR_TITLE="fine" SCRUB_PR_BODY="fine"
+check "clean names pass on a PR" 0
+new_repo dependabot-notes;    commit api/uv.lock "bump"
+gate SCRUB_PR=1 SCRUB_DEPENDABOT=1 SCRUB_PR_TITLE="bump x" SCRUB_PR_BODY="notes: route $PRIVATE_IP and $TERM_X"
+check "Dependabot release notes that would fail on main only warn" 0
+output_has   "the warning tells the merger to set an explicit message" "--body"
+gate SCRUB_PR=1 SCRUB_DEPENDABOT=1 SCRUB_PR_TITLE="bump x" SCRUB_PR_BODY="notes: route $PRIVATE_IP" GITHUB_ACTIONS=true SCRUB_DENYLIST="$TERM_X"
+check "the warning does not fail in CI" 0
+output_has   "CI gets a warning annotation" "::warning title=scrub gate::"
+output_lacks "CI warning never prints the matched address" "$PRIVATE_IP"
+gate SCRUB_PR=1 SCRUB_DEPENDABOT=1 SCRUB_PR_TITLE="bump x" SCRUB_PR_BODY="plain notes"
+check "clean Dependabot notes pass" 0
+output_lacks "no warning for clean notes" "WARNING"
+gate SCRUB_PR=1 SCRUB_DEPENDABOT=1 SCRUB_PR_TITLE="bump $TERM_X" SCRUB_PR_BODY="notes $PRIVATE_IP"
+check "a real failure (title) still fails when the notes only warn" 1
+output_has   "the notes warning is still shown next to a real failure" "WARNING, not a failure"
+
 # --- S6: email addresses in messages and authors ----------------------------------
 new_repo msg-email;           commit a.txt "ok" "Co-authored-by: Person <$BAD_EMAIL>"
 gate; check "email address in a commit message fails" 1

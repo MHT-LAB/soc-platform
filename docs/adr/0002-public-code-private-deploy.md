@@ -23,7 +23,12 @@ addresses) plus a private denylist that is passed in as a CI secret and never
 printed. It scans the tracked files, every line added by every commit in the
 pull request (so a name added and removed within one PR is still caught, since
 it would stay public in the PR ref), the commit messages, and the PR title and
-body (a squash merge turns them into the commit message on `main`).
+body (a squash merge turns them into the commit message on `main`). On a pull
+request it also checks the author and committer names in the range, because a
+squash adds every other author as a `Co-authored-by` line on `main`. A
+Dependabot PR's body is generated release notes, so it only warns: such a PR
+is merged with an explicit one-line message, and its branch is never updated
+with GitHub's "update branch" (ask Dependabot to rebase or recreate it).
 
 The gate fails closed. In CI a missing or empty denylist fails the check; the
 only exception is a Dependabot PR that changes dependency files alone. Anything
