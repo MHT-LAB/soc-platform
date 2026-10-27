@@ -19,6 +19,8 @@ The SOC holds keys that can isolate endpoints and reads sensitive telemetry, so 
 ## Exposure rule
 The only internet-facing surface is the ingest route behind a tunnel or reverse proxy. The console and API are reachable only over the mesh VPN.
 
+**Database isolation (Sprint 1).** PostgreSQL runs in its own container on an internal compose network shared only with the public app and the one-off migration job. The tunnel is not on that network, nothing is published on the host, and the `postgres` superuser is refused over the network. The public app connects as `soc_ingest`, a role with no table privileges whose only capability is calling `ingest_alert()`; the owner credentials exist only for the migration job. A compromised public app can therefore add alerts through that function and read nothing back. Residual risk: root on the host can read the database and every secret file, which is the same trust boundary as the rest of the host.
+
 **Console isolation (Sprint 1 hardening).** The console is a separate app and a separate service. The public app contains no console routes. The console service runs on the host network, bound to the host's loopback, so containers (including the tunnel) cannot connect to it; `tailscale serve` is the only path in, and it supplies the verified identity header. Residual risk: host networking gives the console container the host's network view (LAN and loopback services), so it stays non-root, read-only and capability-free, and holds only the console allowlist and the read-only EDR key. Any process on the host can also reach `127.0.0.1:8081` and send its own `Tailscale-User-Login`; only root-level host processes run on CT 110 today, so keep it that way.
 
 ## Failure of the human link

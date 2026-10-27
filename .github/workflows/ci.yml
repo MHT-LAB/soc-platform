@@ -166,6 +166,8 @@ jobs:
           # The smoke container holds 127.0.0.1:8080, which compose's api needs.
           docker rm -f smoke > /dev/null
           scripts/test-console-isolation.sh soc-api:ci
+      - name: database layer (compose db, migrate, seed, signed delivery, outage, isolation)
+        run: scripts/test-db-stack.sh soc-api:ci
       - name: public app starts in prod without a console allowlist
         run: |
           docker run -d --name pubnoallow --read-only --tmpfs /tmp --cap-drop ALL -p 127.0.0.1:8090:8080 soc-api:ci

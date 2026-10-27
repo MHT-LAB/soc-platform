@@ -23,6 +23,12 @@ services:
         required: false
     ports:
       - "127.0.0.1:8080:8080"
+    # default: the tunnel reaches this app there. db: the only route to the
+    # database. No depends_on db on purpose: a database outage must answer
+    # deliveries with 503, not stop /healthz or roll back a deploy.
+    networks:
+      - default
+      - db
     read_only: true
     tmpfs:
       - /tmp
@@ -87,3 +93,80 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+
+  # PostgreSQL 16 (ADR 0001). Only with the `db` profile, which deploy.sh turns on
+  # when db.env and db-owner.env exist, so hosts without them deploy as before.
+  # On an internal network shared only with api and migrate: the tunnel is not on
+  # it, nothing is published on the host, and the console (host network) does not
+  # use the database yet. The data directory is under /srv/soc so the container's
+  # nightly backup includes it. The postgres superuser is refused over TCP
+  # (initdb/20-hba.sh) and works only on the container's own socket.
+  db:
+    profiles: [db]
+    image: postgres:16.15-trixie@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
+    restart: unless-stopped
+    user: "999:999"
+    networks:
+      - db
+    # POSTGRES_PASSWORD (superuser, first start only) and SOC_DB_OWNER_PASSWORD.
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/db.env
+        required: true
+    volumes:
+      - ${SOC_STATE_DIR:-/srv/soc}/pgdata:/var/lib/postgresql/data
+      - ./db/initdb:/docker-entrypoint-initdb.d:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql:uid=999,gid=999,mode=0755
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    stop_grace_period: 30s
+    # Over TCP on purpose: the temporary server that runs the init scripts on
+    # first start listens on the socket only, and must not count as healthy.
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "soc_owner", "-d", "soc"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  # One-off: `docker compose run --rm migrate` applies the schema and gives
+  # soc_ingest its login (python -m soc_api.db deploy), as the owner role. Needs
+  # db-owner.env (SOC_MIGRATE_URL, SOC_INGEST_DB_PASSWORD). To seed a tenant:
+  # `run --rm --entrypoint python migrate -m soc_api.seed /seed/<file>.json`.
+  # Its own profile so `up -d` never starts it; only `run` does.
+  migrate:
+    profiles: [migrate]
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    restart: "no"
+    networks:
+      - db
+    entrypoint: ["python", "-m", "soc_api.db"]
+    command: ["deploy"]
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/db-owner.env
+        required: true
+    volumes:
+      - ${SOC_STATE_DIR:-/srv/soc}/seed:/seed:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+
+networks:
+  # No route out and none in from the default network.
+  db:
+    internal: true
