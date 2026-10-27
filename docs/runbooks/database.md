@@ -21,6 +21,50 @@ The owner bypasses RLS (policies are not forced on it), so the app must never co
 as the owner. A session that can run `SET app.client_id` can pick its client; the
 application is what sets it, and `soc_ingest` has no way to read the setting's effect.
 
+## First-time setup on the host
+
+Run on CT 110 as root. Nothing here needs a person or a model to see a secret.
+
+    # 1. A source name: lc- plus 16 random lowercase letters or digits. It is not a
+    #    credential; it keeps strangers from finding the endpoint.
+    SLUG="lc-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"; echo "$SLUG"
+
+    # 2. Generate every secret and write the three env files, pgdata and seed/.
+    #    Prints once: the EDR webhook destination and key, and a NAME=value block.
+    /opt/soc-platform/deploy/init-secrets.sh "$SLUG" <public-host>
+
+    # 3. Save the block in the secrets manager (folder /soc, bulk import as .env),
+    #    set the EDR output from the printed destination and key, then clear the
+    #    terminal and its scrollback. Do not paste the output anywhere else.
+
+    # 4. Put the tenant seed in /srv/soc/seed/ (private deploy repo), then deploy:
+    cd /opt/soc-platform && git pull -q --ff-only && deploy/deploy.sh edge
+    deploy/soc-compose.sh run --rm --entrypoint python migrate -m soc_api.seed /seed/<file>.json
+
+    # 5. Prove the path end to end (a synthetic detection; it lands in Unassigned):
+    deploy/soc-compose.sh exec -T api python -m soc_api.selftest --repeat
+    deploy/soc-compose.sh exec -T api python -m soc_api.selftest --url https://<public-host>
+
+`init-secrets.sh` never overwrites: if any target file exists it stops before creating
+anything. The self-test prints only the HTTP status and a detection id. `200` twice
+with the same id means the repeat was accepted and stored once; `503` means the
+database is not reachable (nothing is stored); `401` means the key in the env file and
+the key in the output differ. Its rows have rule `soc-selftest`, and the pager must
+skip them.
+
+### Rebuilding the env files after losing the host
+The secrets manager holds the five values (`SOC_DB_SUPERUSER_PASSWORD`,
+`SOC_DB_OWNER_PASSWORD`, `SOC_DB_INGEST_PASSWORD`, `SOC_INGEST_LC_SLUG`,
+`SOC_INGEST_LC_HMAC`). With them exported in the root shell (for example through the
+secrets manager's CLI `run` command), on a host whose `/srv/soc/env/` lacks the three
+files:
+
+    /opt/soc-platform/deploy/init-secrets.sh --restore
+
+It rebuilds the same three files byte for byte, prints nothing secret, and also
+refuses to overwrite. Use it with a restored `pgdata`: the passwords must match the
+ones the data directory was created with.
+
 ## On the host (Stage A)
 
 PostgreSQL 16 runs as the `db` service in `deploy/compose.yml` (profile `db`, turned

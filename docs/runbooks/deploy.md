@@ -16,6 +16,7 @@ recorded in the deploy log.
 | `/srv/soc/tunnel/<tunnel id>.json` | the tunnel's credentials (runs this one tunnel, nothing else), owned by the cloudflared container user | 400 |
 | `/srv/soc/env/image.env` | the verified image digest, written by `deploy.sh` | 600 |
 | `/srv/soc/env/db.env`, `db-owner.env` | the database's secrets (see [database.md](database.md)); both or neither | 600 |
+| `/srv/soc/env/ingest.env` | created with the two above by `deploy/init-secrets.sh` (first-time setup in [database.md](database.md)) | 600 |
 | `/srv/soc/pgdata` | PostgreSQL's data, owned by uid 999, so it is inside the container's nightly backup | 700 |
 | `/srv/soc/seed/` | tenant seed files for `python -m soc_api.seed`, mounted read-only into the migration job | 755 |
 | `/srv/soc/deploy.log` | every verification and deploy, with digests | 644 |

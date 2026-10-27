@@ -36,21 +36,31 @@ pass() { echo "ok   - $*"; }
 fail() { echo "FAIL - $*"; FAILS=$((FAILS + 1)); }
 rand() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
-SUPER_PW="$(rand 24)"; OWNER_PW="$(rand 24)"; INGEST_PW="$(rand 24)"; HMAC="$(rand 24)"
-SLUG="lc-smoketest"
+SLUG="lc-$(rand 8)"
+mkdir -p "$WORK"
+# The same tool the host uses. SOC_INIT_TEST skips its root check and chown; the
+# data directory is handed to uid 999 below by a container instead.
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-secrets.sh" "$SLUG" soc.example.com \
+  > "$WORK/init.out" 2>&1 \
+  && pass "init-secrets.sh created the host's secret files" \
+  || { cat "$WORK/init.out"; fail "init-secrets.sh failed"; exit 1; }
+grep -q "^Destination Host: https://soc.example.com/ingest/$SLUG$" "$WORK/init.out" 2> /dev/null \
+  || grep -q "Destination Host: https://soc.example.com/ingest/$SLUG" "$WORK/init.out" \
+  && pass "init-secrets.sh printed the webhook destination" || fail "init-secrets.sh did not print the destination"
+rm -f "$WORK/init.out"
+envval() { sed -n "s/^$2=//p" "$WORK/env/$1"; }
+SUPER_PW="$(envval db.env POSTGRES_PASSWORD)"
+OWNER_PW="$(envval db.env SOC_DB_OWNER_PASSWORD)"
+INGEST_PW="$(envval db-owner.env SOC_INGEST_DB_PASSWORD)"
 
-mkdir -p "$WORK/env" "$WORK/seed" "$WORK/pgdata"
-as_root chown 999:999 /w/pgdata; as_root chmod 700 /w/pgdata
+as_root chown 999:999 /w/pgdata
 echo 'SOC_CONSOLE_USERS=ci@example.com' > "$WORK/env/console.env"
-printf 'POSTGRES_PASSWORD=%s\nSOC_DB_OWNER_PASSWORD=%s\n' "$SUPER_PW" "$OWNER_PW" > "$WORK/env/db.env"
-printf 'SOC_MIGRATE_URL=postgresql+psycopg://soc_owner:%s@db:5432/soc\nSOC_INGEST_DB_PASSWORD=%s\n' \
-  "$OWNER_PW" "$INGEST_PW" > "$WORK/env/db-owner.env"
-printf 'SOC_INGEST_SECRETS={"%s":["%s"]}\nSOC_INGEST_DATABASE_URL=postgresql+psycopg://soc_ingest:%s@db:5432/soc\n' \
-  "$SLUG" "$HMAC" "$INGEST_PW" > "$WORK/env/ingest.env"
-chmod 600 "$WORK"/env/*.env
+chmod 600 "$WORK/env/console.env"
+# The source is bound to an organisation the self-test does not use, so its
+# alerts must land in Unassigned.
 cat > "$WORK/seed/smoke.json" <<JSON
 {"client": {"slug": "smoke", "name": "Smoke Test Co", "status": "internal"},
- "sources": [{"slug": "$SLUG", "type": "limacharlie"}]}
+ "sources": [{"slug": "$SLUG", "type": "limacharlie", "external_id": "00000000-0000-4000-8000-0000000000aa"}]}
 JSON
 
 wait_db() {
@@ -112,6 +122,18 @@ ID1="smoke-$(rand 8)"
 [[ "$(rows "$ID1")" == 1 ]] && pass "repeat added no row" || fail "repeat changed the row count"
 [[ "$(deliver "$ID1-x" "$NOW" bad)" == 401 ]] && pass "bad signature refused (401)" || fail "bad signature was not a 401"
 [[ "$(rows "$ID1-x")" == 0 ]] && pass "bad signature stored nothing" || fail "bad signature stored a row"
+
+# --- the built-in self-test (runs inside the api container, like on the host) ---
+HMAC="$(envval ingest.env SOC_INGEST_SECRETS | sed -n 's/.*\["\([0-9a-f]*\)"\].*/\1/p')"
+OUT="$(compose exec -T api python -m soc_api.selftest --repeat)" && RC=0 || RC=$?
+[[ "$RC" == 0 && "$(grep -c '^status=200 ' <<< "$OUT")" == 2 ]] \
+  && pass "selftest: both deliveries accepted" || fail "selftest was not accepted twice (rc=$RC)"
+ST_ID="$(sed -n '1s/.*detect_id=//p' <<< "$OUT")"
+[[ -n "$ST_ID" && "$(rows "$ST_ID")" == 1 ]] && pass "selftest: stored once" || fail "selftest did not store exactly one row"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT c.slug FROM alert a JOIN client c ON c.id = a.client_id WHERE a.event_id = '$ST_ID'")" == unassigned ]] \
+  && pass "selftest: landed in Unassigned" || fail "selftest alert did not land in Unassigned"
+[[ -n "$HMAC" && "$OUT" != *"$HMAC"* && "$OUT" != *"$INGEST_PW"* && "$OUT" != *"$SLUG"* ]] \
+  && pass "selftest: output holds no secret or source name" || fail "selftest output leaked a secret or the source name"
 
 # --- network isolation ---
 probe default "import socket; socket.getaddrinfo('db', 5432)" > /dev/null 2>&1 \
