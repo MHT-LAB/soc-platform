@@ -179,3 +179,30 @@ def test_a_malformed_secrets_setting_does_not_echo_it(
     assert selftest.main([]) == 2
     out = capsys.readouterr().out
     assert SECRET not in out
+
+
+@pytest.mark.parametrize("url", ["file:///etc/hosts", "data:,hello"])
+def test_post_itself_cannot_open_anything_but_http(url: str) -> None:
+    # Even called directly, past main()'s scheme check, nothing is read.
+    assert selftest.post(url, b"{}", "0" * 64) == "unreachable"
+
+
+def test_a_redirect_is_not_followed(env: None, capsys: pytest.CaptureFixture[str]) -> None:
+    class Redirect(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            # 303 is the redirect urllib follows for a POST (as a GET).
+            self.send_response(303)
+            self.send_header("Location", "http://127.0.0.1:1/elsewhere")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Redirect)
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        assert selftest.main(["--url", f"http://127.0.0.1:{server.server_port}"]) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert capsys.readouterr().out.startswith("status=303 ")

@@ -35,6 +35,19 @@ SELFTEST_OID = "00000000-0000-4000-8000-000000000000"
 SELFTEST_RULE = "soc-selftest"
 TIMEOUT_SECONDS = 10
 
+# Only plain HTTP(S): no file:// or ftp:// handler, no redirects, no proxy from the
+# environment. A URL of any other kind cannot be opened even if a caller skips the
+# scheme check in main().
+_OPENER = urllib.request.OpenerDirector()
+for _handler in (
+    urllib.request.HTTPHandler(),
+    urllib.request.HTTPSHandler(),
+    urllib.request.HTTPDefaultErrorHandler(),
+    urllib.request.HTTPErrorProcessor(),
+    urllib.request.UnknownHandler(),  # any other scheme raises instead of returning None
+):
+    _OPENER.add_handler(_handler)
+
 
 def build_body(detect_id: str, now_ms: int) -> bytes:
     """Compact JSON with sorted keys, the same shape LimaCharlie sends."""
@@ -57,14 +70,14 @@ def sign(secret: bytes, body: bytes) -> str:
 
 def post(url: str, body: bytes, signature: str) -> str:
     """Return the HTTP status as text, or a short failure word. Nothing else leaks."""
-    request = urllib.request.Request(  # noqa: S310 - scheme checked in main()
+    request = urllib.request.Request(  # noqa: S310 - the opener only speaks HTTP(S)
         url,
         data=body,
         method="POST",
         headers={"Content-Type": "application/json", SIGNATURE_HEADER: signature},
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # noqa: S310
+        with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
             return str(response.status)
     except urllib.error.HTTPError as exc:
         return str(exc.code)
