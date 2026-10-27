@@ -10,7 +10,8 @@
 # superuser is refused over the network while the service roles work; soc_ingest
 # can read nothing; with the database stopped a delivery gets a 503 and stores
 # nothing while /healthz stays up.
-# Needs Docker and passwordless sudo (the data directory belongs to uid 999).
+# Needs Docker only: the data directory is handed to uid 999 by a throwaway
+# container, so no sudo is involved.
 # Every secret here is a throwaway value for containers that live for this run.
 set -euo pipefail
 
@@ -22,7 +23,13 @@ P=socdbtest
 export SOC_API_IMAGE="$IMAGE" SOC_STATE_DIR="$WORK" SOC_ENV=prod COMPOSE_PROFILES=db
 
 compose() { docker compose -p "$P" -f "$HERE/../deploy/compose.yml" "$@"; }
-cleanup() { compose down -v --remove-orphans > /dev/null 2>&1 || true; sudo rm -rf "$WORK"; }
+# Run a command as root in a throwaway container with the work directory mounted.
+as_root() { docker run --rm --user 0 -v "$WORK:/w" --entrypoint "$1" "$IMAGE" "${@:2}"; }
+cleanup() {
+  compose down -v --remove-orphans > /dev/null 2>&1 || true
+  as_root rm -rf /w/pgdata > /dev/null 2>&1 || true
+  rm -rf "$WORK"
+}
 trap cleanup EXIT
 
 pass() { echo "ok   - $*"; }
@@ -33,7 +40,7 @@ SUPER_PW="$(rand 24)"; OWNER_PW="$(rand 24)"; INGEST_PW="$(rand 24)"; HMAC="$(ra
 SLUG="lc-smoketest"
 
 mkdir -p "$WORK/env" "$WORK/seed" "$WORK/pgdata"
-sudo chown 999:999 "$WORK/pgdata"; sudo chmod 700 "$WORK/pgdata"
+as_root chown 999:999 /w/pgdata; as_root chmod 700 /w/pgdata
 echo 'SOC_CONSOLE_USERS=ci@example.com' > "$WORK/env/console.env"
 printf 'POSTGRES_PASSWORD=%s\nSOC_DB_OWNER_PASSWORD=%s\n' "$SUPER_PW" "$OWNER_PW" > "$WORK/env/db.env"
 printf 'SOC_MIGRATE_URL=postgresql+psycopg://soc_owner:%s@db:5432/soc\nSOC_INGEST_DB_PASSWORD=%s\n' \
