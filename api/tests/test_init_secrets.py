@@ -312,3 +312,18 @@ def test_restore_also_refuses_to_overwrite(tmp_path: Path) -> None:
     r = run(tmp_path, "--restore", **block)
     assert r.returncode == 1
     assert (tmp_path / "env/db.env").read_bytes() == before
+
+
+def test_secret_values_only_ever_reach_shell_builtins() -> None:
+    # A here-document can go through a temporary file (bash before 5.1), and an
+    # external command's arguments are visible to every process on the host. The
+    # secret-bearing variables may only appear in printf (a builtin) and tests.
+    text = SCRIPT.read_text()
+    assert "<<" not in text.replace("<<<", "")
+    secret_vars = ("SUPER_PW", "OWNER_PW", "INGEST_PW", "HMAC")
+    for line in text.splitlines():
+        code = line.split("#", 1)[0]
+        if any(f"${v}" in code or f"${{{v}}}" in code for v in secret_vars):
+            assert code.lstrip().startswith(
+                ("printf", '"', "[[", "SUPER_PW=", "OWNER_PW=", "INGEST_PW=", "HMAC=")
+            ), line

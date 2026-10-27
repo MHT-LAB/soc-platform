@@ -142,21 +142,22 @@ if [[ "$MODE" == restore ]]; then
   exit 0
 fi
 
-cat << OUT
-Created $DB_ENV, $OWNER_ENV and $INGEST_ENV (mode 600), $PGDATA_DIR and $SEED_DIR.
-
-SECRETS BELOW ARE SHOWN ONCE. Do not paste them into chat, a ticket or a note.
-
-1) EDR webhook output
-   Destination Host: https://$HOST/ingest/$SLUG
-   secret_key:       $HMAC
-
-2) Secrets manager, folder /soc (bulk import as .env)
-SOC_DB_SUPERUSER_PASSWORD=$SUPER_PW
-SOC_DB_OWNER_PASSWORD=$OWNER_PW
-SOC_DB_INGEST_PASSWORD=$INGEST_PW
-SOC_INGEST_LC_SLUG=$SLUG
-SOC_INGEST_LC_HMAC=$HMAC
-
-When both are saved, clear the terminal and its scrollback.
-OUT
+# printf is a shell builtin: the values never become another program's arguments
+# or pass through a here-document's temporary file.
+printf '%s\n' \
+  "Created $DB_ENV, $OWNER_ENV and $INGEST_ENV (mode 600), $PGDATA_DIR and $SEED_DIR." \
+  "" \
+  "SECRETS BELOW ARE SHOWN ONCE. Do not paste them into chat, a ticket or a note." \
+  "" \
+  "1) EDR webhook output" \
+  "   Destination Host: https://$HOST/ingest/$SLUG" \
+  "   secret_key:       $HMAC" \
+  "" \
+  "2) Secrets manager, folder /soc (bulk import as .env)" \
+  "SOC_DB_SUPERUSER_PASSWORD=$SUPER_PW" \
+  "SOC_DB_OWNER_PASSWORD=$OWNER_PW" \
+  "SOC_DB_INGEST_PASSWORD=$INGEST_PW" \
+  "SOC_INGEST_LC_SLUG=$SLUG" \
+  "SOC_INGEST_LC_HMAC=$HMAC" \
+  "" \
+  "When both are saved, clear the terminal and its scrollback."
