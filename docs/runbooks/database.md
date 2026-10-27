@@ -41,11 +41,17 @@ log in, `CREATEROLE`, not a superuser) and the database `soc`, then rewrites
 works on the container's own socket, which needs root on the host:
 
     # On CT 110 as root: a shell as the superuser (for example to reset a lost password)
-    docker compose -p soc -f /opt/soc-platform/deploy/compose.yml exec db psql -U postgres -d soc
+    /opt/soc-platform/deploy/soc-compose.sh exec db psql -U postgres -d soc
+
+`deploy/soc-compose.sh` runs compose exactly as `deploy.sh` does (project, both
+compose files, the pinned image, the `db` profile). Use it for every one-off command
+on the host; a bare `docker compose -f compose.yml` would look for an image and
+project that do not exist there.
 
 The init scripts run only when `pgdata` is empty. Changing `SOC_DB_OWNER_PASSWORD` in
-`db.env` later does nothing by itself: also run `ALTER ROLE soc_owner PASSWORD …`
-as above, and update `db-owner.env`.
+`db.env` later does nothing by itself: in the superuser shell above run
+`\password soc_owner` (psql hashes the new password before sending it, so it never
+reaches the server or its log), then put the same value in `db-owner.env`.
 
 ### What a deploy does
 `deploy.sh` starts `db`, waits for its health check (over TCP, so the temporary
@@ -54,7 +60,9 @@ first-start server does not count), then runs the migration job as `soc_owner`:
 its login, a 10-connection cap and the password in `SOC_INGEST_DB_PASSWORD`. The
 password is turned into a SCRAM-SHA-256 verifier in the job, so the server and its
 log never see the plain value. It changes nothing else about the role. To rotate:
-change the password in `db-owner.env` and `ingest.env`, then deploy.
+change the password in `db-owner.env` and `ingest.env`, then deploy. Between the
+migration job and the swap the running app cannot open new database connections,
+so expect a few seconds of 503s (the sender retries, if it does; see the retry test).
 
 **Expand, then contract.** A rollback swaps the image only; it never runs a
 downgrade. So every migration must keep working with the previous release's code:
@@ -75,9 +83,9 @@ Where: the CT 110 host or a dev shell, as the owner role.
 
 ## Seed a tenant
 
-    # On CT 110 as root, with the seed file in /srv/soc/seed/:
-    docker compose -p soc -f /opt/soc-platform/deploy/compose.yml run --rm \
-      --entrypoint python migrate -m soc_api.seed /seed/<file>.json
+    # On CT 110 as root, with the seed file in /srv/soc/seed/, after a deploy:
+    /opt/soc-platform/deploy/soc-compose.sh run --rm --entrypoint python \
+      migrate -m soc_api.seed /seed/<file>.json
 
 Safe to repeat: rows that already match are left alone. A row that exists with
 different values (for example a source that would move to another client) stops the

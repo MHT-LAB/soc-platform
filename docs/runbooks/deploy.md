@@ -28,6 +28,9 @@ come up or a migration fails, it puts the previous `image.env` back and stops:
 nothing running has changed. With neither file it logs that it is skipping the
 database; with only one of them it refuses to run. See
 [database.md](database.md) for the rules this puts on migrations.
+For one-off commands against the deployed stack (a `psql` shell, seeding, `ps`,
+logs) use `deploy/soc-compose.sh <compose args>`, which calls compose exactly as
+`deploy.sh` does.
 
 ## Edge tunnel (Stage A)
 The tunnel is **locally managed**: its routes come only from
