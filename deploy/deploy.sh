@@ -16,6 +16,12 @@
 #    run a new image with an old or modified compose layout.
 # 3. Pin the deployment to the verified digest (never the mutable tag), so the
 #    image can't be swapped between verification and pull.
+# 3b. When the host has a database (env/db.env and env/db-owner.env), start it,
+#    wait until it is healthy, and run the migrations with the new image BEFORE
+#    anything is swapped. A failed migration restores the previous image.env and
+#    stops; the running api and console are never touched. Migrations therefore
+#    have to keep working with the previous image (expand, then contract): a
+#    rollback swaps the image only and never runs a downgrade.
 # 4. Start the stack (public api and host-network console), wait for both to be
 #    healthy, and confirm both containers use exactly the verified digest. On any
 #    failure, roll back to the previous one.
@@ -56,6 +62,9 @@ LOG="$STATE/deploy.log"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
 die() { log "FAILED: $*"; exit 1; }
 
+# Profiles are decided below, from the files on the host; never from the shell.
+unset COMPOSE_PROFILES
+
 compose() {
   docker compose -p soc \
     -f "$HERE/compose.yml" -f "$HERE/$OVERLAY" \
@@ -80,6 +89,22 @@ touch "$LOG"
 CONSOLE_USERS_LINE="^SOC_CONSOLE_USERS=[[:space:]\"']*[^[:space:],\"']"
 grep -qE "$CONSOLE_USERS_LINE" "$STATE/env/console.env" 2>/dev/null \
   || die "$STATE/env/console.env must set SOC_CONSOLE_USERS=<login>[,<login>...]"
+
+# The database is optional until the host has its secrets: both files or neither.
+# Half a setup is refused here, before anything changes, rather than skipped.
+DB_ENV="$STATE/env/db.env"
+DB_OWNER_ENV="$STATE/env/db-owner.env"
+if [[ -s "$DB_ENV" && -s "$DB_OWNER_ENV" ]]; then
+  [[ -d "$STATE/pgdata" ]] \
+    || die "$STATE/pgdata is missing (create it owned by 999:999, mode 700)"
+  mkdir -p "$STATE/seed"
+  export COMPOSE_PROFILES=db
+  DB=1
+elif [[ -e "$DB_ENV" || -e "$DB_OWNER_ENV" ]]; then
+  die "$DB_ENV and $DB_OWNER_ENV must both exist and be non-empty (or neither)"
+else
+  DB=0
+fi
 
 # The Stage A edge is a locally managed tunnel. Without its config and
 # credentials the tunnel would crash-loop after the swap; stop here instead.
@@ -166,6 +191,36 @@ healthy() {
 }
 
 compose pull --quiet
+
+if [[ "$DB" == 1 ]]; then
+  # Put image.env back as it was: nothing has been swapped yet, so the host keeps
+  # running exactly what it ran before.
+  restore_image() {
+    if [[ -n "$PREVIOUS" ]]; then write_image "$PREVIOUS"; else rm -f "$IMAGE_ENV"; fi
+  }
+  db_healthy() {
+    local cid status
+    for _ in $(seq 1 60); do
+      cid="$(compose ps -q db)" || cid=""
+      if [[ -n "$cid" ]]; then
+        status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2> /dev/null || true)"
+        [[ "$status" == healthy ]] && return 0
+      fi
+      sleep 2
+    done
+    return 1
+  }
+  log "starting the database"
+  compose up -d db || { restore_image; die "the database did not start; nothing was swapped"; }
+  db_healthy || { restore_image; die "the database is not healthy; nothing was swapped"; }
+  log "running migrations with the new image"
+  compose run --rm migrate \
+    || { restore_image; die "migration failed; previous image restored, nothing was swapped"; }
+  log "migrations applied"
+else
+  log "no database configured on this host (env/db.env and env/db-owner.env); skipping migrations"
+fi
+
 compose up -d --remove-orphans
 
 if healthy && running_digest_ok "$REPO@$DIGEST"; then

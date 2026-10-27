@@ -15,7 +15,19 @@ recorded in the deploy log.
 | `/srv/soc/tunnel/config.yml` | the tunnel's ingress rules, installed from the private deploy repo | 644 |
 | `/srv/soc/tunnel/<tunnel id>.json` | the tunnel's credentials (runs this one tunnel, nothing else), owned by the cloudflared container user | 400 |
 | `/srv/soc/env/image.env` | the verified image digest, written by `deploy.sh` | 600 |
+| `/srv/soc/env/db.env`, `db-owner.env` | the database's secrets (see [database.md](database.md)); both or neither | 600 |
+| `/srv/soc/pgdata` | PostgreSQL's data, owned by uid 999, so it is inside the container's nightly backup | 700 |
+| `/srv/soc/seed/` | tenant seed files for `python -m soc_api.seed`, mounted read-only into the migration job | 755 |
 | `/srv/soc/deploy.log` | every verification and deploy, with digests | 644 |
+
+## Database step
+When `env/db.env` and `env/db-owner.env` both exist, `deploy.sh` also starts the
+`db` service, waits until it is healthy and runs the migration job with the new,
+verified image **before** it swaps the api and console. If the database does not
+come up or a migration fails, it puts the previous `image.env` back and stops:
+nothing running has changed. With neither file it logs that it is skipping the
+database; with only one of them it refuses to run. See
+[database.md](database.md) for the rules this puts on migrations.
 
 ## Edge tunnel (Stage A)
 The tunnel is **locally managed**: its routes come only from
@@ -102,4 +114,4 @@ Host files (mode 600) read by the console service (the public app gets none):
 |---|---|
 | `/srv/soc/env/console.env` | **Required.** `SOC_CONSOLE_USERS=login@example.com`, the logins allowed into the console. The console refuses to start in prod without it, and `deploy.sh` stops before changing anything if it is missing. |
 | `/srv/soc/env/lc.env` (optional) | `SOC_LC_OID=…` and `SOC_LC_API_KEY=…` (read-only key) for the sensor fleet panel |
-| `/srv/soc/env/ingest.env` (the `api` service only, mode 600) | `SOC_INGEST_SECRETS={"<source>": ["<current>", "<next>"]}` as one line of JSON (each secret 16+ characters; a source with no entry is a 404 on the internet). Make each source name unguessable, for example `lc-` plus 16 random lowercase letters and digits: a configured source answers 401/413/415 where an unknown one answers 404, and its per-source rate limit counts unauthenticated requests too, so the name is what keeps a stranger from finding it and filling that bucket and `SOC_INGEST_DATABASE_URL=postgresql+psycopg://soc_ingest:…@<host>/<db>`. The role can only call `ingest_alert()`. Rotate by adding the new secret as `next`, changing the webhook output to it, then dropping the old one. Without this file every `/ingest/` path is a 404; with secrets but no database, deliveries get a 503 (nothing is stored, never a false 200). **Not deployed or routed yet:** the edge rule for `/ingest/` is a separate step. |
+| `/srv/soc/env/ingest.env` (the `api` service only, mode 600) | `SOC_INGEST_SECRETS={"<source>": ["<current>", "<next>"]}` as one line of JSON (each secret 16+ characters; a source with no entry is a 404 on the internet). Make each source name unguessable, for example `lc-` plus 16 random lowercase letters and digits: a configured source answers 401/413/415 where an unknown one answers 404, and its per-source rate limit counts unauthenticated requests too, so the name is what keeps a stranger from finding it and filling that bucket and `SOC_INGEST_DATABASE_URL=postgresql+psycopg://soc_ingest:…@<host>/<db>`. The role can only call `ingest_alert()`. Rotate by adding the new secret as `next`, changing the webhook output to it, then dropping the old one. Without this file every `/ingest/` path is a 404; with secrets but no database, deliveries get a 503 (nothing is stored, never a false 200). The edge rule for `/ingest/` is live (private deploy repo). |
