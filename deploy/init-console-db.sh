@@ -6,17 +6,21 @@
 #
 #   init-console-db.sh
 #   init-console-db.sh --restore
-#       rebuild the files from two values in the environment (from the secrets
+#       rebuild the files from three values in the environment (from the secrets
 #       manager) after a lost host; prints nothing secret.
 #
 # It writes, in $SOC_STATE_DIR (default /srv/soc), both mode 600:
 #   env/console-db.env     SOC_CONSOLE_DATABASE_URL, SOC_CONSOLE_SECRET  (console)
 #   env/console-owner.env  SOC_CONSOLE_DB_PASSWORD                       (migrate)
+#   env/pager-ack.env      SOC_ACK_KEY                                   (console, worker)
 # SOC_CONSOLE_DATABASE_URL points at 127.0.0.1:5432: the console runs on the host
 # network and the database publishes that port on the host's loopback only.
 # SOC_CONSOLE_SECRET signs the form tokens that stop another web page from pressing
-# Acknowledge or Close for you. Nothing is written to deploy.log or anywhere else. It
-# never overwrites: if either file exists it stops before creating anything. The next
+# Acknowledge or Close for you. SOC_ACK_KEY signs the Acknowledge link on a phone
+# notification; the pager worker holds it too, and it is a different secret from the form
+# secret because this one crosses the push server inside the link. Nothing is written to
+# deploy.log or anywhere else. It never overwrites: if any file exists it stops before
+# creating anything. The next
 # `deploy.sh` migration job gives the database role soc_console its login from
 # console-owner.env, and the console reads console-db.env.
 #
@@ -38,6 +42,7 @@ STATE="${SOC_STATE_DIR:-/srv/soc}"
 ENV_DIR="$STATE/env"
 CONSOLE_ENV="$ENV_DIR/console-db.env"
 OWNER_ENV="$ENV_DIR/console-owner.env"
+ACK_ENV="$ENV_DIR/pager-ack.env"
 
 SECRET_RE='^[0-9a-f]{32,128}$'
 
@@ -56,16 +61,19 @@ esac
 if [[ "$MODE" == restore ]]; then
   CONSOLE_PW="${SOC_DB_CONSOLE_PASSWORD:-}"
   FORM_KEY="${SOC_CONSOLE_SECRET:-}"
+  ACK_KEY="${SOC_ACK_KEY:-}"
   [[ "$CONSOLE_PW" =~ $SECRET_RE ]] || die "SOC_DB_CONSOLE_PASSWORD is missing or not 32-128 hex characters"
   [[ "$FORM_KEY" =~ $SECRET_RE ]] || die "SOC_CONSOLE_SECRET is missing or not 32-128 hex characters"
+  [[ "$ACK_KEY" =~ $SECRET_RE ]] || die "SOC_ACK_KEY is missing or not 32-128 hex characters"
 else
   CONSOLE_PW="$(rand_hex 24)"
   FORM_KEY="$(rand_hex 32)"
+  ACK_KEY="$(rand_hex 32)"
 fi
 
 # --- refuse before creating anything ---------------------------------------------
 [[ -s "$ENV_DIR/db-owner.env" ]] || die "$ENV_DIR/db-owner.env is missing: run init-secrets.sh first"
-for f in "$CONSOLE_ENV" "$OWNER_ENV"; do
+for f in "$CONSOLE_ENV" "$OWNER_ENV" "$ACK_ENV"; do
   [[ ! -e "$f" ]] || die "$f already exists; this never overwrites"
 done
 
@@ -86,6 +94,7 @@ trap cleanup EXIT
 printf 'SOC_CONSOLE_DATABASE_URL=postgresql+psycopg://soc_console:%s@127.0.0.1:5432/soc\nSOC_CONSOLE_SECRET=%s\n' \
   "$CONSOLE_PW" "$FORM_KEY" > "$TMP/console-db.env"
 printf 'SOC_CONSOLE_DB_PASSWORD=%s\n' "$CONSOLE_PW" > "$TMP/console-owner.env"
+printf 'SOC_ACK_KEY=%s\n' "$ACK_KEY" > "$TMP/pager-ack.env"
 
 install_file() { # name target
   [[ ! -e "$2" ]] || die "$2 appeared while this ran; stopping"
@@ -96,22 +105,24 @@ $2"
 }
 install_file console-db.env "$CONSOLE_ENV"
 install_file console-owner.env "$OWNER_ENV"
+install_file pager-ack.env "$ACK_ENV"
 
 # --- tell the operator, once ----------------------------------------------------
 if [[ "$MODE" == restore ]]; then
-  echo "restored $CONSOLE_ENV and $OWNER_ENV from the environment"
+  echo "restored $CONSOLE_ENV, $OWNER_ENV and $ACK_ENV from the environment"
   exit 0
 fi
 
 # printf is a shell builtin: the values never become another program's arguments
 # or pass through a here-document's temporary file.
 printf '%s\n' \
-  "Created $CONSOLE_ENV and $OWNER_ENV (mode 600)." \
+  "Created $CONSOLE_ENV, $OWNER_ENV and $ACK_ENV (mode 600)." \
   "" \
   "SECRETS BELOW ARE SHOWN ONCE. Do not paste them into chat, a ticket or a note." \
   "" \
   "Secrets manager, folder /soc (bulk import as .env)" \
   "SOC_DB_CONSOLE_PASSWORD=$CONSOLE_PW" \
   "SOC_CONSOLE_SECRET=$FORM_KEY" \
+  "SOC_ACK_KEY=$ACK_KEY" \
   "" \
-  "When both are saved, clear the terminal and its scrollback, then run deploy.sh."
+  "When all three are saved, clear the terminal and its scrollback, then run deploy.sh."

@@ -10,6 +10,8 @@
 # superuser is refused over the network while the service roles work; soc_ingest
 # can read nothing; with the database stopped a delivery gets a 503 and stores
 # nothing while /healthz stays up.
+# (The urgent-page chain near the end is the pager's full loop: push with buttons, a repeat,
+# the phone Ack link, silence.)
 # Then the pager worker (note 23, P2): init-worker.sh creates its files, a fake push
 # server on the worker's own network receives what it sends, and the checks are: one
 # push per case (a repeat in the same case adds none, a new rule adds one), the topic
@@ -89,14 +91,14 @@ rows() { compose exec -T db psql -U postgres -d soc -Atc "SELECT count(*) FROM a
 
 # Sign and POST one delivery from inside the api container (the secret never
 # leaves it). $1 detect id, $2 gen_time in ms, $3 "good" or "bad" signature,
-# $4 optional rule name (default smoke-test).
+# $4 optional rule name (default smoke-test), $5 optional LimaCharlie priority (default 3).
 deliver() {
-  compose exec -T api python - "$1" "$2" "$3" "${4:-smoke-test}" << 'PY'
+  compose exec -T api python - "$1" "$2" "$3" "${4:-smoke-test}" "${5:-3}" << 'PY'
 import hashlib, hmac, json, os, sys, urllib.error, urllib.request
-detect_id, gen_time, mode, rule = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+detect_id, gen_time, mode, rule, prio = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5])
 slug, secrets = next(iter(json.loads(os.environ["SOC_INGEST_SECRETS"]).items()))
 body = json.dumps({"author": "ci@example.com", "cat": "smoke", "detect_id": detect_id,
-                   "gen_time": gen_time, "priority": 3, "source_rule": rule},
+                   "gen_time": gen_time, "priority": prio, "source_rule": rule},
                   separators=(",", ":"), sort_keys=True).encode()
 sig = hmac.new(secrets[0].encode(), body, hashlib.sha256).hexdigest()
 if mode == "bad":
@@ -201,8 +203,22 @@ WORKER_PW="$(envval worker-owner.env SOC_WORKER_DB_PASSWORD)"
 TOPIC="$(envval worker.env SOC_NTFY_TOPIC)"
 compose run --rm migrate && pass "migration job gave soc_worker its login" || { fail "migrate (worker login) failed"; exit 1; }
 
+# The console's files come first: the phone-Ack key (pager-ack.env) is shared with the worker.
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-console-db.sh" > "$WORK/init-console.out" 2>&1 \
+  && pass "init-console-db.sh created the console's secret files" \
+  || { cat "$WORK/init-console.out"; fail "init-console-db.sh failed"; exit 1; }
+rm -f "$WORK/init-console.out"
+CONSOLE_PW="$(envval console-owner.env SOC_CONSOLE_DB_PASSWORD)"
+
 # The fake push server lives on the worker's own network, under the name the worker is told.
-echo 'SOC_NTFY_SERVER=http://fakentfy:8089' > "$WORK/env/policy.env"
+# The console's address and short re-send times (20 s and 60 s instead of 15 and 60 minutes)
+# are not secret, so they go in policy.env.
+cat > "$WORK/env/policy.env" << 'ENV'
+SOC_NTFY_SERVER=http://fakentfy:8089
+SOC_CONSOLE_BASE_URL=https://console.example.net
+SOC_REPAGE_FIRST_SECONDS=20
+SOC_REPAGE_SECOND_SECONDS=60
+ENV
 chmod 600 "$WORK/env/policy.env"
 export COMPOSE_PROFILES=db,worker
 SOC_ENV=dev compose create worker > /dev/null
@@ -235,8 +251,8 @@ sleep 12
 [[ "$(npush)" == 2 ]] && pass "worker: exactly one push per case (two cases, two pushes)" || fail "worker: wrong number of pushes ($(npush))"
 [[ "$(fk_py 'print(*sorted(json.loads(x)["title"] for x in L), sep="|")')" == "unassigned: smoke-test|unassigned: soc-selftest" ]] \
   && pass "worker: titles name the client and the rule" || fail "worker: unexpected titles"
-[[ "$(fk_py "print(all(json.loads(x)['topic'] == '$TOPIC' and sorted(json.loads(x)) == ['message', 'priority', 'title', 'topic'] and json.loads(x)['priority'] >= 4 for x in L))")" == True ]] \
-  && pass "worker: JSON body with the topic, unassigned pages at priority 4 or more" || fail "worker: push body is not as expected"
+[[ "$(fk_py "print(all(json.loads(x)['topic'] == '$TOPIC' and sorted(json.loads(x)) == ['actions', 'click', 'message', 'priority', 'title', 'topic'] and json.loads(x)['priority'] >= 4 for x in L))")" == True ]] \
+  && pass "worker: JSON body with the topic, the console tap target and an Ack button, unassigned pages at priority 4 or more" || fail "worker: push body is not as expected"
 [[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT count(*) FILTER (WHERE status = 'sent'), count(*) FROM notification")" == "2|2" ]] \
   && pass "worker: both pages are recorded as sent" || fail "worker: pages are not all recorded as sent"
 
@@ -284,11 +300,6 @@ raise SystemExit(1)" > /dev/null 2>&1 \
   && pass "soc_worker cannot read the alert payload" || fail "soc_worker can read the alert payload"
 
 # --- the console's database access (loopback publish) ---------------------------
-SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-console-db.sh" > "$WORK/init-console.out" 2>&1 \
-  && pass "init-console-db.sh created the console's secret files" \
-  || { cat "$WORK/init-console.out"; fail "init-console-db.sh failed"; exit 1; }
-rm -f "$WORK/init-console.out"
-CONSOLE_PW="$(envval console-owner.env SOC_CONSOLE_DB_PASSWORD)"
 compose run --rm migrate && pass "migration job gave soc_console its login" || { fail "migrate (console login) failed"; exit 1; }
 
 DBID="$(compose ps -q db)"
@@ -375,12 +386,52 @@ after = c.get(f"/console/case/{case}", headers=h).text
 print("ok", cross.status_code, still_open, ok.status_code, "badge acknowledged" in after, "<script" in after.lower())
 PY
 if [[ "$(uname)" == Linux ]]; then DBHOST=127.0.0.1; else DBHOST=host.docker.internal; fi
-OUT="$(docker run --rm "${VIA[@]}" --env-file "$WORK/env/console-db.env" \
+OUT="$(docker run --rm "${VIA[@]}" --env-file "$WORK/env/console-db.env" --env-file "$WORK/env/pager-ack.env" \
   -e SOC_CONSOLE_DATABASE_URL="postgresql+psycopg://soc_console:${CONSOLE_PW}@${DBHOST}:5432/soc" \
   -v "$WORK/console_e2e.py:/console_e2e.py:ro" --entrypoint python "$IMAGE" /console_e2e.py 2>&1)"
 [[ "$OUT" == "ok 403 True 303 True False" ]] \
   && pass "console pages: queue, case page, a cross-site Acknowledge refused, a valid one done, no script" \
   || fail "console pages against the real port: $OUT"
+
+# --- an urgent page: pushed with buttons, sent again, then Acknowledged from the phone link ---
+cat > "$WORK/phone_ack.py" << 'PY'
+import os
+from urllib.parse import urlsplit
+from fastapi.testclient import TestClient
+from soc_api.config import Settings
+from soc_api.main import create_console_app
+
+c = TestClient(create_console_app(Settings(env="prod", console_users="ci@example.com")),
+               base_url="https://console.example.net", follow_redirects=False)
+u = urlsplit(os.environ["ACK_URL"])
+get = c.get(f"{u.path}?{u.query}", headers={"Tailscale-User-Login": "ci@example.com"})
+r = c.post(f"{u.path}?{u.query}", headers={"Tailscale-User-Login": "ci@example.com"})
+print(get.status_code, r.status_code, r.text)
+PY
+BEFORE="$(npush)"
+URG="smoke-urgent-$(rand 6)"
+[[ "$(deliver "$URG" "$(( $(date +%s) * 1000 ))" good smoke-urgent 7)" == 200 ]] || fail "urgent delivery was not a 200"
+wait_pushes $((BEFORE + 1)) && pass "urgent page: pushed" || fail "urgent page: no push arrived"
+[[ "$(fk_py 'p = json.loads(L[-1]); print(p["priority"], p["click"].startswith("https://console.example.net/console/case/"), [a["action"] + ":" + a["label"] for a in p["actions"]], p["title"].startswith("REPEAT"))')" \
+   == "5 True ['http:Ack'] False" ]] \
+  && pass "urgent page: priority 5, taps open the case page, an Ack button (no vendor link in this alert)" \
+  || fail "urgent page: wrong click or buttons: $(fk_py 'print(json.loads(L[-1]).get("click"))')"
+wait_pushes $((BEFORE + 2)) && pass "urgent page: sent again after the first interval" || fail "urgent page: no repeat arrived"
+[[ "$(fk_py 'p = json.loads(L[-1]); print(p["title"].startswith("REPEAT: "), p["priority"])')" == "True 5" ]] \
+  && pass "urgent page: the repeat says so and is still urgent" || fail "urgent page: the repeat is not marked"
+ACK_URL="$(fk_py 'print([a["url"] for a in json.loads(L[-1])["actions"] if a["label"] == "Ack"][0])')"
+OUT="$(docker run --rm "${VIA[@]}" --env-file "$WORK/env/console-db.env" --env-file "$WORK/env/pager-ack.env" \
+  -e SOC_CONSOLE_DATABASE_URL="postgresql+psycopg://soc_console:${CONSOLE_PW}@${DBHOST}:5432/soc" -e ACK_URL="$ACK_URL" \
+  -v "$WORK/phone_ack.py:/phone_ack.py:ro" --entrypoint python "$IMAGE" /phone_ack.py 2>&1)"
+[[ "$OUT" == "405 200 Acknowledged." ]] \
+  && pass "phone Ack: the pushed link acknowledges on POST and never on GET" \
+  || fail "phone Ack: $OUT"
+sleep 50
+[[ "$(npush)" == $((BEFORE + 2)) ]] \
+  && pass "after the Ack no further repeat is sent" || fail "a repeat was sent after the Ack ($(npush) pushes, expected $((BEFORE + 2)))"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT c.status, count(n.*) FILTER (WHERE n.status = 'sent'), count(n.*) FILTER (WHERE n.kind = 'repage2' AND n.status = 'sent') FROM soc_case c JOIN notification n ON n.case_id = c.id JOIN alert a ON a.case_id = c.id WHERE a.event_id = '$URG' GROUP BY c.status")" == "acknowledged|2|0" ]] \
+  && pass "the case is acknowledged, two pages went out and the second repeat never did" \
+  || fail "unexpected case or page state after the phone Ack"
 # The database has no way out: an outbound connection from its own container fails.
 docker exec "$DBID" timeout 5 bash -c 'exec 3<> /dev/tcp/1.1.1.1/443' > /dev/null 2>&1 \
   && { [[ "$(uname)" == Linux ]] && fail "the database container CAN open an outbound connection" || echo "skip - outbound check (Docker Desktop's network is not a Linux bridge)"; } \

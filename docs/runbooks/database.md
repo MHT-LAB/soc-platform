@@ -94,7 +94,7 @@ optional, non-secret file:
 |---|---|---|
 | `env/worker.env` | `SOC_NTFY_TOPIC` and the `soc_worker` URL | `worker` |
 | `env/worker-owner.env` | `SOC_WORKER_DB_PASSWORD` (the migration job gives `soc_worker` its login) | `migrate` |
-| `env/policy.env` (optional) | `SOC_PAGE_POLICY={"<category>": <0-5>, ...}` (0 = case, no push); also `SOC_PAGE_CAP` (1-1000, default 10) and `SOC_PAGE_CAP_WINDOW_SECONDS` (60-86400, default 600); a value outside those bounds stops the worker at start instead of silencing it | `worker` |
+| `env/policy.env` (optional) | `SOC_PAGE_POLICY={"<category>": <0-5>, ...}` (0 = case, no push); also `SOC_PAGE_CAP` (1-1000, default 10) and `SOC_PAGE_CAP_WINDOW_SECONDS` (60-86400, default 600); a value outside those bounds stops the worker at start instead of silencing it; `SOC_CONSOLE_BASE_URL` (the console's address, so a tap opens the case page); `SOC_REPAGE_FIRST_SECONDS` (default 900) and `SOC_REPAGE_SECOND_SECONDS` (default 3600) | `worker` |
 
 The console's case pages add two more (created by `deploy/init-console-db.sh`):
 
@@ -102,6 +102,7 @@ The console's case pages add two more (created by `deploy/init-console-db.sh`):
 |---|---|---|
 | `env/console-db.env` | `SOC_CONSOLE_DATABASE_URL` (`soc_console` at `127.0.0.1:5432`) and `SOC_CONSOLE_SECRET` (signs the form tokens) | `console` |
 | `env/console-owner.env` | `SOC_CONSOLE_DB_PASSWORD` (the migration job gives `soc_console` its login) | `migrate` |
+| `env/pager-ack.env` | `SOC_ACK_KEY` (signs the Acknowledge link in a phone notification; not the form secret) | `console`, `worker` |
 
 First start (an empty `pgdata`) runs `deploy/db/initdb/`: it creates `soc_owner` (can
 log in, `CREATEROLE`, not a superuser) and the database `soc`, then rewrites
@@ -302,11 +303,11 @@ database down they say it cannot be reached (nothing else about the failure is s
 
     deploy/init-console-db.sh
 
-It writes the two files (mode 600, never overwrites) and prints once a two-line block for the
-secrets manager's folder `/soc` (`SOC_DB_CONSOLE_PASSWORD`, `SOC_CONSOLE_SECRET`). Do not paste
+It writes the three files (mode 600, never overwrites) and prints once a three-line block for the
+secrets manager's folder `/soc` (`SOC_DB_CONSOLE_PASSWORD`, `SOC_CONSOLE_SECRET`, `SOC_ACK_KEY`). Do not paste
 that output into chat. Save it, clear the terminal and its scrollback, then run `deploy.sh`: the
 migration job gives `soc_console` its login and the console restarts with the new files. Lost
-host: `init-console-db.sh --restore` rebuilds both files from those two values in the environment.
+host: `init-console-db.sh --restore` rebuilds all three files from those three values in the environment.
 
 **Set the console's address** in `env/console.env` (not secret):
 
@@ -339,3 +340,26 @@ and when; the case still collects new alerts. Closing needs a note, and the next
 opens a new case and a new page. To rotate the form secret: new value in `console-db.env` and the
 secrets manager, restart the console (open forms stop working; reload the page). To rotate the
 database password: new value in `console-db.env` and `console-owner.env`, then `deploy.sh`.
+
+## Re-sends and the buttons on a push
+
+- **Tap target.** With `SOC_CONSOLE_BASE_URL` in `env/policy.env`, tapping a push opens the case
+  page on the console (over the tailnet), and the LimaCharlie detection link becomes a button
+  labelled "LimaCharlie". Without it, a tap opens the LimaCharlie link as before.
+- **Re-send.** An urgent (priority 5) page that went out and whose case is still `open` is sent
+  again after `SOC_REPAGE_FIRST_SECONDS` (15 min) and once more after `SOC_REPAGE_SECOND_SECONDS`
+  (60 min) since the first send; the second waits until the first re-send has actually gone. The
+  title starts with `REPEAT: `. An Acknowledge or Close stops it, including a re-send already
+  queued (it is marked `skipped`). Each re-send is an ordinary row (`notification.kind` is
+  `repage1` or `repage2`, at most one of each per case), so it follows the same retry, give-up,
+  page-cap and counter rules as any page.
+- **Ack from the phone.** With `SOC_ACK_KEY` the push also has an "Ack" button: the ntfy app POSTs
+  `/console/case/<id>/ack-phone?e=<expiry>&t=<token>` through `tailscale serve`, so the request
+  carries your tailnet identity (the iPhone must be on Tailscale). The token is an HMAC over the
+  case and an expiry 24 hours out, made with `SOC_ACK_KEY` and a signing label of its own, so it
+  cannot pass as a form token or the reverse. The route accepts POST only (a link preview or a
+  prefetch never acknowledges anything), still needs the allow-list, refuses a request a browser
+  marks cross-site, and replies in plain text (`Acknowledged.`, `Already acknowledged.`).
+  Acknowledging twice is harmless; the link stops working after a day.
+- **What crosses the push server** is now also a case page address and the signed Ack link; the
+  link alone cannot do anything without a tailnet connection and an allow-listed identity.

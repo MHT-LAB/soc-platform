@@ -24,6 +24,7 @@ WORKER_FUNCTIONS = [
     "worker_state_get(text)",
     "worker_state_set(text, text)",
     "due_page_count()",
+    "queue_repages(interval, interval)",
 ]
 
 
@@ -345,10 +346,13 @@ def test_claim_returns_only_what_a_push_needs(fx: Fixture) -> None:
         "link",
         "case_short",
         "detected_at",
+        "case_id",
+        "kind",
     }
     assert page["client_slug"] == "client-a" and page["rule"] == "general.DEMO - Rule"
     assert page["host"] == "ws-demo-01" and page["link"] == LINK and page["priority"] == 5
     assert page["case_short"] == str(case_id)[:8] and page["attempts"] == 1
+    assert str(page["case_id"]) == str(case_id) and page["kind"] == "page"
 
 
 @pytest.mark.parametrize(

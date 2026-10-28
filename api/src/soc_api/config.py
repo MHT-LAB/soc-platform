@@ -8,7 +8,7 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,10 +74,22 @@ class Settings(BaseSettings):
     # signs the one-use form tokens that stop another site from pressing Ack or Close.
     console_database_url: SecretStr = SecretStr("")
     console_secret: SecretStr = SecretStr("")
+    # Signs the Acknowledge link on a phone notification. Held by the console and the worker
+    # only (env/pager-ack.env); never the form secret, because this one crosses the push server.
+    ack_key: SecretStr = SecretStr("")
+    # How long after an urgent page was sent it is sent again if nobody acknowledged it.
+    repage_first_seconds: int = Field(default=900, ge=1, le=86400)
+    repage_second_seconds: int = Field(default=3600, ge=2, le=604800)
     # The console's own address as people open it (https://<tailnet name>), no path. When
     # set, a form post must come from exactly this origin, whatever Host the proxy
     # forwards; the pager's click link (P5c) points here too.
     console_base_url: str = ""
+
+    @model_validator(mode="after")
+    def _repages_in_order(self) -> "Settings":
+        if self.repage_second_seconds <= self.repage_first_seconds:
+            raise ValueError("SOC_REPAGE_SECOND_SECONDS must be longer than the first")
+        return self
 
     @field_validator("console_base_url")
     @classmethod

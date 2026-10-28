@@ -146,7 +146,7 @@ def env_files(name: str) -> dict[str, bool]:
 
 
 def test_the_worker_secrets_go_to_the_worker_and_the_login_password_to_migrate_only() -> None:
-    assert env_files("worker") == {"worker.env": True, "policy.env": False}
+    assert env_files("worker") == {"worker.env": True, "policy.env": False, "pager-ack.env": False}
     assert env_files("migrate") == {
         "db-owner.env": True,
         "worker-owner.env": False,
@@ -175,6 +175,7 @@ def test_the_console_form_secret_and_database_login_go_to_the_console_only() -> 
         "lc.env": False,
         "console.env": False,
         "console-db.env": False,
+        "pager-ack.env": False,
     }
     for name in ("api", "worker", "db", "migrate"):
         names = set(env_files(name))
@@ -193,3 +194,13 @@ def test_the_console_stays_on_the_host_network_and_never_gets_the_owner_credenti
     env = console.get("environment", {})
     assert not {k for k in env if k.startswith(("SOC_MIGRATE", "SOC_INGEST", "SOC_WORKER"))}
     assert not {"db.env", "db-owner.env", "ingest.env", "worker.env"} & set(env_files("console"))
+
+
+def test_the_phone_ack_key_goes_to_the_console_and_the_worker_only() -> None:
+    holders = {n for n in SERVICES if "pager-ack.env" in env_files(n)}
+    assert holders == {"console", "worker"}
+    assert "pager-ack.env" not in " ".join(
+        e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
+    )
+    # the worker still never gets the form secret or the console's database login
+    assert not {"console-db.env", "console-owner.env"} & set(env_files("worker"))

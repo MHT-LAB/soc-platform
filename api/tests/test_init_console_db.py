@@ -20,8 +20,8 @@ from soc_api.db import MIN_PASSWORD_LENGTH
 
 SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "init-console-db.sh"
 BASH = shutil.which("bash") or "/bin/bash"
-FILES = ("env/console-db.env", "env/console-owner.env")
-NAMES = ("SOC_DB_CONSOLE_PASSWORD", "SOC_CONSOLE_SECRET")
+FILES = ("env/console-db.env", "env/console-owner.env", "env/pager-ack.env")
+NAMES = ("SOC_DB_CONSOLE_PASSWORD", "SOC_CONSOLE_SECRET", "SOC_ACK_KEY")
 
 not_root = pytest.mark.skipif(os.geteuid() == 0, reason="needs a non-root user")
 
@@ -82,6 +82,11 @@ def test_the_files_agree_and_the_app_accepts_them(tmp_path: Path) -> None:
     secret = console["SOC_CONSOLE_SECRET"]
     assert re.fullmatch(r"[0-9a-f]{64}", secret)
     assert secret != owner["SOC_CONSOLE_DB_PASSWORD"]
+    # the phone key is its own secret: it crosses the push server, the form secret never does
+    ack = parse_env(tmp_path / "env/pager-ack.env")
+    assert list(ack) == ["SOC_ACK_KEY"] and re.fullmatch(r"[0-9a-f]{64}", ack["SOC_ACK_KEY"])
+    assert ack["SOC_ACK_KEY"] not in (secret, owner["SOC_CONSOLE_DB_PASSWORD"])
+    assert "SOC_ACK_KEY" not in console and "SOC_CONSOLE_SECRET" not in ack
     settings = Settings(
         console_database_url=console["SOC_CONSOLE_DATABASE_URL"], console_secret=secret
     )
@@ -100,6 +105,7 @@ def test_the_printed_block_matches_the_files_exactly_and_warns(tmp_path: Path) -
     owner = parse_env(tmp_path / "env/console-owner.env")
     assert block["SOC_CONSOLE_SECRET"] == console["SOC_CONSOLE_SECRET"]
     assert block["SOC_DB_CONSOLE_PASSWORD"] == owner["SOC_CONSOLE_DB_PASSWORD"]
+    assert block["SOC_ACK_KEY"] == parse_env(tmp_path / "env/pager-ack.env")["SOC_ACK_KEY"]
     assert "Do not paste" in r.stdout and "clear the terminal" in r.stdout
     assert r.stderr == ""
 
@@ -200,6 +206,9 @@ def test_restore_needs_both_values(tmp_path: Path, missing: str) -> None:
         ("SOC_DB_CONSOLE_PASSWORD", "short"),
         ("SOC_DB_CONSOLE_PASSWORD", "g" * 48),
         ("SOC_DB_CONSOLE_PASSWORD", "a" * 48 + "@evil"),
+        ("SOC_ACK_KEY", "short"),
+        ("SOC_ACK_KEY", "g" * 64),
+        ("SOC_ACK_KEY", "A" * 64),
     ],
 )
 def test_restore_rejects_values_that_could_break_the_url_or_the_files(
@@ -230,5 +239,9 @@ def test_secret_values_only_ever_reach_shell_builtins() -> None:
     assert "<<" not in text.replace("<<<", "")
     for line in text.splitlines():
         code = line.split("#", 1)[0]
-        if any(f"${v}" in code or f"${{{v}}}" in code for v in ("FORM_KEY", "CONSOLE_PW")):
-            assert code.lstrip().startswith(("printf", '"', "[[", "FORM_KEY=", "CONSOLE_PW=")), line
+        if any(
+            f"${v}" in code or f"${{{v}}}" in code for v in ("FORM_KEY", "CONSOLE_PW", "ACK_KEY")
+        ):
+            assert code.lstrip().startswith(
+                ("printf", '"', "[[", "FORM_KEY=", "CONSOLE_PW=", "ACK_KEY=")
+            ), line

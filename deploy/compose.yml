@@ -82,6 +82,10 @@ services:
         required: false
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/console-db.env
         required: false
+      # SOC_ACK_KEY: verifies the Acknowledge link on a phone notification (shared with
+      # the worker, which makes the link).
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/pager-ack.env
+        required: false
     read_only: true
     tmpfs:
       - /tmp
@@ -167,8 +171,12 @@ services:
     env_file:
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/worker.env
         required: true
-      # Optional, not secret: SOC_PAGE_POLICY={"<category>": <priority 0-5>, ...}
+      # Optional, not secret: SOC_PAGE_POLICY={"<category>": <priority 0-5>, ...} and the
+      # console's address SOC_CONSOLE_BASE_URL (the tap target of a push).
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/policy.env
+        required: false
+      # SOC_ACK_KEY: signs the Acknowledge link in a push (also held by the console).
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/pager-ack.env
         required: false
     networks:
       - db

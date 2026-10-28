@@ -3,6 +3,7 @@ against a real database and a local fake ntfy server."""
 
 import json
 import logging
+import re
 import socket
 import threading
 import time
@@ -17,6 +18,7 @@ import pytest
 from conftest import ROLE_PASSWORD, TestDb
 from test_worker_db import Fixture
 
+from soc_api import csrf
 from soc_api import worker as w
 from soc_api.config import Settings
 
@@ -837,3 +839,195 @@ def test_settings_refuse_values_that_would_silence_or_hammer(field: str, bad: fl
     with pytest.raises(ValidationError):
         Settings(**{field: bad})
     Settings(page_cap=1, page_cap_window_seconds=60, worker_tick_seconds=1)
+
+
+# ---- the console link, the buttons and the re-sends ----
+
+BASE = "https://console.example.net"
+ACK = "phone-ack-key-0123456789abcdef0123456789abcdef"  # noqa: S105 - throwaway
+CASE_ID = "0f8c2ad6-6f0e-4d37-8f2b-3a1b4c5d6e7f"
+NOW = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+
+
+def case_page(**kw: Any) -> dict[str, Any]:
+    return page(**{"case_id": CASE_ID, "kind": "page", **kw})
+
+
+def test_a_resend_is_marked_in_the_title_and_a_first_page_is_not() -> None:
+    assert w.push_text(case_page())[0] == "client-a: Rule One"
+    for kind in ("repage1", "repage2"):
+        assert w.push_text(case_page(kind=kind))[0] == "REPEAT: client-a: Rule One"
+    assert len(w.push_text(case_page(kind="repage1", rule="r" * 500))[0]) <= 80
+
+
+def test_without_a_console_address_a_tap_opens_the_vendor_link_and_there_are_no_buttons() -> None:
+    assert w.push_links(case_page(), "", ACK, NOW) == (LINK, [])
+    assert w.push_links(case_page(link=None), "", ACK, NOW) == (None, [])
+
+
+def test_with_a_console_address_a_tap_opens_the_case_and_the_vendor_link_is_a_button() -> None:
+    click, actions = w.push_links(case_page(), BASE, "", NOW)
+    assert click == f"{BASE}/console/case/{CASE_ID}"
+    assert actions == [{"action": "view", "label": "LimaCharlie", "url": LINK}]
+
+
+def test_with_the_key_there_is_an_ack_button_whose_link_the_console_will_accept() -> None:
+    click, actions = w.push_links(case_page(), BASE, ACK, NOW)
+    assert click == f"{BASE}/console/case/{CASE_ID}"
+    view, ack = actions
+    assert view["action"] == "view" and ack["action"] == "http"
+    assert ack["method"] == "POST" and ack["label"] == "Ack" and ack["clear"] is True
+    url = ack["url"]
+    assert url.startswith(f"{BASE}/console/case/{CASE_ID}/ack-phone?e=")
+    exp = int(re.search(r"e=(\d+)", url).group(1))  # type: ignore[union-attr]
+    token = re.search(r"t=([0-9a-f]{64})$", url).group(1)  # type: ignore[union-attr]
+    assert exp == int(NOW.timestamp()) + 24 * 3600
+    assert csrf.check_phone_token(ACK, token, CASE_ID, exp, NOW)
+    assert not csrf.check_token(ACK, token, "a@example.com", CASE_ID, "ack", NOW)
+
+
+def test_the_ack_button_is_left_out_without_a_key_and_a_bad_case_id_gets_no_console_link() -> None:
+    assert [a["action"] for a in w.push_links(case_page(), BASE, "", NOW)[1]] == ["view"]
+    for bad in (None, "", "not-a-uuid", "../x", CASE_ID + "z"):
+        assert w.push_links(case_page(case_id=bad), BASE, ACK, NOW) == (LINK, [])
+
+
+def test_the_vendor_button_is_only_ever_a_vetted_link() -> None:
+    _, actions = w.push_links(case_page(link="javascript:alert(1)"), BASE, ACK, NOW)
+    assert [a["label"] for a in actions] == ["Ack"]
+
+
+def test_publish_sends_actions_only_when_there_are_some(ntfy_server: FakeNtfy) -> None:
+    n = client(ntfy_server)
+    n.publish(title="T", message="M", priority=3)
+    n.publish(title="T", message="M", priority=3, actions=[])
+    n.publish(
+        title="T", message="M", priority=3, actions=[{"action": "view", "label": "x", "url": LINK}]
+    )
+    assert ["actions" in p for p in ntfy_server.pushes] == [False, False, True]
+
+
+def worker_with_console(
+    fx: Fixture, fake: FakeNtfy, clock: Clock | None = None, **kw: Any
+) -> w.Worker:
+    worker = make_worker(fx, fake, clock=clock, **kw)
+    worker.console_base_url = BASE
+    worker.ack_key = ACK
+    return worker
+
+
+def test_a_real_push_carries_the_console_link_and_both_buttons(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    fx.alert(rule="general.Rule One", host="host-1", severity="high")
+    worker_with_console(fx, ntfy_server).tick()
+    [push] = ntfy_server.pushes
+    case = str(fx.one("SELECT id FROM soc_case")[0])
+    assert push["click"] == f"{BASE}/console/case/{case}"
+    assert [a["label"] for a in push["actions"]] == ["LimaCharlie", "Ack"]
+    assert push["actions"][1]["url"].startswith(f"{BASE}/console/case/{case}/ack-phone?e=")
+    assert ACK not in json.dumps(push) and TOPIC not in push["actions"][1]["url"]
+
+
+def urgent_policy() -> dict[str, int]:
+    return {"CAT_ONE": 5}
+
+
+def backdate_sent(fx: Fixture, minutes: int) -> None:
+    fx.run(
+        "UPDATE notification SET sent_at = now() - make_interval(mins => %s) "
+        "WHERE kind = 'page' AND status = 'sent'",
+        (minutes,),
+    )
+
+
+def short(**kw: float) -> w.Limits:
+    return w.Limits(repage_first_s=60.0, repage_second_s=120.0, **kw)
+
+
+def test_an_urgent_page_nobody_acknowledges_is_sent_again_twice_then_stops(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    fx.alert(cat="CAT_ONE", severity="low")
+    worker = worker_with_console(fx, ntfy_server, policy=urgent_policy(), limits=short())
+    worker.tick()
+    assert ntfy_server.titles() == ["client-a: general.Rule One".replace("general.", "")]
+    worker.tick()
+    assert len(ntfy_server.requests) == 1  # nothing is due yet
+    backdate_sent(fx, 2)  # two minutes ago: past the first interval, not the second... of 120 s
+    worker.tick()
+    assert (
+        ntfy_server.titles()[-1] == "REPEAT: client-a: Rule One" and len(ntfy_server.requests) == 2
+    )
+    backdate_sent(fx, 5)
+    worker.tick()
+    assert (
+        ntfy_server.titles()[-1] == "REPEAT: client-a: Rule One" and len(ntfy_server.requests) == 3
+    )
+    for _ in range(3):
+        backdate_sent(fx, 600)
+        worker.tick()
+    assert len(ntfy_server.requests) == 3  # two re-sends at most
+    assert fx.rows("SELECT kind, status FROM notification ORDER BY kind") == [
+        ("page", "sent"),
+        ("repage1", "sent"),
+        ("repage2", "sent"),
+    ]
+    again = ntfy_server.pushes[-1]
+    assert again["priority"] == 5 and again["actions"][-1]["label"] == "Ack"
+
+
+def test_an_acknowledged_case_is_not_sent_again(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    fx.alert(cat="CAT_ONE")
+    worker = worker_with_console(fx, ntfy_server, policy=urgent_policy(), limits=short())
+    worker.tick()
+    case = str(fx.one("SELECT id FROM soc_case")[0])
+    fx.one("SELECT ack_case(%s, 'operator@example.com')", (case,))
+    backdate_sent(fx, 600)
+    worker.tick()
+    worker.tick()
+    assert len(ntfy_server.requests) == 1
+
+
+def test_a_non_urgent_page_is_not_sent_again(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    fx.alert(cat="CAT_ONE")
+    worker = worker_with_console(fx, ntfy_server, policy={"CAT_ONE": 3}, limits=short())
+    worker.tick()
+    backdate_sent(fx, 600)
+    worker.tick()
+    assert len(ntfy_server.requests) == 1
+
+
+def test_resends_count_toward_the_page_cap(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    fx.alert(cat="CAT_ONE")
+    clock = Clock()
+    worker = worker_with_console(
+        fx,
+        ntfy_server,
+        clock=clock,
+        policy=urgent_policy(),
+        limits=w.Limits(page_cap=1, repage_first_s=60.0, repage_second_s=120.0),
+    )
+    worker.tick()
+    backdate_sent(fx, 5)
+    worker.tick()  # the re-send is queued but the cap of one is used up
+    assert len([t for t in ntfy_server.titles() if t.startswith("REPEAT")]) == 0
+    clock.advance(seconds=700)
+    worker.tick()
+    assert len([t for t in ntfy_server.titles() if t.startswith("REPEAT")]) == 1
+
+
+@pytest.mark.parametrize(
+    ("first", "second"), [(0, 3600), (900, 900), (900, 600), (900, 604801), (86401, 90000)]
+)
+def test_the_resend_times_must_make_sense(first: int, second: int) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(repage_first_seconds=first, repage_second_seconds=second)
+
+
+def test_the_default_resends_are_at_fifteen_and_sixty_minutes() -> None:
+    s = Settings()
+    assert (s.repage_first_seconds, s.repage_second_seconds) == (900, 3600)
+    assert w.Limits().repage_first_s == 900.0 and w.Limits().repage_second_s == 3600.0

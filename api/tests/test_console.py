@@ -169,6 +169,7 @@ def test_console_app_serves_only_console_and_healthz() -> None:
         "/console/cases",
         "/console/case/{case_id}",
         "/console/case/{case_id}/ack",
+        "/console/case/{case_id}/ack-phone",
         "/console/case/{case_id}/close",
     }
     assert prod_client().get("/version").status_code == 404
