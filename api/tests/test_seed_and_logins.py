@@ -348,4 +348,71 @@ def test_a_known_revision_still_upgrades_normally(db: TestDb) -> None:
     assert soc_db.newer_revision(db.sqlalchemy_url()) is None
     soc_db.upgrade(db.sqlalchemy_url())
     with db.connect() as c:
-        assert c.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003",)
+        assert c.execute("SELECT version_num FROM alembic_version").fetchone() == ("0004",)
+
+
+# ---- soc_console login (optional until the console reads cases) ----
+
+
+def console_row(db: TestDb) -> tuple[bool, int, str | None]:
+    with db.connect() as c:
+        row = c.execute(
+            "SELECT rolcanlogin, rolconnlimit, rolpassword FROM pg_authid "
+            "WHERE rolname = 'soc_console'"
+        ).fetchone()
+    assert row is not None
+    return row
+
+
+def test_console_login_is_a_scram_verifier_with_its_own_connection_cap(db: TestDb) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_console NOLOGIN PASSWORD NULL CONNECTION LIMIT -1")
+    soc_db.set_console_login(db.sqlalchemy_url(), PASSWORD)
+    can_login, limit, verifier = console_row(db)
+    assert can_login is True and limit == soc_db.CONSOLE_CONNECTION_LIMIT
+    assert verifier is not None and scram_matches(verifier, PASSWORD)
+    assert not scram_matches(verifier, "x" * 40)
+
+
+@pytest.mark.parametrize("password", ["", "short", "x" * 31])
+def test_console_login_refuses_a_short_password(db: TestDb, password: str) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_console NOLOGIN")
+    with pytest.raises(ValueError, match="soc_console password must be at least"):
+        soc_db.set_console_login(db.sqlalchemy_url(), password)
+    assert console_row(db)[0] is False
+
+
+def test_deploy_sets_the_console_login_when_its_password_is_given(
+    db: TestDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_console NOLOGIN PASSWORD NULL")
+    monkeypatch.setenv("SOC_MIGRATE_URL", db.sqlalchemy_url())
+    monkeypatch.setenv("SOC_INGEST_DB_PASSWORD", PASSWORD)
+    monkeypatch.setenv("SOC_CONSOLE_DB_PASSWORD", "c" * 40)
+    assert soc_db.main(["deploy"]) == 0
+    verifier = console_row(db)[2]
+    assert verifier is not None and scram_matches(verifier, "c" * 40)
+
+
+def test_deploy_without_a_console_password_leaves_the_console_login_alone(
+    db: TestDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_console NOLOGIN PASSWORD NULL")
+    monkeypatch.setenv("SOC_MIGRATE_URL", db.sqlalchemy_url())
+    monkeypatch.setenv("SOC_INGEST_DB_PASSWORD", PASSWORD)
+    monkeypatch.delenv("SOC_CONSOLE_DB_PASSWORD", raising=False)
+    assert soc_db.main(["deploy"]) == 0
+    assert console_row(db)[0] is False and console_row(db)[2] is None
+
+
+def test_deploy_stops_on_a_console_password_that_is_set_but_too_short(
+    db: TestDb, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SOC_MIGRATE_URL", db.sqlalchemy_url())
+    monkeypatch.setenv("SOC_INGEST_DB_PASSWORD", PASSWORD)
+    monkeypatch.setenv("SOC_CONSOLE_DB_PASSWORD", "short")
+    assert soc_db.main(["deploy"]) == 2
+    assert "soc_console password must be at least" in capsys.readouterr().out

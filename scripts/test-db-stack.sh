@@ -16,6 +16,10 @@
 # is only in the push body and never in the worker's log, the worker cannot reach the
 # public app and the app cannot reach the push server, and soc_worker can read nothing.
 # (The worker runs with SOC_ENV=dev here only so it may talk plain http to the fake.)
+# Then the console's way in (note 24, P5a): the database listens on the host's loopback
+# only; no container (the tunnel's network, the db network) can reach that port; soc_console
+# can log in through it and call its case functions but read nothing; the database still
+# cannot route out. (The outbound check runs on Linux only: Docker Desktop's network is not a Linux bridge.)
 # Needs Docker only: the data directory is handed to uid 999 by a throwaway
 # container, so no sudo is involved.
 # Every secret here is a throwaway value for containers that live for this run.
@@ -154,7 +158,8 @@ probe default "import socket; socket.create_connection(('$DB_IP', 5432), timeout
 probe db "import socket; socket.create_connection(('db', 5432), timeout=3)" \
   && pass "a container on the db network can reach db (control)" \
   || fail "db is unreachable even from the db network (test setup is broken)"
-[[ -z "$(docker port "$(compose ps -q db)" 2> /dev/null)" ]] && pass "db publishes no host port" || fail "db publishes a host port"
+[[ -z "$(docker port "$(compose ps -q db)" 2> /dev/null | grep -v '^5432/tcp -> 127.0.0.1:5432$')" ]] \
+  && pass "db publishes nothing but the loopback port" || fail "db publishes more than the loopback port"
 
 # --- roles over the network ---
 login() { # user, password env var -> exit 0 if the server accepts the login
@@ -277,6 +282,70 @@ except psycopg.errors.InsufficientPrivilege:
     raise SystemExit(0)
 raise SystemExit(1)" > /dev/null 2>&1 \
   && pass "soc_worker cannot read the alert payload" || fail "soc_worker can read the alert payload"
+
+# --- the console's database access (loopback publish) ---------------------------
+CONSOLE_PW="$(rand 24)"
+printf 'SOC_CONSOLE_DB_PASSWORD=%s\n' "$CONSOLE_PW" >> "$WORK/env/worker-owner.env"
+compose run --rm migrate && pass "migration job gave soc_console its login" || { fail "migrate (console login) failed"; exit 1; }
+
+DBID="$(compose ps -q db)"
+[[ "$(docker port "$DBID" 5432/tcp)" == "127.0.0.1:5432" ]] \
+  && pass "db publishes exactly 127.0.0.1:5432" || fail "db publishes something else: $(docker port "$DBID")"
+(exec 3<> /dev/tcp/127.0.0.1/5432) 2> /dev/null \
+  && pass "the host's own loopback reaches the database port" || fail "the host cannot reach 127.0.0.1:5432"
+for net in default db; do
+  GW="$(docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' "${P}_$net")"
+  probe "$net" "import socket; socket.create_connection(('$GW', 5432), timeout=3)" > /dev/null 2>&1 \
+    && fail "a container on the $net network CAN reach the host's database port ($GW)" \
+    || pass "a container on the $net network cannot reach the host's database port"
+done
+NETS="$(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$DBID" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')"
+[[ "$NETS" == "${P}_db ${P}_dbhost " ]] \
+  && pass "db is on the db and dbhost networks only" || fail "db is on unexpected networks: $NETS"
+[[ "$(docker ps -q --filter "network=${P}_dbhost" | wc -l | tr -d ' ')" == 1 ]] \
+  && pass "only the database is on the publishing network" || fail "something besides the database is on the publishing network"
+[[ "$(docker network inspect --format '{{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}' "${P}_dbhost")" == false ]] \
+  && pass "the publishing network has no outbound NAT" || fail "the publishing network can masquerade"
+
+# Through the published port, as the console would use it.
+CONSOLE_CHECK='
+import os, sys, psycopg
+who, pw = sys.argv[1], os.environ["PW"]
+try:
+    c = psycopg.connect(host=os.environ["DBHOST"], port=5432, dbname="soc", user=who, password=pw, connect_timeout=5)
+except psycopg.OperationalError:
+    print("refused"); raise SystemExit(0)
+if who != "soc_console":
+    print("logged-in"); raise SystemExit(0)
+case = c.execute("SELECT id FROM list_cases(%s, %s) LIMIT 1", ("all", 10)).fetchone()
+ids = c.execute("SELECT count(*) FROM list_cases(%s, %s)", ("all", 50)).fetchone()[0]
+acked = c.execute("SELECT ack_case(%s, %s)", (case[0], "ci@example.com")).fetchone()[0]
+again = c.execute("SELECT ack_case(%s, %s)", (case[0], "ci@example.com")).fetchone()[0]
+doc = c.execute("SELECT get_case(%s)", (case[0],)).fetchone()[0]
+try:
+    c.execute("SELECT raw FROM alert")
+    read = "READ"
+except psycopg.errors.InsufficientPrivilege:
+    read = "denied"
+c.close()
+print("ok", ids > 0, acked, again, isinstance(doc["alerts"][0]["raw"], str), read)'
+# Linux: a container on the host's own network reaches 127.0.0.1. Docker Desktop: the
+# host's loopback is reached by name from a container (the same published port).
+if [[ "$(uname)" == Linux ]]; then
+  VIA=(--network host -e DBHOST=127.0.0.1)
+else
+  VIA=(-e DBHOST=host.docker.internal)
+fi
+OUT="$(docker run --rm "${VIA[@]}" -e PW="$CONSOLE_PW" --entrypoint python "$IMAGE" -c "$CONSOLE_CHECK" soc_console 2>&1)"
+[[ "$OUT" == "ok True acked already True denied" ]] \
+  && pass "soc_console, over the loopback port: lists, acknowledges once, reads a case as text, cannot read tables" \
+  || fail "soc_console over the loopback port: $OUT"
+[[ "$(docker run --rm "${VIA[@]}" -e PW="$SUPER_PW" --entrypoint python "$IMAGE" -c "$CONSOLE_CHECK" postgres 2>&1)" == refused ]] \
+  && pass "the postgres superuser is refused over the loopback port too" || fail "the superuser can log in over the loopback port"
+# The database has no way out: an outbound connection from its own container fails.
+docker exec "$DBID" timeout 5 bash -c 'exec 3<> /dev/tcp/1.1.1.1/443' > /dev/null 2>&1 \
+  && { [[ "$(uname)" == Linux ]] && fail "the database container CAN open an outbound connection" || echo "skip - outbound check (Docker Desktop's network is not a Linux bridge)"; } \
+  || pass "the database container cannot open an outbound connection"
 
 echo
 [[ "$FAILS" -eq 0 ]] && echo "all database checks passed" || { echo "$FAILS database check(s) failed"; exit 1; }

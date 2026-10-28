@@ -192,7 +192,7 @@ def test_missing_host_and_rule_still_group_with_each_other(fx: Fixture) -> None:
 def test_a_closed_case_is_not_reused(fx: Fixture) -> None:
     fx.alert(age_min=10)
     fx.assign()
-    fx.run("UPDATE soc_case SET status = 'closed'")
+    fx.run("UPDATE soc_case SET status = 'closed', closed_at = now()")
     fx.alert()
     assert fx.assign() == (1, 1, 1)
     assert count(fx, "soc_case") == 2
