@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request, Response
 
 from soc_api import console, ingest
 from soc_api.config import Settings, get_settings
+from soc_api.logs import configure_logging
 
 # Sent on every response. The API serves JSON only, so the content policy can
 # deny everything; the console (Sprint 3) gets its own policy.
@@ -87,4 +88,5 @@ def create_console_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+configure_logging()
 app = create_app()
