@@ -284,8 +284,11 @@ raise SystemExit(1)" > /dev/null 2>&1 \
   && pass "soc_worker cannot read the alert payload" || fail "soc_worker can read the alert payload"
 
 # --- the console's database access (loopback publish) ---------------------------
-CONSOLE_PW="$(rand 24)"
-printf 'SOC_CONSOLE_DB_PASSWORD=%s\n' "$CONSOLE_PW" >> "$WORK/env/worker-owner.env"
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-console-db.sh" > "$WORK/init-console.out" 2>&1 \
+  && pass "init-console-db.sh created the console's secret files" \
+  || { cat "$WORK/init-console.out"; fail "init-console-db.sh failed"; exit 1; }
+rm -f "$WORK/init-console.out"
+CONSOLE_PW="$(envval console-owner.env SOC_CONSOLE_DB_PASSWORD)"
 compose run --rm migrate && pass "migration job gave soc_console its login" || { fail "migrate (console login) failed"; exit 1; }
 
 DBID="$(compose ps -q db)"
@@ -342,6 +345,42 @@ OUT="$(docker run --rm "${VIA[@]}" -e PW="$CONSOLE_PW" --entrypoint python "$IMA
   || fail "soc_console over the loopback port: $OUT"
 [[ "$(docker run --rm "${VIA[@]}" -e PW="$SUPER_PW" --entrypoint python "$IMAGE" -c "$CONSOLE_CHECK" postgres 2>&1)" == refused ]] \
   && pass "the postgres superuser is refused over the loopback port too" || fail "the superuser can log in over the loopback port"
+
+# The real console code against the real port: the queue, a case page, a valid Acknowledge,
+# and a cross-site post that must be refused. (Same container route as above.)
+cat > "$WORK/console_e2e.py" << 'PY'
+import re
+from fastapi.testclient import TestClient
+from soc_api.config import Settings
+from soc_api.main import create_console_app
+
+s = Settings(env="prod", console_users="ci@example.com")
+c = TestClient(create_console_app(s), base_url="https://console.example.net", follow_redirects=False)
+h = {"Tailscale-User-Login": "ci@example.com"}
+queue = c.get("/console/cases?status=open", headers=h)
+ids = re.findall(r'/console/case/([0-9a-f-]{36})"', queue.text)
+if queue.status_code != 200 or not ids:
+    print("no-queue", queue.status_code)
+    raise SystemExit(0)
+case = ids[0]
+page = c.get(f"/console/case/{case}", headers=h)
+token = re.search(r'/ack">\s*<input type="hidden" name="token" value="([0-9a-f]{64})"', page.text)
+post = {**h, "Sec-Fetch-Site": "same-origin", "Origin": "https://console.example.net",
+        "Content-Type": "application/x-www-form-urlencoded"}
+body = f"token={token.group(1)}"
+cross = c.post(f"/console/case/{case}/ack", content=body, headers={**post, "Sec-Fetch-Site": "cross-site"})
+still_open = "badge open" in c.get(f"/console/case/{case}", headers=h).text
+ok = c.post(f"/console/case/{case}/ack", content=body, headers=post)
+after = c.get(f"/console/case/{case}", headers=h).text
+print("ok", cross.status_code, still_open, ok.status_code, "badge acknowledged" in after, "<script" in after.lower())
+PY
+if [[ "$(uname)" == Linux ]]; then DBHOST=127.0.0.1; else DBHOST=host.docker.internal; fi
+OUT="$(docker run --rm "${VIA[@]}" --env-file "$WORK/env/console-db.env" \
+  -e SOC_CONSOLE_DATABASE_URL="postgresql+psycopg://soc_console:${CONSOLE_PW}@${DBHOST}:5432/soc" \
+  -v "$WORK/console_e2e.py:/console_e2e.py:ro" --entrypoint python "$IMAGE" /console_e2e.py 2>&1)"
+[[ "$OUT" == "ok 403 True 303 True False" ]] \
+  && pass "console pages: queue, case page, a cross-site Acknowledge refused, a valid one done, no script" \
+  || fail "console pages against the real port: $OUT"
 # The database has no way out: an outbound connection from its own container fails.
 docker exec "$DBID" timeout 5 bash -c 'exec 3<> /dev/tcp/1.1.1.1/443' > /dev/null 2>&1 \
   && { [[ "$(uname)" == Linux ]] && fail "the database container CAN open an outbound connection" || echo "skip - outbound check (Docker Desktop's network is not a Linux bridge)"; } \

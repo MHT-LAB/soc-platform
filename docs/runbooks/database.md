@@ -96,6 +96,13 @@ optional, non-secret file:
 | `env/worker-owner.env` | `SOC_WORKER_DB_PASSWORD` (the migration job gives `soc_worker` its login) | `migrate` |
 | `env/policy.env` (optional) | `SOC_PAGE_POLICY={"<category>": <0-5>, ...}` (0 = case, no push); also `SOC_PAGE_CAP` (1-1000, default 10) and `SOC_PAGE_CAP_WINDOW_SECONDS` (60-86400, default 600); a value outside those bounds stops the worker at start instead of silencing it | `worker` |
 
+The console's case pages add two more (created by `deploy/init-console-db.sh`):
+
+| File (mode 600) | Holds | Read by |
+|---|---|---|
+| `env/console-db.env` | `SOC_CONSOLE_DATABASE_URL` (`soc_console` at `127.0.0.1:5432`) and `SOC_CONSOLE_SECRET` (signs the form tokens) | `console` |
+| `env/console-owner.env` | `SOC_CONSOLE_DB_PASSWORD` (the migration job gives `soc_console` its login) | `migrate` |
+
 First start (an empty `pgdata`) runs `deploy/db/initdb/`: it creates `soc_owner` (can
 log in, `CREATEROLE`, not a superuser) and the database `soc`, then rewrites
 `pg_hba.conf` so the **`postgres` superuser is refused over the network**. It still
@@ -280,3 +287,47 @@ timestamps (one transaction's `now()` is constant), so a case history has one or
 `acknowledged`, `closed` or `all`; limit 1-500. A rollback to a release from before
 `0004` keeps working (it only writes `open`); `alembic downgrade` removes the functions,
 the checks and the wider grouping.
+
+## The console's case pages on the host
+
+`/console/cases` (the queue: open and acknowledged by default, `?status=` open, acknowledged,
+closed or all) and `/console/case/<id>` (the alerts newest first, each payload as text you can
+expand, the history, and two forms: **Acknowledge**, and **Close** with a required note). They
+need the same tailnet identity and allow-list as the rest of the console. The console is on the
+host network and reads the database through the loopback port (`soc_console`, four functions,
+no table access); without `env/console-db.env` the pages say cases are not set up, and with the
+database down they say it cannot be reached (nothing else about the failure is shown).
+
+**Set it up (root on the host, once, after `init-secrets.sh`):**
+
+    deploy/init-console-db.sh
+
+It writes the two files (mode 600, never overwrites) and prints once a two-line block for the
+secrets manager's folder `/soc` (`SOC_DB_CONSOLE_PASSWORD`, `SOC_CONSOLE_SECRET`). Do not paste
+that output into chat. Save it, clear the terminal and its scrollback, then run `deploy.sh`: the
+migration job gives `soc_console` its login and the console restarts with the new files. Lost
+host: `init-console-db.sh --restore` rebuilds both files from those two values in the environment.
+
+**What stops another website from pressing Acknowledge or Close for you.** Your identity is a
+header your browser adds to every request, so a page on another site could make your browser
+send a form post. Every POST must pass all three checks, and any one failing writes nothing (403):
+the browser marks it `Sec-Fetch-Site: same-origin`; its `Origin` is exactly this console's
+(`https://<the Host header>`); and the form carries a token that is an HMAC over your login, the
+case, the action and the UTC day, made with `SOC_CONSOLE_SECRET` (today's and yesterday's are
+accepted, so a form opened just before midnight still works). A token is for one person, one
+case and one action. The forms are plain urlencoded posts of at most 8 KiB; there is no script on
+any console page and the case pages' Content-Security-Policy allows forms to post to the console
+itself and nothing else.
+
+**Alert text is hostile text.** Everything an alert or a note contains is HTML-escaped, and
+control, zero-width and bidirectional-override characters are shown as `⟦U+XXXX⟧` instead of
+being dropped or obeyed. The raw payload is only ever text in a `<pre>` (cut at 20000
+characters). An alert's link becomes a clickable link only if it starts with
+`https://app.limacharlie.io/` and contains nothing but URL characters; otherwise it is shown as
+inert text.
+
+**Operating it.** Acknowledging stops the re-paging for that case and the audit trail keeps who
+and when; the case still collects new alerts. Closing needs a note, and the next matching alert
+opens a new case and a new page. To rotate the form secret: new value in `console-db.env` and the
+secrets manager, restart the console (open forms stop working; reload the page). To rotate the
+database password: new value in `console-db.env` and `console-owner.env`, then `deploy.sh`.

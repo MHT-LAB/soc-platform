@@ -162,5 +162,13 @@ def test_public_app_routes_are_exactly_the_public_ones() -> None:
 def test_console_app_serves_only_console_and_healthz() -> None:
     settings = Settings(env="dev", version="edge", git_sha="a" * 40)
     r = TestClient(create_console_app(settings)).get("/openapi.json")
-    assert set(r.json()["paths"]) == {"/healthz", "/console", "/console/console.css"}
+    assert set(r.json()["paths"]) == {
+        "/healthz",
+        "/console",
+        "/console/console.css",
+        "/console/cases",
+        "/console/case/{case_id}",
+        "/console/case/{case_id}/ack",
+        "/console/case/{case_id}/close",
+    }
     assert prod_client().get("/version").status_code == 404

@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     page_cap_window_seconds: int = Field(default=600, ge=60, le=86400)
     health_file: str = "/tmp/worker-health"  # noqa: S108 - the container's own tmpfs
 
+    # The console's case pages. The URL is for soc_console (no table privileges; four
+    # functions), host 127.0.0.1 because the console runs on the host network. The secret
+    # signs the one-use form tokens that stop another site from pressing Ack or Close.
+    console_database_url: SecretStr = SecretStr("")
+    console_secret: SecretStr = SecretStr("")
+
     @property
     def console_allowlist(self) -> set[str]:
         return {u.strip().lower() for u in self.console_users.split(",") if u.strip()}

@@ -1,0 +1,19 @@
+<header class="top">
+  <div class="brand">
+    <svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true">
+      <circle cx="15" cy="15" r="13" class="ring1"></circle>
+      <circle cx="15" cy="15" r="8" class="ring2"></circle>
+      <circle cx="15" cy="15" r="3.2" class="core"></circle>
+    </svg>
+    <div><strong>SOC Console</strong><span>cases</span></div>
+  </div>
+  <nav aria-label="Views">
+    <a href="/console">Operations</a>
+    <a class="on" href="/console/cases">Cases</a>
+    <span class="soon">Fleet</span>
+    <span class="soon">Sources</span>
+  </nav>
+  <div class="right">
+    <span class="pill tailnet" title="Verified by Tailscale">tailnet · {{ user | vis }}</span>
+  </div>
+</header>

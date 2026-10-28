@@ -90,8 +90,7 @@ def test_db_env_files_are_required_and_never_given_to_the_public_app() -> None:
     assert SERVICES["db"]["env_file"][0]["required"] is True
     assert SERVICES["migrate"]["env_file"][0]["required"] is True
     for name in ("api", "console"):
-        paths = [e["path"] for e in SERVICES[name].get("env_file", [])]
-        assert not any("db.env" in p or "db-owner.env" in p for p in paths)
+        assert not {"db.env", "db-owner.env"} & set(env_files(name))
 
 
 def test_the_owner_url_never_reaches_a_long_running_service() -> None:
@@ -148,7 +147,11 @@ def env_files(name: str) -> dict[str, bool]:
 
 def test_the_worker_secrets_go_to_the_worker_and_the_login_password_to_migrate_only() -> None:
     assert env_files("worker") == {"worker.env": True, "policy.env": False}
-    assert env_files("migrate") == {"db-owner.env": True, "worker-owner.env": False}
+    assert env_files("migrate") == {
+        "db-owner.env": True,
+        "worker-owner.env": False,
+        "console-owner.env": False,
+    }
     for name in ("api", "console", "db", "tunnel"):
         names = env_files(name) if name in SERVICES else {}
         assert not {"worker.env", "worker-owner.env", "policy.env"} & set(names), name
@@ -162,3 +165,31 @@ def test_the_worker_never_gets_the_owner_the_ingest_or_the_edr_credentials() -> 
     assert not names & {"db.env", "db-owner.env", "ingest.env", "console.env", "lc.env"}
     env = WORKER.get("environment", {})
     assert not {k for k in env if k.startswith(("SOC_MIGRATE", "SOC_INGEST", "SOC_LC"))}
+
+
+# ---- the console's case pages ----
+
+
+def test_the_console_form_secret_and_database_login_go_to_the_console_only() -> None:
+    assert env_files("console") == {
+        "lc.env": False,
+        "console.env": False,
+        "console-db.env": False,
+    }
+    for name in ("api", "worker", "db", "migrate"):
+        names = set(env_files(name))
+        assert "console-db.env" not in names, name
+    for name in ("api", "worker", "console", "db"):
+        assert "console-owner.env" not in set(env_files(name)), name
+    assert "console-db.env" not in " ".join(
+        e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
+    )
+
+
+def test_the_console_stays_on_the_host_network_and_never_gets_the_owner_credentials() -> None:
+    console = SERVICES["console"]
+    assert console["network_mode"] == "host" and "networks" not in console
+    assert "ports" not in console
+    env = console.get("environment", {})
+    assert not {k for k in env if k.startswith(("SOC_MIGRATE", "SOC_INGEST", "SOC_WORKER"))}
+    assert not {"db.env", "db-owner.env", "ingest.env", "worker.env"} & set(env_files("console"))
