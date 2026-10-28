@@ -4,10 +4,11 @@ Everything comes from environment variables prefixed with SOC_ (or env files
 mounted by the deploy script). Nothing secret is ever baked into the image.
 """
 
+import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -67,6 +68,28 @@ class Settings(BaseSettings):
     page_cap: int = Field(default=10, ge=1, le=1000)
     page_cap_window_seconds: int = Field(default=600, ge=60, le=86400)
     health_file: str = "/tmp/worker-health"  # noqa: S108 - the container's own tmpfs
+
+    # The console's case pages. The URL is for soc_console (no table privileges; four
+    # functions), host 127.0.0.1 because the console runs on the host network. The secret
+    # signs the one-use form tokens that stop another site from pressing Ack or Close.
+    console_database_url: SecretStr = SecretStr("")
+    console_secret: SecretStr = SecretStr("")
+    # The console's own address as people open it (https://<tailnet name>), no path. When
+    # set, a form post must come from exactly this origin, whatever Host the proxy
+    # forwards; the pager's click link (P5c) points here too.
+    console_base_url: str = ""
+
+    @field_validator("console_base_url")
+    @classmethod
+    def _bare_https_origin(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if value and not re.fullmatch(
+            r"https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?", value
+        ):
+            raise ValueError(
+                "SOC_CONSOLE_BASE_URL must be https://host[:port], lower case, no path"
+            )
+        return value
 
     @property
     def console_allowlist(self) -> set[str]:

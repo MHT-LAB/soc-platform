@@ -27,7 +27,6 @@ import re
 import signal
 import sys
 import time
-import unicodedata
 import urllib.error
 import urllib.request
 from collections import deque
@@ -44,6 +43,9 @@ from sqlalchemy.engine import make_url
 
 from soc_api.config import Settings, get_settings
 from soc_api.logs import configure_logging
+from soc_api.text import LC_LINK_PREFIX, clean, safe_link
+
+__all__ = ["LC_LINK_PREFIX", "clean", "safe_link"]  # re-exported for callers and tests
 
 log = logging.getLogger("soc_api.worker")
 
@@ -51,7 +53,6 @@ EASTERN = ZoneInfo("America/New_York")
 # A claim is a two-minute lease (migration 0002). One send, with its timeout, must
 # finish far inside that, or a slow send could be claimed and pushed a second time.
 NTFY_TIMEOUT_SECONDS = 10.0
-LC_LINK_PREFIX = "https://app.limacharlie.io/"
 TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
 # Only plain HTTP(S): no file:// or ftp:// handler, no redirects, no proxy from the
@@ -68,27 +69,6 @@ for _handler in (
 
 
 # ---- text that crosses ntfy ----
-
-
-def clean(text: str | None, limit: int) -> str:
-    """Plain, single-line text: control and format characters dropped (this includes
-    newlines turned into spaces first), runs of white space collapsed, then cut."""
-    out = []
-    for ch in text or "":
-        category = unicodedata.category(ch)
-        if category[0] == "Z" or ch in "\t\n\r\x0b\x0c":
-            out.append(" ")
-        elif category[0] != "C":
-            out.append(ch)
-    return " ".join("".join(out).split())[:limit]
-
-
-def safe_link(link: str | None) -> str | None:
-    """A click target only if it is the vendor's https console, in plain printable ASCII."""
-    if link and len(link) <= 512 and link.startswith(LC_LINK_PREFIX):
-        if re.fullmatch(r"[\x21-\x7e]+", link):
-            return link
-    return None
 
 
 def push_text(page: dict[str, Any]) -> tuple[str, str, int, str | None]:

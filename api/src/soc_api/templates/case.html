@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Case · SOC Console</title>
+<link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+{% include "_header.html" %}
+{% set c = doc.case %}
+<main>
+  <div class="head">
+    <h1>{{ c.client_slug | vis }} · {{ ((doc.alerts[0].rule if doc.alerts else "") or "alert") | vis(200) }}</h1>
+    <p><a href="/console/cases">All cases</a> · case <code>{{ c.id }}</code></p>
+  </div>
+
+  {% if message %}<p class="banner" role="alert">{{ message }}</p>{% endif %}
+
+  <section class="strip" aria-label="Summary">
+    <div class="tile"><span class="label">Status</span><strong><span class="badge {{ c.status }}">{{ c.status }}</span></strong></div>
+    <div class="tile"><span class="label">Severity</span><strong>{{ c.severity }}</strong></div>
+    <div class="tile"><span class="label">Opened</span><strong class="mono small">{{ c.opened_at | utc }}</strong></div>
+    <div class="tile"><span class="label">Alerts</span><strong>{{ c.alert_count }}</strong>{% if c.alert_count > doc.alerts | length %}<span class="note">newest {{ doc.alerts | length }} shown</span>{% endif %}</div>
+  </section>
+
+  {% if c.status == "closed" %}
+  <section class="card">
+    <div class="card-head"><h2>Closed</h2><span class="meta">{{ c.closed_at | utc }}</span></div>
+    <p>{{ (c.closing_note or "") | vis }}</p>
+  </section>
+  {% elif tokens %}
+  <section class="card">
+    <div class="card-head"><h2>Actions</h2></div>
+    <div class="actions">
+      {% if c.status == "open" %}
+      <form method="post" action="/console/case/{{ c.id }}/ack">
+        <input type="hidden" name="token" value="{{ tokens.ack }}">
+        <button type="submit">Acknowledge</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/console/case/{{ c.id }}/close">
+        <input type="hidden" name="token" value="{{ tokens.close }}">
+        <label for="note">Close with a note</label>
+        <input id="note" name="note" type="text" maxlength="2000" required autocomplete="off">
+        <button type="submit">Close</button>
+      </form>
+    </div>
+  </section>
+  {% else %}
+  <section class="card"><p class="dim">Acknowledge and Close are off: the console form secret is not set on this host.</p></section>
+  {% endif %}
+
+  <section class="card">
+    <div class="card-head"><h2>Alerts</h2><span class="meta">newest first</span></div>
+    {% for a in doc.alerts %}
+    <article class="alert">
+      <div class="alert-head">
+        <span class="mono">{{ a.received_at | utc }}</span>
+        <span>{{ (a.rule or "") | vis(200) }}</span>
+        <span class="mono">{{ (a.host or "") | vis(64) }}</span>
+        <span>{{ a.severity }}</span>
+        {% set path = a.link | link_path %}
+        {% if path is not none %}<a href="https://app.limacharlie.io/{{ path }}" rel="noreferrer noopener">detection</a>{% elif a.link %}<span class="dim mono">{{ a.link | vis(200) }}</span>{% endif %}
+      </div>
+      {% if a.summary %}<p class="dim">{{ a.summary | vis(300) }}</p>{% endif %}
+      <details>
+        <summary>payload (text, never run){% if a.raw_truncated %} · cut{% endif %}</summary>
+        <pre>{{ a.raw | vis }}</pre>
+      </details>
+    </article>
+    {% endfor %}
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>History</h2></div>
+    <table>
+      <thead><tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Detail</th></tr></thead>
+      <tbody>
+      {% for e in doc.events %}
+        <tr><td class="mono">{{ e.at | utc }}</td><td>{{ e.actor | vis }}</td><td>{{ e.kind | vis }}</td><td>{{ (e.body or "") | vis(300) }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

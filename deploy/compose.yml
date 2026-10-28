@@ -72,11 +72,15 @@ services:
       # cloudflared readiness, published on the host's loopback by the edge overlay.
       SOC_TUNNEL_READY_URL: ${SOC_TUNNEL_READY_URL:-http://127.0.0.1:2000/ready}
     # Secrets written by the operator on the host (mode 600): the console
-    # allowlist (required) and the optional read-only EDR key.
+    # allowlist (required), the optional read-only EDR key, and the case pages' database
+    # login and form secret (deploy/init-console-db.sh; without it the case pages say
+    # cases are not set up).
     env_file:
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/lc.env
         required: false
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/console.env
+        required: false
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/console-db.env
         required: false
     read_only: true
     tmpfs:
@@ -204,6 +208,9 @@ services:
         required: true
       # SOC_WORKER_DB_PASSWORD (init-worker.sh): gives soc_worker its login.
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/worker-owner.env
+        required: false
+      # SOC_CONSOLE_DB_PASSWORD (init-console-db.sh): gives soc_console its login.
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/console-owner.env
         required: false
     volumes:
       - ${SOC_STATE_DIR:-/srv/soc}/seed:/seed:ro
