@@ -12,9 +12,11 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_ingest` | the public ingest handler | **No table privileges.** It can only call `ingest_alert()`, which maps a delivery to a source, attributes it (unknown tenant -> the Unassigned client) and inserts idempotently on `(source, event_id)`. |
 | `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
 | `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call six functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`. Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
+| `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call four functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case` and `close_case` (a note is required). Staff view across clients; per-client roles come with sign-in. |
+| `soc_console_writer` | nobody (never logs in) | Owns those four functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; each behind an RLS policy for this role. |
 | `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, each behind an RLS policy for this role. No `DELETE`. |
 
-All five service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
+All seven service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
 `CREATEROLE` or `CREATEDB`. Roles are cluster-wide, so they can already exist: if one has
 any of those (or a `*_writer` role can log in), the migration stops instead of reusing it. Deploy gives each a login and a password
 from the secrets manager; no credential is in this repo.
@@ -72,8 +74,12 @@ ones the data directory was created with.
 PostgreSQL 16 runs as the `db` service in `deploy/compose.yml` (profile `db`, turned
 on by `deploy.sh` when the secret files exist). It lives on an **internal** compose
 network that only `api`, `db`, the one-off `migrate` job and the optional `worker` join. The tunnel is not
-on it, nothing is published on the host, and the console does not use the database
-yet. The data directory is `/srv/soc/pgdata` (uid 999, mode 700).
+on it. The only thing published on the host is **`127.0.0.1:5432`**, for the console
+(which runs on the host network and reads cases as `soc_console`): Docker publishes no
+port from an internal-only network, so `db` also joins `dbhost`, a bridge nothing else is
+on and which has no outbound NAT. Only processes on the host itself can use that port;
+no container can (checked in `scripts/test-db-stack.sh`). The `postgres` superuser is
+refused on it as everywhere else. The data directory is `/srv/soc/pgdata` (uid 999, mode 700).
 
 | File (mode 600) | Holds | Read by |
 |---|---|---|
@@ -118,6 +124,10 @@ log never see the plain value. It changes nothing else about the role. To rotate
 change the password in `db-owner.env` and `ingest.env`, then deploy. Between the
 migration job and the swap the running app cannot open new database connections,
 so expect a few seconds of 503s (the sender retries, if it does; see the retry test).
+
+`logins` also gives `soc_console` its login (5-connection cap) when
+`SOC_CONSOLE_DB_PASSWORD` is set, under the same rules as the worker's (optional, a set
+but too-short value stops the deploy).
 
 `logins` also gives `soc_worker` its login (5-connection cap) when
 `SOC_WORKER_DB_PASSWORD` is set in `db-owner.env`; with it unset the step is skipped,
@@ -252,3 +262,21 @@ server on the worker's own network and checks: one push per case, nothing for a 
 the same case, a new rule is a new push, the topic is only in the push body (never in the
 worker's log), the worker is on the `db` and `egress` networks only, and `soc_worker` can
 log in but cannot read the alert payload.
+
+## Case states, Ack and Close (migration 0004)
+
+A case is `open`, `acknowledged` or `closed` (the table checks it, and that a closed case has
+a close time and no other has). `ack_case(id, login)` moves open to acknowledged, marks the
+case's pages acknowledged (so nothing is re-sent for it) and writes one `acked` event; it is
+idempotent and returns `acked`, `already`, `closed`, `not_found` or `invalid_login`.
+`close_case(id, login, note)` needs a note of 1-2000 characters, closes the case, marks its
+pages acknowledged and writes one `closed` event. Only logins shaped like a sign-in name
+reach the audit trail (checked in the function). **An acknowledged case still collects new
+alerts for its group** (acknowledging stops the buzzing, not the record); only a closed case
+stops, and the next matching alert opens a new case and a new page. Events get their own
+timestamps (one transaction's `now()` is constant), so a case history has one order.
+
+`list_cases(status, limit)`: `active` (open and acknowledged, the default), `open`,
+`acknowledged`, `closed` or `all`; limit 1-500. A rollback to a release from before
+`0004` keeps working (it only writes `open`); `alembic downgrade` removes the functions,
+the checks and the wider grouping.

@@ -6,7 +6,8 @@ owner role, never as the roles the services use:
     SOC_MIGRATE_URL=postgresql+psycopg://owner@host/db python -m soc_api.db upgrade
 
 `logins` gives the soc_ingest role its password (from SOC_INGEST_DB_PASSWORD) and,
-when SOC_WORKER_DB_PASSWORD is set, the soc_worker role its password;
+when SOC_WORKER_DB_PASSWORD is set, the soc_worker role its password, and when
+SOC_CONSOLE_DB_PASSWORD is set, the soc_console role its password;
 `deploy` is `upgrade` then `logins`, which is what the deploy script runs.
 """
 
@@ -66,6 +67,8 @@ INGEST_ROLE = "soc_ingest"
 INGEST_CONNECTION_LIMIT = 10
 WORKER_ROLE = "soc_worker"
 WORKER_CONNECTION_LIMIT = 5
+CONSOLE_ROLE = "soc_console"
+CONSOLE_CONNECTION_LIMIT = 5
 MIN_PASSWORD_LENGTH = 32
 
 
@@ -107,6 +110,10 @@ def set_worker_login(url: str, password: str) -> None:
     _set_login(url, WORKER_ROLE, WORKER_CONNECTION_LIMIT, password)
 
 
+def set_console_login(url: str, password: str) -> None:
+    _set_login(url, CONSOLE_ROLE, CONSOLE_CONNECTION_LIMIT, password)
+
+
 def main(argv: list[str]) -> int:
     url = os.environ.get("SOC_MIGRATE_URL")
     if not url or argv not in (["upgrade"], ["downgrade"], ["logins"], ["deploy"]):
@@ -129,6 +136,9 @@ def main(argv: list[str]) -> int:
             worker_password = os.environ.get("SOC_WORKER_DB_PASSWORD", "")
             if worker_password:
                 set_worker_login(url, worker_password)
+            console_password = os.environ.get("SOC_CONSOLE_DB_PASSWORD", "")
+            if console_password:
+                set_console_login(url, console_password)
         except ValueError as exc:
             print(exc)
             return 2

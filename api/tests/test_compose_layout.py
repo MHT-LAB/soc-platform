@@ -23,14 +23,31 @@ def test_only_api_db_migrate_and_worker_are_on_the_database_network() -> None:
     # The tunnel (overlay) keeps the default network only.
     assert "networks" not in OVERLAY["services"]["tunnel"]
     # db and migrate are not on the default network the tunnel shares.
-    assert SERVICES["db"]["networks"] == ["db"]
+    assert SERVICES["db"]["networks"] == ["db", "dbhost"]
     assert SERVICES["migrate"]["networks"] == ["db"]
     assert SERVICES["api"]["networks"] == ["default", "db"]
 
 
-def test_the_database_publishes_nothing_on_the_host() -> None:
-    assert "ports" not in SERVICES["db"]
+def test_the_database_publishes_one_port_on_the_hosts_loopback_only() -> None:
+    # For the console (host network). Never 0.0.0.0, never a LAN address, nothing else.
+    assert SERVICES["db"]["ports"] == ["127.0.0.1:5432:5432"]
     assert SERVICES["db"].get("network_mode") is None
+    for name, svc in SERVICES.items():
+        for port in svc.get("ports", []):
+            assert str(port).startswith("127.0.0.1:"), f"{name} publishes {port} beyond loopback"
+
+
+def test_the_publish_goes_through_a_network_only_the_database_is_on_and_that_cannot_route_out() -> (
+    None
+):
+    # Docker publishes no port from an internal-only network, so the database needs one
+    # more network; it must not become a way in for other containers or a way out.
+    on = {n for n, s in SERVICES.items() if "dbhost" in s.get("networks", [])}
+    assert on == {"db"}
+    opts = COMPOSE["networks"]["dbhost"]["driver_opts"]
+    assert opts["com.docker.network.bridge.enable_ip_masquerade"] == "false"
+    assert "internal" not in COMPOSE["networks"]["dbhost"]
+    assert COMPOSE["networks"]["db"] == {"internal": True}
 
 
 def test_api_does_not_depend_on_the_database() -> None:

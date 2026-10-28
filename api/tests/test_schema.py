@@ -159,14 +159,14 @@ def test_service_roles_are_not_privileged_and_own_nothing(db: TestDb) -> None:
     with db.connect() as c:
         roles = c.execute(
             "SELECT rolname, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb "
-            "FROM pg_roles WHERE rolname IN ('soc_app', 'soc_ingest', 'soc_worker')"
+            "FROM pg_roles WHERE rolname IN ('soc_app', 'soc_ingest', 'soc_worker', 'soc_console')"
         ).fetchall()
         owned = c.execute(
             "SELECT count(*) FROM pg_class cl JOIN pg_roles r ON r.oid = cl.relowner "
-            "WHERE r.rolname IN ('soc_app', 'soc_ingest', 'soc_worker') "
+            "WHERE r.rolname IN ('soc_app', 'soc_ingest', 'soc_worker', 'soc_console') "
             "AND cl.relnamespace = 'public'::regnamespace"
         ).fetchone()
-    assert len(roles) == 3
+    assert len(roles) == 4
     assert all(r[1:] == (False, False, False, False) for r in roles)
     assert owned == (0,)
 
@@ -455,6 +455,8 @@ SERVICE_ROLES = (
     "soc_ingest_writer",
     "soc_worker",
     "soc_worker_writer",
+    "soc_console",
+    "soc_console_writer",
 )
 
 
@@ -502,7 +504,7 @@ def test_migrations_run_as_a_non_superuser_owner() -> None:
 
 
 @pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS", "CREATEROLE", "CREATEDB"])
-@pytest.mark.parametrize("role", ["soc_app", "soc_ingest", "soc_worker"])
+@pytest.mark.parametrize("role", ["soc_app", "soc_ingest", "soc_worker", "soc_console"])
 def test_a_privileged_existing_role_stops_the_migration(
     db: TestDb, role: str, attribute: str
 ) -> None:
@@ -520,7 +522,7 @@ def test_a_privileged_existing_role_stops_the_migration(
             admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
 
 
-@pytest.mark.parametrize("writer", ["soc_ingest_writer", "soc_worker_writer"])
+@pytest.mark.parametrize("writer", ["soc_ingest_writer", "soc_worker_writer", "soc_console_writer"])
 def test_a_writer_role_that_can_log_in_stops_the_migration(db: TestDb, writer: str) -> None:
     params = _admin_params()
     name = f"soc_test_{uuid.uuid4().hex[:12]}"

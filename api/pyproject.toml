@@ -41,6 +41,7 @@ select = ["E", "F", "I", "B", "S", "UP"]
 "tests/**" = ["S101"]  # assert is how pytest works
 "tests/test_schema.py" = ["S608"]  # f-string SQL over fixed table names
 "tests/test_worker_db.py" = ["S608"]  # same: parametrized over fixed table names
+"tests/test_console_db.py" = ["S608"]  # same
 "src/soc_api/migrations/**" = ["S608"]  # f-string SQL over fixed table names and one constant
 
 [tool.mypy]

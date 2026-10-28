@@ -96,9 +96,10 @@ services:
 
   # PostgreSQL 16 (ADR 0001). Only with the `db` profile, which deploy.sh turns on
   # when db.env and db-owner.env exist, so hosts without them deploy as before.
-  # On an internal network shared only with api and migrate: the tunnel is not on
-  # it, nothing is published on the host, and the console (host network) does not
-  # use the database yet. The data directory is under /srv/soc so the container's
+  # On an internal network shared only with api, migrate and the worker: the tunnel
+  # is not on it. The one thing published is 127.0.0.1:5432 for the console (host
+  # network), which reads cases through the soc_console role. The data directory is
+  # under /srv/soc so the container's
   # nightly backup includes it. The postgres superuser is refused over TCP
   # (initdb/20-hba.sh) and works only on the container's own socket.
   db:
@@ -106,8 +107,16 @@ services:
     image: postgres:16.15-trixie@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
     restart: unless-stopped
     user: "999:999"
+    # `db` is internal (no route out), and Docker publishes no port from an internal-only
+    # network, so the console (host network, case pages) reaches the database through
+    # `dbhost`: a bridge only this service joins, with no outbound NAT. The port is bound
+    # to the host's loopback, so only processes on the host itself can use it; no other
+    # container can reach it (checked in scripts/test-db-stack.sh).
     networks:
       - db
+      - dbhost
+    ports:
+      - "127.0.0.1:5432:5432"
     # POSTGRES_PASSWORD (superuser, first start only) and SOC_DB_OWNER_PASSWORD.
     env_file:
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/db.env
@@ -215,5 +224,10 @@ networks:
   # No route out and none in from the default network.
   db:
     internal: true
+  # Only the database is on it; it exists to carry the loopback publish. Masquerading
+  # is off, so nothing on it can reach the internet.
+  dbhost:
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
   # Outbound only, for the worker's pushes. Only the worker is on it.
   egress: {}
