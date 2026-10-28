@@ -253,3 +253,70 @@ def test_seed_cli_exit_codes(
     clash = write_seed(tmp_path, client={"slug": "acme-demo", "name": "Different"})
     assert soc_seed.main([str(clash)]) == 1
     assert "nothing changed" in capsys.readouterr().out
+
+
+# ---- soc_worker login (optional until the worker is set up on the host) ----
+
+
+def worker_row(db: TestDb) -> tuple[bool, int, str | None]:
+    with db.connect() as c:
+        row = c.execute(
+            "SELECT rolcanlogin, rolconnlimit, rolpassword FROM pg_authid "
+            "WHERE rolname = 'soc_worker'"
+        ).fetchone()
+    assert row is not None
+    return row
+
+
+def test_worker_login_is_a_scram_verifier_with_its_own_connection_cap(db: TestDb) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_worker NOLOGIN PASSWORD NULL CONNECTION LIMIT -1")
+    soc_db.set_worker_login(db.sqlalchemy_url(), PASSWORD)
+    can_login, limit, verifier = worker_row(db)
+    assert can_login is True and limit == soc_db.WORKER_CONNECTION_LIMIT
+    assert verifier is not None and scram_matches(verifier, PASSWORD)
+    assert not scram_matches(verifier, "x" * 40)
+
+
+@pytest.mark.parametrize("password", ["", "short", "x" * 31])
+def test_worker_login_refuses_a_short_password(db: TestDb, password: str) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_worker NOLOGIN")
+    with pytest.raises(ValueError, match="soc_worker password must be at least"):
+        soc_db.set_worker_login(db.sqlalchemy_url(), password)
+    assert worker_row(db)[0] is False
+
+
+def test_deploy_sets_the_worker_login_when_its_password_is_given(
+    db: TestDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_worker NOLOGIN PASSWORD NULL")
+    monkeypatch.setenv("SOC_MIGRATE_URL", db.sqlalchemy_url())
+    monkeypatch.setenv("SOC_INGEST_DB_PASSWORD", PASSWORD)
+    monkeypatch.setenv("SOC_WORKER_DB_PASSWORD", "w" * 40)
+    assert soc_db.main(["deploy"]) == 0
+    verifier = worker_row(db)[2]
+    assert verifier is not None and scram_matches(verifier, "w" * 40)
+
+
+def test_deploy_without_a_worker_password_leaves_the_worker_login_alone(
+    db: TestDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with db.connect() as c:
+        c.execute("ALTER ROLE soc_worker NOLOGIN PASSWORD NULL")
+    monkeypatch.setenv("SOC_MIGRATE_URL", db.sqlalchemy_url())
+    monkeypatch.setenv("SOC_INGEST_DB_PASSWORD", PASSWORD)
+    monkeypatch.delenv("SOC_WORKER_DB_PASSWORD", raising=False)
+    assert soc_db.main(["deploy"]) == 0
+    assert worker_row(db)[0] is False and worker_row(db)[2] is None
+
+
+def test_deploy_stops_on_a_worker_password_that_is_set_but_too_short(
+    db: TestDb, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SOC_MIGRATE_URL", db.sqlalchemy_url())
+    monkeypatch.setenv("SOC_INGEST_DB_PASSWORD", PASSWORD)
+    monkeypatch.setenv("SOC_WORKER_DB_PASSWORD", "short")
+    assert soc_db.main(["deploy"]) == 2
+    assert "soc_worker password must be at least" in capsys.readouterr().out

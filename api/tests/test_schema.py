@@ -113,7 +113,7 @@ def test_migrations_apply_and_create_every_table(db: TestDb) -> None:
         tables = {
             r[0] for r in c.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         }
-    assert tables - {"alembic_version"} == set(ALL_TABLES)
+    assert tables - {"alembic_version"} == {*ALL_TABLES, "worker_state"}
 
 
 def test_unassigned_client_is_seeded(db: TestDb) -> None:
@@ -159,14 +159,14 @@ def test_service_roles_are_not_privileged_and_own_nothing(db: TestDb) -> None:
     with db.connect() as c:
         roles = c.execute(
             "SELECT rolname, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb "
-            "FROM pg_roles WHERE rolname IN ('soc_app', 'soc_ingest')"
+            "FROM pg_roles WHERE rolname IN ('soc_app', 'soc_ingest', 'soc_worker')"
         ).fetchall()
         owned = c.execute(
             "SELECT count(*) FROM pg_class cl JOIN pg_roles r ON r.oid = cl.relowner "
-            "WHERE r.rolname IN ('soc_app', 'soc_ingest') "
+            "WHERE r.rolname IN ('soc_app', 'soc_ingest', 'soc_worker') "
             "AND cl.relnamespace = 'public'::regnamespace"
         ).fetchone()
-    assert len(roles) == 2
+    assert len(roles) == 3
     assert all(r[1:] == (False, False, False, False) for r in roles)
     assert owned == (0,)
 
@@ -449,7 +449,13 @@ def test_ingest_writer_cannot_attribute_an_alert_to_another_client(db: TestDb) -
 
 # ---- migrations without a superuser ----
 
-SERVICE_ROLES = ("soc_app", "soc_ingest", "soc_ingest_writer")
+SERVICE_ROLES = (
+    "soc_app",
+    "soc_ingest",
+    "soc_ingest_writer",
+    "soc_worker",
+    "soc_worker_writer",
+)
 
 
 def _admin_params() -> dict[str, str]:
@@ -496,7 +502,7 @@ def test_migrations_run_as_a_non_superuser_owner() -> None:
 
 
 @pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS", "CREATEROLE", "CREATEDB"])
-@pytest.mark.parametrize("role", ["soc_app", "soc_ingest"])
+@pytest.mark.parametrize("role", ["soc_app", "soc_ingest", "soc_worker"])
 def test_a_privileged_existing_role_stops_the_migration(
     db: TestDb, role: str, attribute: str
 ) -> None:
@@ -514,15 +520,16 @@ def test_a_privileged_existing_role_stops_the_migration(
             admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
 
 
-def test_a_writer_role_that_can_log_in_stops_the_migration(db: TestDb) -> None:
+@pytest.mark.parametrize("writer", ["soc_ingest_writer", "soc_worker_writer"])
+def test_a_writer_role_that_can_log_in_stops_the_migration(db: TestDb, writer: str) -> None:
     params = _admin_params()
     name = f"soc_test_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(make_conninfo(**params), autocommit=True) as admin:
-        admin.execute("ALTER ROLE soc_ingest_writer LOGIN")
+        admin.execute(f"ALTER ROLE {writer} LOGIN")
         admin.execute(f'CREATE DATABASE "{name}"')
         try:
             with pytest.raises(sqlalchemy.exc.ProgrammingError, match="must not have"):
                 soc_db.upgrade(TestDb(name=name, params=params).sqlalchemy_url())
         finally:
-            admin.execute("ALTER ROLE soc_ingest_writer NOLOGIN")
+            admin.execute(f"ALTER ROLE {writer} NOLOGIN")
             admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
