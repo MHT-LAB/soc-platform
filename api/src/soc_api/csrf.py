@@ -60,3 +60,39 @@ def same_origin(headers: Mapping[str, str], scheme: str, expected: str | None = 
         return headers.get("origin") == expected
     host = headers.get("host", "")
     return bool(host) and headers.get("origin") == f"{scheme}://{host}"
+
+
+# ---- the Acknowledge button on a phone notification ----
+#
+# The ntfy app is not a browser: its request has no Origin and no Sec-Fetch-Site, so the
+# form checks cannot apply. What it carries instead is a link the worker made: an HMAC over
+# the case and an expiry, with a key (SOC_ACK_KEY) that is not the form secret and a
+# different signing context, so neither kind of token can ever pass as the other. The link
+# crosses the push server, so it is good for one case, one action and 24 hours, and the
+# request still has to arrive over the tailnet from an allowed person.
+
+PHONE_LIFETIME = 24 * 3600
+PHONE_SLACK = 3600  # an expiry further out than lifetime + slack is not one we issued
+
+
+def make_phone_token(key: str, case_id: str, expires: int) -> str:
+    if not key:
+        raise ValueError("cannot make a phone token")
+    message = "\n".join(("phone-ack-v1", case_id.lower(), str(int(expires))))
+    return hmac.new(key.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+
+def phone_expiry(now: datetime | None = None) -> int:
+    return int((now or datetime.now(UTC)).timestamp()) + PHONE_LIFETIME
+
+
+def check_phone_token(
+    key: str, token: str, case_id: str, expires: int, now: datetime | None = None
+) -> bool:
+    if not key or len(token) != 64:
+        return False
+    current = int((now or datetime.now(UTC)).timestamp())
+    in_window = current <= expires <= current + PHONE_LIFETIME + PHONE_SLACK
+    # The MAC is always computed, so the time taken does not say whether the expiry was right.
+    mac_ok = hmac.compare_digest(token, make_phone_token(key, case_id, expires))
+    return in_window and mac_ok

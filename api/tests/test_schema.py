@@ -227,13 +227,14 @@ def test_references_cannot_cross_clients(db: TestDb, table: str, column: str, pa
             "endpoint": "sensor_id",
             "alert": "source_id, event_id, raw",
             "case_event": "actor, kind",
-            "notification": "channel",
+            "notification": "channel, kind",
         }[table]
         values = {
             "endpoint": "'x'",
             "alert": "(SELECT id FROM source WHERE client_id = %(a)s), 'x', '{}'",
             "case_event": "'x', 'k'",
-            "notification": "'ntfy'",
+            # a kind the other client's case does not have yet, so the foreign key is what fails
+            "notification": "'ntfy', 'repage2'",
         }[table]
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             c.execute(

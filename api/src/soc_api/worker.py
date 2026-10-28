@@ -41,6 +41,8 @@ from zoneinfo import ZoneInfo
 import psycopg
 from sqlalchemy.engine import make_url
 
+from soc_api import csrf
+from soc_api.cases import parse_case_id
 from soc_api.config import Settings, get_settings
 from soc_api.logs import configure_logging
 from soc_api.text import LC_LINK_PREFIX, clean, safe_link
@@ -74,7 +76,8 @@ for _handler in (
 def push_text(page: dict[str, Any]) -> tuple[str, str, int, str | None]:
     """(title, message, ntfy priority, click) for a claimed page."""
     rule = re.sub(r"^general\.", "", page.get("rule") or "") or "alert"
-    title = clean(f"{page['client_slug']}: {rule}", 80)
+    again = "REPEAT: " if page.get("kind") in ("repage1", "repage2") else ""
+    title = clean(f"{again}{page['client_slug']}: {rule}", 80)
     detected = page.get("detected_at")
     when = f"{detected.astimezone(EASTERN):%H:%M} ET" if isinstance(detected, datetime) else "?"
     host = clean(page.get("host"), 64) or "unknown"
@@ -86,6 +89,29 @@ def push_text(page: dict[str, Any]) -> tuple[str, str, int, str | None]:
         else 3
     )
     return title, message, prio, safe_link(page.get("link"))
+
+
+def push_links(
+    page: dict[str, Any], base_url: str, ack_key: str, now: datetime
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """The tap target and the buttons of a push. With the console's address set, a tap opens
+    the case page, LimaCharlie becomes a button, and (with the key) so does Acknowledge. The
+    vetted LimaCharlie link stays the tap target otherwise."""
+    lc = safe_link(page.get("link"))
+    case_id = parse_case_id(str(page.get("case_id") or ""))
+    if not base_url or case_id is None:
+        return lc, []
+    actions: list[dict[str, Any]] = []
+    if lc:
+        actions.append({"action": "view", "label": "LimaCharlie", "url": lc})
+    if ack_key:
+        expires = csrf.phone_expiry(now)
+        token = csrf.make_phone_token(ack_key, case_id, expires)
+        url = f"{base_url}/console/case/{case_id}/ack-phone?e={expires}&t={token}"
+        actions.append(
+            {"action": "http", "label": "Ack", "url": url, "method": "POST", "clear": True}
+        )
+    return f"{base_url}/console/case/{case_id}", actions
 
 
 def parse_policy(raw: str) -> dict[str, int]:
@@ -157,7 +183,13 @@ class Ntfy:
         self._timeout = timeout
 
     def publish(
-        self, *, title: str, message: str, priority: int, click: str | None = None
+        self,
+        *,
+        title: str,
+        message: str,
+        priority: int,
+        click: str | None = None,
+        actions: list[dict[str, Any]] | None = None,
     ) -> Delivery:
         doc: dict[str, Any] = {
             "topic": self._topic,
@@ -167,6 +199,8 @@ class Ntfy:
         }
         if click:
             doc["click"] = click
+        if actions:
+            doc["actions"] = actions
         request = urllib.request.Request(  # noqa: S310 - the opener only speaks HTTP(S)
             self._url,
             data=json.dumps(doc).encode(),
@@ -234,6 +268,13 @@ class Db:
         _, rows = self._run("SELECT finish_page(%s, %s, %s)", (page_id, outcome, code))
         return str(rows[0][0])
 
+    def queue_repages(self, first_s: float, second_s: float) -> int:
+        _, rows = self._run(
+            "SELECT queue_repages(make_interval(secs => %s), make_interval(secs => %s))",
+            (first_s, second_s),
+        )
+        return int(rows[0][0])
+
     def due_page_count(self) -> int:
         _, rows = self._run("SELECT due_page_count()")
         return int(rows[0][0])
@@ -272,6 +313,8 @@ class Limits:
     cap_window_s: float = 600.0
     stale_after_s: int = 600
     stale_repeat_s: float = 6 * 3600.0
+    repage_first_s: float = 900.0
+    repage_second_s: float = 3600.0
     stale_check_s: float = 300.0
     retry_notice_s: float = 60.0  # between tries of a notice that could not be sent
 
@@ -294,7 +337,11 @@ class Worker:
         limits: Limits | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         health_file: str | None = None,
+        console_base_url: str = "",
+        ack_key: str = "",
     ) -> None:
+        self.console_base_url = console_base_url
+        self.ack_key = ack_key
         self.db = db
         self.ntfy = ntfy
         self.policy = policy
@@ -313,6 +360,7 @@ class Worker:
         ok = True
         for name, phase in (
             ("caser", self._caser),
+            ("repages", self._repages),
             ("sender", self._sender),
             ("heartbeat", self._heartbeat),
         ):
@@ -370,6 +418,13 @@ class Worker:
             if alerts < self.limits.case_batch:
                 return
 
+    # ---- re-sends of urgent pages nobody acknowledged ----
+
+    def _repages(self) -> None:
+        queued = self.db.queue_repages(self.limits.repage_first_s, self.limits.repage_second_s)
+        if queued:
+            log.info("repages queued=%d", queued)
+
     # ---- sender ----
 
     def _room(self, now: datetime) -> int:
@@ -386,14 +441,18 @@ class Worker:
 
     def _send_page(self, page: dict[str, Any]) -> None:
         try:
-            title, message, priority, click = push_text(page)
+            title, message, priority, _ = push_text(page)
         except (KeyError, TypeError, ValueError, AttributeError):
             # A page that cannot be described must not crash-loop the worker.
             self.db.finish_page(page["id"], "fail", "bad_page")
             log.error("page outcome=fail code=bad_page id=%s", str(page["id"])[:8])
             return
-        self._sends.append(self.clock())
-        delivery = self.ntfy.publish(title=title, message=message, priority=priority, click=click)
+        now = self.clock()
+        click, actions = push_links(page, self.console_base_url, self.ack_key, now)
+        self._sends.append(now)
+        delivery = self.ntfy.publish(
+            title=title, message=message, priority=priority, click=click, actions=actions
+        )
         code = delivery.code  # from classify(): a short lowercase code
         self.db.finish_page(page["id"], delivery.outcome, code)
         log.info(
@@ -537,9 +596,20 @@ def main(argv: list[str]) -> int:
         print(exc)  # never echoes a value: the messages above name the setting only
         return 2
     limits = Limits(
-        page_cap=settings.page_cap, cap_window_s=float(settings.page_cap_window_seconds)
+        page_cap=settings.page_cap,
+        cap_window_s=float(settings.page_cap_window_seconds),
+        repage_first_s=float(settings.repage_first_seconds),
+        repage_second_s=float(settings.repage_second_seconds),
     )
-    worker = Worker(db, ntfy, policy, limits=limits, health_file=settings.health_file)
+    worker = Worker(
+        db,
+        ntfy,
+        policy,
+        limits=limits,
+        health_file=settings.health_file,
+        console_base_url=settings.console_base_url,
+        ack_key=settings.ack_key.get_secret_value(),
+    )
     if args.command == "ok-now":
         try:
             delivery = worker.send_ok(datetime.now(UTC) - timedelta(days=7))

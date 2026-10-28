@@ -799,3 +799,180 @@ def test_a_database_that_cannot_be_reached_is_a_plain_503_that_leaks_nothing(
             assert secret not in r.text
     assert c.get("/healthz").status_code == 200  # the console itself stays up
     assert untouched(fx, case)
+
+
+# ---- the Acknowledge button on a phone notification ----
+
+ACK_KEY = "phone-ack-key-0123456789abcdef0123456789abcdef"  # noqa: S105 - throwaway
+
+
+def phone_url(
+    case: Any, *, key: str = ACK_KEY, expires: int | None = None, token: str | None = None
+) -> str:
+    exp = csrf.phone_expiry() if expires is None else expires
+    tok = csrf.make_phone_token(key, str(case), exp) if token is None else token
+    return f"/console/case/{case}/ack-phone?e={exp}&t={tok}"
+
+
+def phone_client(fx: Fixture, **overrides: Any) -> TestClient:
+    return make_client(fx, ack_key=ACK_KEY, **overrides)
+
+
+def phone_post(c: TestClient, url: str, **headers: str) -> Any:
+    return c.post(url, headers={**get_headers(), **headers})
+
+
+NOW_TS = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+
+
+def test_a_phone_token_fits_one_case_and_one_expiry_and_one_key() -> None:
+    exp = csrf.phone_expiry(NOW_TS)
+    token = csrf.make_phone_token(ACK_KEY, CASE, exp)
+    assert csrf.check_phone_token(ACK_KEY, token, CASE, exp, NOW_TS)
+    assert csrf.check_phone_token(ACK_KEY, token, CASE.upper(), exp, NOW_TS)
+    assert not csrf.check_phone_token(ACK_KEY, token, CASE[:-1] + "0", exp, NOW_TS)
+    assert not csrf.check_phone_token(ACK_KEY, token, CASE, exp + 1, NOW_TS)
+    assert not csrf.check_phone_token(ACK_KEY + "x", token, CASE, exp, NOW_TS)
+    assert not csrf.check_phone_token("", token, CASE, exp, NOW_TS)
+
+
+def test_a_phone_token_is_good_for_a_day_and_not_for_a_forged_far_future_expiry() -> None:
+    exp = csrf.phone_expiry(NOW_TS)
+    token = csrf.make_phone_token(ACK_KEY, CASE, exp)
+    assert csrf.check_phone_token(
+        ACK_KEY, token, CASE, exp, NOW_TS + timedelta(hours=23, minutes=59)
+    )
+    assert not csrf.check_phone_token(
+        ACK_KEY, token, CASE, exp, NOW_TS + timedelta(hours=24, minutes=1)
+    )
+    far = int(NOW_TS.timestamp()) + 30 * 86400  # signed correctly, but not an expiry we issue
+    assert not csrf.check_phone_token(
+        ACK_KEY, csrf.make_phone_token(ACK_KEY, CASE, far), CASE, far, NOW_TS
+    )
+
+
+def test_neither_kind_of_token_can_pass_as_the_other_even_with_one_key() -> None:
+    """The phone link crosses the push server, the form token never does; with one shared key
+    (a misconfiguration) their signing contexts would still keep them apart."""
+    key = SECRET
+    exp = csrf.phone_expiry(NOW_TS)
+    phone = csrf.make_phone_token(key, CASE, exp)
+    form = csrf.make_token(key, LOGIN, CASE, "ack", NOW_TS)
+    assert not csrf.check_token(key, phone, LOGIN, CASE, "ack", NOW_TS)
+    assert not csrf.check_phone_token(key, form, CASE, exp, NOW_TS)
+
+
+def test_the_two_signing_contexts_are_pinned_so_they_cannot_drift_together() -> None:
+    """Different keys already keep the tokens apart; different labels and shapes keep them
+    apart even if someone configures one key for both."""
+    import hashlib
+    import hmac
+
+    exp = csrf.phone_expiry(NOW_TS)
+    phone = f"phone-ack-v1\n{CASE}\n{exp}".encode()
+    form = f"console-form\n{LOGIN}\n{CASE}\nack\n{NOW_TS.date().isoformat()}".encode()
+    assert (
+        csrf.make_phone_token(ACK_KEY, CASE, exp)
+        == hmac.new(ACK_KEY.encode(), phone, hashlib.sha256).hexdigest()
+    )
+    assert (
+        csrf.make_token(ACK_KEY, LOGIN, CASE, "ack", NOW_TS)
+        == hmac.new(ACK_KEY.encode(), form, hashlib.sha256).hexdigest()
+    )
+
+
+def test_the_phone_button_acknowledges_with_a_plain_reply(fx: Fixture) -> None:
+    case = one_case(fx)
+    r = phone_post(phone_client(fx), phone_url(case))
+    assert r.status_code == 200 and r.text == "Acknowledged."
+    assert r.headers["content-type"].startswith("text/plain")
+    assert state(fx, case) == ("acknowledged", False, None, 1)
+    assert fx.one("SELECT actor FROM case_event WHERE kind = 'acked'") == (LOGIN,)
+    again = phone_post(phone_client(fx), phone_url(case))
+    assert again.status_code == 200 and again.text == "Already acknowledged."
+    assert state(fx, case)[3] == 1
+
+
+def test_a_link_preview_or_a_get_never_acknowledges(fx: Fixture) -> None:
+    case = one_case(fx)
+    c = phone_client(fx)
+    assert c.get(phone_url(case), headers=get_headers()).status_code == 405
+    assert c.head(phone_url(case), headers=get_headers()).status_code == 405
+    assert untouched(fx, case)
+
+
+@pytest.mark.parametrize(
+    "which", ["wrong-key", "expired", "far-future", "other-case", "garbage", "empty", "form-token"]
+)
+def test_a_phone_request_without_a_genuine_link_writes_nothing(fx: Fixture, which: str) -> None:
+    case = one_case(fx)
+    day_ago = int(datetime.now(UTC).timestamp()) - 3600
+    far = int(datetime.now(UTC).timestamp()) + 40 * 86400
+    urls = {
+        "wrong-key": phone_url(case, key=ACK_KEY + "x"),
+        "expired": phone_url(case, expires=day_ago),
+        "far-future": phone_url(case, expires=far, token=csrf.make_phone_token(ACK_KEY, case, far)),
+        "other-case": phone_url(
+            case,
+            token=csrf.make_phone_token(
+                ACK_KEY, "00000000-0000-4000-8000-0000000000ff", csrf.phone_expiry()
+            ),
+        ),
+        "garbage": phone_url(case, token="f" * 64),
+        "empty": f"/console/case/{case}/ack-phone",
+        "form-token": phone_url(case, token=csrf.make_token(SECRET, LOGIN, case, "ack")),
+    }
+    r = phone_post(phone_client(fx), urls[which])
+    assert r.status_code in (403, 422) and untouched(fx, case)
+
+
+@pytest.mark.parametrize("site", ["cross-site", "same-site"])
+def test_a_browser_made_cross_site_request_is_refused_even_with_a_good_link(
+    fx: Fixture, site: str
+) -> None:
+    case = one_case(fx)
+    r = phone_post(phone_client(fx), phone_url(case), **{"Sec-Fetch-Site": site})
+    assert r.status_code == 403 and untouched(fx, case)
+
+
+@pytest.mark.parametrize("site", [None, "same-origin", "none"])
+def test_the_app_and_a_user_opened_link_are_accepted(fx: Fixture, site: str | None) -> None:
+    case = one_case(fx)
+    headers = {} if site is None else {"Sec-Fetch-Site": site}
+    assert phone_post(phone_client(fx), phone_url(case), **headers).status_code == 200
+
+
+def test_the_phone_route_still_needs_the_tailnet_identity_and_the_allow_list(fx: Fixture) -> None:
+    case = one_case(fx)
+    c = phone_client(fx)
+    assert c.post(phone_url(case)).status_code == 403  # no identity at all
+    assert c.post(phone_url(case), headers=get_headers("stranger@example.com")).status_code == 403
+    assert untouched(fx, case)
+
+
+def test_phone_ack_is_off_without_the_key_and_without_a_database(fx: Fixture) -> None:
+    case = one_case(fx)
+    off = make_client(fx)  # no ack key set
+    r = phone_post(off, phone_url(case))
+    assert r.status_code == 503 and "not set up" in r.text and untouched(fx, case)
+    r = phone_post(phone_client(fx, console_database_url=""), phone_url(case))
+    assert r.status_code == 503 and untouched(fx, case)
+
+
+def test_phone_ack_on_an_unknown_or_closed_case(fx: Fixture) -> None:
+    c = phone_client(fx)
+    ghost = "00000000-0000-4000-8000-0000000000ff"
+    assert phone_post(c, phone_url(ghost)).status_code == 404
+    assert phone_post(c, phone_url("not-a-uuid")).status_code == 404
+    case = one_case(fx)
+    post(make_client(fx), case, "close", fields={"note": "done"})
+    r = phone_post(c, phone_url(case))
+    assert r.status_code == 409 and "closed" in r.text
+
+
+def test_phone_ack_with_the_database_down_is_a_plain_503_with_no_detail(fx: Fixture) -> None:
+    case = one_case(fx)
+    url = f"postgresql+psycopg://soc_console:secretpw@127.0.0.1:{free_port()}/soc"
+    r = phone_post(phone_client(fx, console_database_url=url), phone_url(case))
+    assert r.status_code == 503
+    assert all(x not in r.text for x in ("127.0.0.1", "secretpw", "soc_console"))

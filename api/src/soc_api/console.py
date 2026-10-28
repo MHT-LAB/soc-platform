@@ -15,7 +15,7 @@ from typing import Annotated
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
@@ -343,3 +343,48 @@ async def close_case(
     return await render_case(
         request, user, settings, cid, message=MESSAGES.get(result, "Not done."), code=code
     )
+
+
+@router.post("/console/case/{case_id}/ack-phone")
+async def ack_from_phone(
+    case_id: str,
+    request: Request,
+    user: Annotated[str, Depends(tailnet_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    e: Annotated[int, Query(ge=0)] = 0,
+    t: Annotated[str, Query(max_length=64)] = "",
+) -> Response:
+    """The Acknowledge button on a phone notification.
+
+    Only POST (a link preview must never acknowledge anything). The ntfy app is not a
+    browser, so there is no Origin to check; what makes the request genuine is the signed
+    link the worker made, plus the tailnet identity and allow-list every console route
+    needs. A request that a browser marks as made by another site is refused anyway."""
+    site = request.headers.get("sec-fetch-site")
+    refused = PlainTextResponse("That request was not accepted.", status_code=403)
+    if site not in (None, "same-origin", "none"):
+        return refused
+    cid = parse_case_id(case_id)
+    if cid is None:
+        return PlainTextResponse("Not Found", status_code=404)
+    key = settings.ack_key.get_secret_value()
+    if not key:
+        return PlainTextResponse("Phone acknowledgement is not set up.", status_code=503)
+    if not csrf.check_phone_token(key, t, cid, e):
+        return refused
+    db = case_db(settings)
+    if db is None:
+        return PlainTextResponse("Cases are not set up on this host.", status_code=503)
+    try:
+        result = await run_in_threadpool(db.ack, cid, user)
+    except CasesUnavailable:
+        return PlainTextResponse("The case database cannot be reached.", status_code=503)
+    replies = {
+        "acked": (200, "Acknowledged."),
+        "already": (200, "Already acknowledged."),
+        "closed": (409, "This case is already closed."),
+        "not_found": (404, "Not Found"),
+        "invalid_login": (403, MESSAGES["invalid_login"]),
+    }
+    code, text = replies.get(result, (500, "Not done."))
+    return PlainTextResponse(text, status_code=code)
