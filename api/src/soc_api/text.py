@@ -54,3 +54,10 @@ def safe_link(link: str | None) -> str | None:
     if link and len(link) <= 512 and link.startswith(LC_LINK_PREFIX) and _URL_CHARS.fullmatch(link):
         return link
     return None
+
+
+def link_path(link: str | None) -> str | None:
+    """What follows the vendor's console address in a safe link, for templates that write
+    the address itself; None when the link is not safe."""
+    ok = safe_link(link)
+    return None if ok is None else ok[len(LC_LINK_PREFIX) :]

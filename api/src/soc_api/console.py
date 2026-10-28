@@ -28,15 +28,16 @@ from soc_api.cases import (
     parse_case_id,
 )
 from soc_api.config import Settings, get_settings
-from soc_api.text import safe_link, visible
+from soc_api.text import link_path, visible
 
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=HERE / "templates")  # autoescape on for .html
 # Everything an attacker may have written goes through `vis` (control and bidi characters
-# shown as ⟦U+XXXX⟧) and then Jinja's escaping; `link` is the only way to make an href.
+# shown as ⟦U+XXXX⟧) and then Jinja's escaping. An alert's link is never an href by itself:
+# the template writes the vendor's address and `link_path` supplies only what follows it.
 templates.env.filters["utc"] = fmt_time
 templates.env.filters["vis"] = visible
-templates.env.filters["link"] = safe_link
+templates.env.filters["link_path"] = link_path
 
 # The console page runs no script and loads nothing from other origins.
 CONSOLE_CSP = (

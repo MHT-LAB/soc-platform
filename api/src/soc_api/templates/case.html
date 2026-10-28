@@ -61,8 +61,8 @@
         <span>{{ (a.rule or "") | vis(200) }}</span>
         <span class="mono">{{ (a.host or "") | vis(64) }}</span>
         <span>{{ a.severity }}</span>
-        {% set href = a.link | link %}
-        {% if href %}<a href="{{ href }}" rel="noreferrer noopener">detection</a>{% elif a.link %}<span class="dim mono">{{ a.link | vis(200) }}</span>{% endif %}
+        {% set path = a.link | link_path %}
+        {% if path is not none %}<a href="https://app.limacharlie.io/{{ path }}" rel="noreferrer noopener">detection</a>{% elif a.link %}<span class="dim mono">{{ a.link | vis(200) }}</span>{% endif %}
       </div>
       {% if a.summary %}<p class="dim">{{ a.summary | vis(300) }}</p>{% endif %}
       <details>

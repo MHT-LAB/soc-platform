@@ -23,7 +23,7 @@ from soc_api.cases import fmt_time, parse_case_id
 from soc_api.config import Settings
 from soc_api.console import CASES_CSP, CONSOLE_CSP
 from soc_api.main import create_console_app
-from soc_api.text import safe_link, visible
+from soc_api.text import LC_LINK_PREFIX, link_path, safe_link, visible
 
 SECRET = "console-form-secret-0123456789abcdef"  # noqa: S105 - throwaway
 LOGIN = "operator@example.com"
@@ -698,6 +698,17 @@ def test_a_link_that_is_not_the_vendors_console_is_text_not_an_href(fx: Fixture)
     assert not re.search(r'href="(?!/console|https://app\.limacharlie\.io/)', html)
     assert "javascript:alert" in html  # shown, inert
     assert 'href="javascript' not in html.lower()
+
+
+def test_the_template_writes_the_vendors_address_itself() -> None:
+    """The href's scheme and host are fixed text in the template, never alert data."""
+    from pathlib import Path
+
+    template = (Path(__file__).resolve().parents[1] / "src/soc_api/templates/case.html").read_text()
+    assert f'href="{LC_LINK_PREFIX}{{{{ path }}}}"' in template
+    assert not re.search(r'href="\{\{', template)  # no href starts with a variable
+    assert link_path(GOOD_LINK) == GOOD_LINK[len(LC_LINK_PREFIX) :]
+    assert link_path("javascript:alert(1)") is None and link_path(None) is None
 
 
 def test_the_vendors_link_becomes_a_link_without_a_referrer(fx: Fixture) -> None:
