@@ -308,11 +308,19 @@ that output into chat. Save it, clear the terminal and its scrollback, then run 
 migration job gives `soc_console` its login and the console restarts with the new files. Lost
 host: `init-console-db.sh --restore` rebuilds both files from those two values in the environment.
 
+**Set the console's address** in `env/console.env` (not secret):
+
+    SOC_CONSOLE_BASE_URL=https://<the console's tailnet name>
+
+A form post must then come from exactly that origin, whatever Host header the proxy in front
+forwards (without it the console compares with `https://<Host>`, which only works if
+`tailscale serve` passes the original Host through). The pager's click link uses it too.
+
 **What stops another website from pressing Acknowledge or Close for you.** Your identity is a
 header your browser adds to every request, so a page on another site could make your browser
 send a form post. Every POST must pass all three checks, and any one failing writes nothing (403):
 the browser marks it `Sec-Fetch-Site: same-origin`; its `Origin` is exactly this console's
-(`https://<the Host header>`); and the form carries a token that is an HMAC over your login, the
+(`SOC_CONSOLE_BASE_URL`, or `https://<the Host header>` when that is not set); and the form carries a token that is an HMAC over your login, the
 case, the action and the UTC day, made with `SOC_CONSOLE_SECRET` (today's and yesterday's are
 accepted, so a form opened just before midnight still works). A token is for one person, one
 case and one action. The forms are plain urlencoded posts of at most 8 KiB; there is no script on

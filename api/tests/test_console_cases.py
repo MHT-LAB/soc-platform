@@ -253,6 +253,58 @@ def test_the_case_pages_may_post_to_themselves_and_run_nothing() -> None:
     )
 
 
+def test_with_a_configured_address_only_that_origin_counts() -> None:
+    base = {"sec-fetch-site": "same-origin", "host": "127.0.0.1:8081"}
+    configured = "https://console.example.net"
+    assert csrf.same_origin({**base, "origin": configured}, "https", configured)
+    # a proxy that forwards its own Host no longer matters, in either direction
+    assert not csrf.same_origin({**base, "origin": "https://127.0.0.1:8081"}, "https", configured)
+    assert not csrf.same_origin(
+        {**base, "origin": configured, "sec-fetch-site": "cross-site"}, "https", configured
+    )
+    assert not csrf.same_origin({**base, "origin": configured + "/"}, "https", configured)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "http://console.example.net",
+        "https://console.example.net/console",
+        "https://Console.example.net",
+        "https://user@example.com",
+        "https://console.example.net?x=1",
+        "console.example.net",
+        "https://",
+        "javascript:alert(1)",
+    ],
+)
+def test_the_console_address_must_be_a_bare_https_origin(bad: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(console_base_url=bad)
+
+
+def test_the_console_address_drops_a_trailing_slash() -> None:
+    assert Settings(console_base_url="https://c.example.net:8443/").console_base_url == (
+        "https://c.example.net:8443"
+    )
+    assert Settings().console_base_url == ""
+
+
+def test_behind_a_proxy_that_rewrites_host_the_configured_address_is_what_works(
+    fx: Fixture,
+) -> None:
+    """tailscale serve may forward the Host it connects to; then only the setting helps."""
+    case = one_case(fx)
+    c = make_client(fx, console_base_url="https://soc.example.ts.net")
+    # the browser's Origin is the address it opened, not the Host the app sees
+    hostish = post(c, case, "ack")  # Origin https://console.example.net == https://<Host>
+    assert hostish.status_code == 403 and untouched(fx, case)
+    ok = post(c, case, "ack", headers=post_headers(Origin="https://soc.example.ts.net"))
+    assert ok.status_code == 303 and state(fx, case)[0] == "acknowledged"
+
+
 # ---- the queue ----
 
 

@@ -47,10 +47,16 @@ def check_token(
     return ok_today or ok_yesterday
 
 
-def same_origin(headers: Mapping[str, str], scheme: str) -> bool:
-    """Sec-Fetch-Site says same-origin and Origin equals scheme://Host. `scheme` is https
-    in production (the only way in is `tailscale serve`, which terminates TLS)."""
-    host = headers.get("host", "")
-    if not host or headers.get("sec-fetch-site") != "same-origin":
+def same_origin(headers: Mapping[str, str], scheme: str, expected: str | None = None) -> bool:
+    """Sec-Fetch-Site says same-origin and Origin is this console's own origin.
+
+    `expected` is the console's configured address (SOC_CONSOLE_BASE_URL), and when it is
+    set nothing else counts: what Host a proxy forwards is then irrelevant. Without it,
+    the origin is scheme://Host; `scheme` is https in production (the only way in is
+    `tailscale serve`, which terminates TLS)."""
+    if headers.get("sec-fetch-site") != "same-origin":
         return False
-    return headers.get("origin") == f"{scheme}://{host}"
+    if expected:
+        return headers.get("origin") == expected
+    host = headers.get("host", "")
+    return bool(host) and headers.get("origin") == f"{scheme}://{host}"

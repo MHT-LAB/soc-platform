@@ -274,7 +274,7 @@ async def checked_post(
     nothing has been written."""
     scheme = "https" if settings.env == "prod" else request.url.scheme
     refused = HTTPException(status_code=403, detail="That request was not accepted.")
-    if not csrf.same_origin(request.headers, scheme):
+    if not csrf.same_origin(request.headers, scheme, settings.console_base_url or None):
         raise refused
     cid = parse_case_id(case_id)
     if cid is None:
