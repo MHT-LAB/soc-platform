@@ -40,6 +40,7 @@ select = ["E", "F", "I", "B", "S", "UP"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]  # assert is how pytest works
 "tests/test_schema.py" = ["S608"]  # f-string SQL over fixed table names
+"tests/test_worker_db.py" = ["S608"]  # same: parametrized over fixed table names
 "src/soc_api/migrations/**" = ["S608"]  # f-string SQL over fixed table names and one constant
 
 [tool.mypy]

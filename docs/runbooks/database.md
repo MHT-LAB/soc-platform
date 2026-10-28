@@ -11,10 +11,12 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_app` | console, workers | Read and write rows of **one client**: the one in the session setting `app.client_id`. With it unset it sees nothing. No `DELETE`; `case_event` is append-only. |
 | `soc_ingest` | the public ingest handler | **No table privileges.** It can only call `ingest_alert()`, which maps a delivery to a source, attributes it (unknown tenant -> the Unassigned client) and inserts idempotently on `(source, event_id)`. |
 | `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
+| `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call six functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`. Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
+| `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, each behind an RLS policy for this role. No `DELETE`. |
 
-All three service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
+All five service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
 `CREATEROLE` or `CREATEDB`. Roles are cluster-wide, so they can already exist: if one has
-any of those (or `soc_ingest_writer` can log in), the migration stops instead of reusing it. Deploy gives each a login and a password
+any of those (or a `*_writer` role can log in), the migration stops instead of reusing it. Deploy gives each a login and a password
 from the secrets manager; no credential is in this repo.
 
 The owner bypasses RLS (policies are not forced on it), so the app must never connect
@@ -108,10 +110,48 @@ change the password in `db-owner.env` and `ingest.env`, then deploy. Between the
 migration job and the swap the running app cannot open new database connections,
 so expect a few seconds of 503s (the sender retries, if it does; see the retry test).
 
+`logins` also gives `soc_worker` its login (5-connection cap) when
+`SOC_WORKER_DB_PASSWORD` is set in `db-owner.env`; with it unset the step is skipped,
+so a host without the worker deploys as before. A set but too-short value stops the
+deploy (exit 2), like the ingest password.
+
+## Cases and the page outbox (worker functions)
+
+- `assign_cases(batch, policy)`: each alert with no case joins an **open case of the
+  same client, rule and host whose latest alert is less than 60 minutes older than it**,
+  or opens a new case. Alert times are compared with each other, never with `now()`, so
+  a backlog after downtime groups the same way live traffic would. One caller at a time
+  (advisory lock). A page row is queued only when a case **opens**; `policy` maps the
+  detection category (`raw->>'cat'`) to an ntfy priority 0-5 (0 = case, no page; a bad
+  or missing value falls back to the case severity: info 0, low 3, medium 4, high and
+  critical 5). Unassigned alerts become at least `medium` and always page at 4 or more.
+- `claim_pages(batch)`: due `pending` pages, highest priority first. Taking the claim
+  is a two-minute lease (`attempts + 1`, `next_attempt_at` pushed out) in the same
+  statement, with `FOR UPDATE SKIP LOCKED`, so two workers never send one page twice and
+  a worker that dies leaves a page that is due again after the lease. Returns only what
+  a push needs: priority, client slug, rule, host (64 chars), the LimaCharlie detection
+  link (only when it starts with `https://app.limacharlie.io/`), the first 8 characters
+  of the case id and the detection time. Never the raw payload.
+- `finish_page(id, outcome, error)`: `sent`; `retry` (network error, 5xx, 429) backs off
+  10 s, 30 s, 2 m, 5 m, then every 15 m, and becomes `failed` (`gave_up`) once the page is
+  a day old; `fail` (any other 4xx) stops at once. `last_error` is a short lowercase code,
+  never a response body.
+- `heartbeat_counts(since)`: alerts received, cases opened, pages sent and failed since a
+  time, failed pages in the last 24 h, and the age in seconds of the oldest pending page
+  and the oldest alert still without a case (what the STALE push watches).
+- `worker_state_get/set`: a small key/value table so a restart does not repeat a push.
+
 **Expand, then contract.** A rollback swaps the image only; it never runs a
 downgrade. So every migration must keep working with the previous release's code:
 add columns and tables first, remove or rename in a later release once nothing old
 runs. A migration that breaks the previous image breaks the rollback.
+
+A manual rollback (`deploy.sh <older tag>`) runs the older image's migration job against
+a schema a newer release already moved forward. From `0002` on, `soc_api.db upgrade`
+sees that the database's revision is unknown to it, prints `database is at revision
+..., newer than this release; not migrating` and carries on (logins still run), so the
+rollback is not refused. Images built before this change do not have that guard: to go
+back to one of them, swap `image.env` by hand instead of running `deploy.sh`.
 
 If the job fails, the deploy stops with the previous image restored and the
 services untouched. Each Alembic migration is one transaction, so a failed one
