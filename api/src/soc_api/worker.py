@@ -1,0 +1,555 @@
+"""The pager worker: alerts become cases, cases become phone pushes, and the SOC
+reports on itself.
+
+    python -m soc_api.worker            run (the compose `worker` service)
+    python -m soc_api.worker ok-now     send the weekly "SOC OK" push now (a check)
+
+One loop, three jobs, each isolated from the others' failures:
+
+* caser: `assign_cases()` turns new alerts into cases and queues their pages.
+* sender: claims due pages, pushes them to ntfy, records the outcome. At most
+  `page_cap` pushes per window; the rest wait and one notice says so.
+* heartbeat: a weekly "SOC OK" with counts, and a "SOC STALE" push when pages are stuck
+  or the caser is behind.
+
+The worker has no table privileges. Everything goes through the functions in migration
+0002/0003, which never hand back the raw payload. What crosses ntfy's servers (a third
+party) is a title, a host name, a time and a case id, built from sanitised database
+fields and sent as JSON, never as HTTP headers. The topic is the only secret in a push;
+it is never logged and never part of an error code.
+"""
+
+import argparse
+import http.client
+import json
+import logging
+import re
+import signal
+import sys
+import time
+import unicodedata
+import urllib.error
+import urllib.request
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
+
+import psycopg
+from sqlalchemy.engine import make_url
+
+from soc_api.config import Settings, get_settings
+from soc_api.logs import configure_logging
+
+log = logging.getLogger("soc_api.worker")
+
+EASTERN = ZoneInfo("America/New_York")
+# A claim is a two-minute lease (migration 0002). One send, with its timeout, must
+# finish far inside that, or a slow send could be claimed and pushed a second time.
+NTFY_TIMEOUT_SECONDS = 10.0
+LC_LINK_PREFIX = "https://app.limacharlie.io/"
+TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
+CODE_RE = re.compile(r"[a-z0-9_]{1,40}")
+
+# Only plain HTTP(S): no file:// or ftp:// handler, no redirects, no proxy from the
+# environment. The topic is in the request body, so a redirect must never be followed.
+_OPENER = urllib.request.OpenerDirector()
+for _handler in (
+    urllib.request.HTTPHandler(),
+    urllib.request.HTTPSHandler(),
+    urllib.request.HTTPDefaultErrorHandler(),
+    urllib.request.HTTPErrorProcessor(),
+    urllib.request.UnknownHandler(),
+):
+    _OPENER.add_handler(_handler)
+
+
+# ---- text that crosses ntfy ----
+
+
+def clean(text: str | None, limit: int) -> str:
+    """Plain, single-line text: control and format characters dropped (this includes
+    newlines turned into spaces first), runs of white space collapsed, then cut."""
+    out = []
+    for ch in text or "":
+        category = unicodedata.category(ch)
+        if category[0] == "Z" or ch in "\t\n\r\x0b\x0c":
+            out.append(" ")
+        elif category[0] != "C":
+            out.append(ch)
+    return " ".join("".join(out).split())[:limit]
+
+
+def safe_link(link: str | None) -> str | None:
+    """A click target only if it is the vendor's https console, in plain printable ASCII."""
+    if link and len(link) <= 512 and link.startswith(LC_LINK_PREFIX):
+        if re.fullmatch(r"[\x21-\x7e]+", link):
+            return link
+    return None
+
+
+def push_text(page: dict[str, Any]) -> tuple[str, str, int, str | None]:
+    """(title, message, ntfy priority, click) for a claimed page."""
+    rule = re.sub(r"^general\.", "", page.get("rule") or "") or "alert"
+    title = clean(f"{page['client_slug']}: {rule}", 80)
+    detected = page.get("detected_at")
+    when = f"{detected.astimezone(EASTERN):%H:%M} ET" if isinstance(detected, datetime) else "?"
+    host = clean(page.get("host"), 64) or "unknown"
+    message = clean(f"host {host} · {when} · case {page.get('case_short') or '?'}", 200)
+    priority = page.get("priority")
+    prio = (
+        priority
+        if isinstance(priority, int) and not isinstance(priority, bool) and 1 <= priority <= 5
+        else 3
+    )
+    return title, message, prio, safe_link(page.get("link"))
+
+
+def parse_policy(raw: str) -> dict[str, int]:
+    """{"category": 0-5}; anything else is ignored (the severity default applies)."""
+    if not raw.strip():
+        return {}
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        log.error("policy outcome=unreadable")
+        return {}
+    if not isinstance(doc, dict):
+        log.error("policy outcome=not_an_object")
+        return {}
+    policy = {
+        k: v
+        for k, v in doc.items()
+        if isinstance(k, str)
+        and 0 < len(k) <= 128
+        and isinstance(v, int)
+        and not isinstance(v, bool)
+        and 0 <= v <= 5
+    }
+    if len(policy) != len(doc):
+        log.warning("policy outcome=entries_ignored count=%d", len(doc) - len(policy))
+    return policy
+
+
+# ---- ntfy ----
+
+
+@dataclass(frozen=True)
+class Delivery:
+    outcome: str  # sent | retry | fail
+    code: str  # short lowercase code, safe to store and log
+
+
+def classify(status: int) -> Delivery:
+    if 200 <= status < 300:
+        return Delivery("sent", f"http_{status}")
+    if status == 429 or status >= 500:
+        return Delivery("retry", f"http_{status}")
+    if 300 <= status < 400:
+        return Delivery("fail", "redirect")
+    return Delivery("fail", f"http_{status}")
+
+
+class Ntfy:
+    """Publish by JSON to the server's root URL. https only (http for local tests)."""
+
+    def __init__(
+        self,
+        server: str,
+        topic: str,
+        *,
+        timeout: float = NTFY_TIMEOUT_SECONDS,
+        allow_http: bool = False,
+    ) -> None:
+        if not TOPIC_RE.fullmatch(topic):
+            raise ValueError("the ntfy topic must be 16-64 letters, digits, - or _")
+        parts = urlsplit(server)
+        scheme_ok = parts.scheme == "https" or (parts.scheme == "http" and allow_http)
+        if not scheme_ok or not parts.hostname or parts.username or parts.password:
+            raise ValueError("SOC_NTFY_SERVER must be https://host (no credentials)")
+        if parts.path not in ("", "/") or parts.query or parts.fragment:
+            raise ValueError("SOC_NTFY_SERVER must be a bare host, with no path")
+        self._url = f"{parts.scheme}://{parts.netloc}/"
+        self._topic = topic
+        self._timeout = timeout
+
+    def publish(
+        self, *, title: str, message: str, priority: int, click: str | None = None
+    ) -> Delivery:
+        doc: dict[str, Any] = {
+            "topic": self._topic,
+            "title": title,
+            "message": message,
+            "priority": priority,
+        }
+        if click:
+            doc["click"] = click
+        request = urllib.request.Request(  # noqa: S310 - the opener only speaks HTTP(S)
+            self._url,
+            data=json.dumps(doc).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with _OPENER.open(request, timeout=self._timeout) as response:
+                return classify(response.status)
+        except urllib.error.HTTPError as exc:
+            return classify(exc.code)
+        except TimeoutError:
+            return Delivery("retry", "timeout")
+        except (OSError, http.client.HTTPException):
+            return Delivery("retry", "unreachable")
+
+
+# ---- the database, through the worker functions only ----
+
+
+class Db:
+    def __init__(self, url: str) -> None:
+        sa = make_url(url)
+        self._params: dict[str, Any] = {
+            "host": sa.host,
+            "port": sa.port,
+            "dbname": sa.database,
+            "user": sa.username,
+            "password": sa.password,
+            "connect_timeout": 10,
+            "autocommit": True,
+        }
+        self._conn: psycopg.Connection | None = None
+
+    def _run(self, query: str, params: tuple[Any, ...] = ()) -> tuple[list[str], list[Any]]:
+        try:
+            if self._conn is None or self._conn.closed:
+                self._conn = psycopg.connect(**self._params)
+            cur = self._conn.execute(query, params)
+            names = [d.name for d in cur.description or []]
+            return names, cur.fetchall() if cur.description else []
+        except psycopg.Error:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except psycopg.Error:
+                pass
+            self._conn = None
+
+    def assign_cases(self, batch: int, policy: dict[str, int]) -> tuple[int, int, int]:
+        _, rows = self._run(
+            "SELECT * FROM assign_cases(%s, %s::jsonb)", (batch, json.dumps(policy))
+        )
+        return int(rows[0][0]), int(rows[0][1]), int(rows[0][2])
+
+    def claim_pages(self, batch: int) -> list[dict[str, Any]]:
+        names, rows = self._run("SELECT * FROM claim_pages(%s)", (batch,))
+        return [dict(zip(names, row, strict=True)) for row in rows]
+
+    def finish_page(self, page_id: Any, outcome: str, code: str) -> str:
+        _, rows = self._run("SELECT finish_page(%s, %s, %s)", (page_id, outcome, code))
+        return str(rows[0][0])
+
+    def due_page_count(self) -> int:
+        _, rows = self._run("SELECT due_page_count()")
+        return int(rows[0][0])
+
+    def heartbeat_counts(self, since: datetime) -> dict[str, Any]:
+        names, rows = self._run("SELECT * FROM heartbeat_counts(%s)", (since,))
+        return dict(zip(names, rows[0], strict=True))
+
+    def state_get(self, key: str) -> str | None:
+        _, rows = self._run("SELECT worker_state_get(%s)", (key,))
+        return None if rows[0][0] is None else str(rows[0][0])
+
+    def state_set(self, key: str, value: str) -> None:
+        self._run("SELECT worker_state_set(%s, %s)", (key, value))
+
+
+# ---- schedule ----
+
+
+def last_weekly_slot(now: datetime) -> datetime:
+    """The most recent Sunday 18:00 Eastern at or before `now`, in UTC."""
+    local = now.astimezone(EASTERN)
+    slot = (local - timedelta(days=(local.weekday() - 6) % 7)).replace(
+        hour=18, minute=0, second=0, microsecond=0
+    )
+    if slot > local:
+        slot -= timedelta(days=7)
+    return slot.astimezone(UTC)
+
+
+@dataclass(frozen=True)
+class Limits:
+    case_batch: int = 100
+    page_batch: int = 10
+    page_cap: int = 10
+    cap_window_s: float = 600.0
+    stale_after_s: int = 600
+    stale_repeat_s: float = 6 * 3600.0
+    stale_check_s: float = 300.0
+    retry_notice_s: float = 60.0  # between tries of a notice that could not be sent
+
+
+STALE_TEXT = {
+    "pages_pending": "A page has been waiting to go out for over 10 minutes.",
+    "page_failed": "A page failed to send in the last 24 hours.",
+    "caser_behind": "New alerts are not becoming cases (over 10 minutes behind).",
+}
+
+
+class Worker:
+    def __init__(
+        self,
+        db: Db,
+        ntfy: Ntfy,
+        policy: dict[str, int],
+        *,
+        limits: Limits | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        health_file: str | None = None,
+    ) -> None:
+        self.db = db
+        self.ntfy = ntfy
+        self.policy = policy
+        self.limits = limits or Limits()
+        self.clock = clock
+        self.health_file = health_file
+        self._sends: deque[datetime] = deque()
+        self._held_at: datetime | None = None
+        self._next_stale_check: datetime | None = None
+        self._tried: dict[str, datetime] = {}
+
+    # one pass; True when no phase hit a database error
+    def tick(self) -> bool:
+        ok = True
+        for name, phase in (
+            ("caser", self._caser),
+            ("sender", self._sender),
+            ("heartbeat", self._heartbeat),
+        ):
+            try:
+                phase()
+            except psycopg.Error as exc:
+                log.error("phase=%s outcome=db_error kind=%s", name, type(exc).__name__)
+                ok = False
+        if ok and self.health_file:
+            try:
+                Path(self.health_file).touch()
+            except OSError:
+                log.error("health outcome=cannot_write")
+        return ok
+
+    # ---- caser ----
+
+    def _caser(self) -> None:
+        while True:
+            alerts, cases, pages = self.db.assign_cases(self.limits.case_batch, self.policy)
+            if alerts:
+                log.info("caser alerts=%d cases=%d pages=%d", alerts, cases, pages)
+            if alerts < self.limits.case_batch:
+                return
+
+    # ---- sender ----
+
+    def _room(self, now: datetime) -> int:
+        while self._sends and (now - self._sends[0]).total_seconds() >= self.limits.cap_window_s:
+            self._sends.popleft()
+        return self.limits.page_cap - len(self._sends)
+
+    def _sender(self) -> None:
+        room = self._room(self.clock())
+        if room > 0:
+            for page in self.db.claim_pages(min(self.limits.page_batch, room)):
+                self._send_page(page)
+        self._held_notice()
+
+    def _send_page(self, page: dict[str, Any]) -> None:
+        try:
+            title, message, priority, click = push_text(page)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            # A page that cannot be described must not crash-loop the worker.
+            self.db.finish_page(page["id"], "fail", "bad_page")
+            log.error("page outcome=fail code=bad_page id=%s", str(page["id"])[:8])
+            return
+        self._sends.append(self.clock())
+        delivery = self.ntfy.publish(title=title, message=message, priority=priority, click=click)
+        code = delivery.code if CODE_RE.fullmatch(delivery.code) else "error"
+        self.db.finish_page(page["id"], delivery.outcome, code)
+        log.info(
+            "page outcome=%s code=%s priority=%d attempts=%d id=%s",
+            delivery.outcome,
+            code,
+            priority,
+            page["attempts"],
+            str(page["id"])[:8],
+        )
+
+    def _held_notice(self) -> None:
+        now = self.clock()
+        if self._room(now) > 0:
+            return
+        waiting = self.db.due_page_count()
+        if waiting < 1:
+            return
+        if self._held_at and (now - self._held_at).total_seconds() < self.limits.cap_window_s:
+            return
+        if not self._may_try("held", now):
+            return
+        delivery = self.ntfy.publish(
+            title="SOC: pages held",
+            message=(
+                f"{waiting} more pages are waiting (limit {self.limits.page_cap} per "
+                f"{int(self.limits.cap_window_s // 60)} min). Check the detection email."
+            ),
+            priority=3,
+        )
+        log.info("notice kind=held outcome=%s code=%s", delivery.outcome, delivery.code)
+        if delivery.outcome == "sent":
+            self._held_at = now
+
+    def _may_try(self, kind: str, now: datetime) -> bool:
+        last = self._tried.get(kind)
+        if last and (now - last).total_seconds() < self.limits.retry_notice_s:
+            return False
+        self._tried[kind] = now
+        return True
+
+    # ---- heartbeat ----
+
+    def _heartbeat(self) -> None:
+        now = self.clock()
+        self._weekly_ok(now)
+        if self._next_stale_check is None or now >= self._next_stale_check:
+            self._next_stale_check = now + timedelta(seconds=self.limits.stale_check_s)
+            self._stale(now)
+
+    def ok_message(self, since: datetime) -> str:
+        c = self.db.heartbeat_counts(since)
+        return (
+            f"7d: {c['alerts_received']} alerts, {c['cases_opened']} cases, "
+            f"{c['pages_sent']} pages sent, {c['pages_failed']} failed"
+        )
+
+    def send_ok(self, since: datetime) -> Delivery:
+        return self.ntfy.publish(title="SOC OK", message=self.ok_message(since), priority=2)
+
+    def _weekly_ok(self, now: datetime) -> None:
+        due = last_weekly_slot(now)
+        recorded = self.db.state_get("weekly_ok")
+        try:
+            last = datetime.fromisoformat(recorded) if recorded else None
+        except ValueError:
+            last = None
+        if last is None:
+            # First run: start counting from this slot instead of announcing at once.
+            self.db.state_set("weekly_ok", due.isoformat())
+            log.info("heartbeat kind=ok outcome=armed")
+            return
+        if last >= due or not self._may_try("ok", now):
+            return
+        delivery = self.send_ok(due - timedelta(days=7))
+        log.info("heartbeat kind=ok outcome=%s code=%s", delivery.outcome, delivery.code)
+        if delivery.outcome == "sent":
+            self.db.state_set("weekly_ok", due.isoformat())
+
+    def _stale(self, now: datetime) -> None:
+        c = self.db.heartbeat_counts(now)
+        after = self.limits.stale_after_s
+        firing = {
+            "pages_pending": (c["oldest_pending_page_s"] or 0) > after,
+            "page_failed": (c["failed_last_24h"] or 0) > 0,
+            "caser_behind": (c["oldest_unassigned_alert_s"] or 0) > after,
+        }
+        for reason, is_firing in firing.items():
+            if not is_firing:
+                continue
+            recorded = self.db.state_get(f"stale_{reason}")
+            try:
+                last = datetime.fromisoformat(recorded) if recorded else None
+            except ValueError:
+                last = None
+            if last and (now - last).total_seconds() < self.limits.stale_repeat_s:
+                continue
+            if not self._may_try(f"stale_{reason}", now):
+                continue
+            delivery = self.ntfy.publish(title="SOC STALE", message=STALE_TEXT[reason], priority=5)
+            log.warning(
+                "heartbeat kind=stale reason=%s outcome=%s code=%s",
+                reason,
+                delivery.outcome,
+                delivery.code,
+            )
+            if delivery.outcome == "sent":
+                self.db.state_set(f"stale_{reason}", now.isoformat())
+
+    # ---- the loop ----
+
+    def run(
+        self,
+        stop: Callable[[], bool],
+        tick_seconds: float,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        while not stop():
+            self.tick()
+            sleep(tick_seconds)
+
+
+def build(settings: Settings) -> tuple[Db, Ntfy, dict[str, int]]:
+    url = settings.worker_database_url.get_secret_value()
+    topic = settings.ntfy_topic.get_secret_value()
+    if not url or not topic:
+        raise ValueError("the worker is not configured (worker.env: topic and database URL)")
+    ntfy = Ntfy(settings.ntfy_server, topic, allow_http=settings.env == "dev")
+    return Db(url), ntfy, parse_policy(settings.page_policy)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="python -m soc_api.worker")
+    parser.add_argument("command", nargs="?", default="run", choices=["run", "ok-now"])
+    args = parser.parse_args(argv)
+    configure_logging()
+    settings = get_settings()
+    try:
+        db, ntfy, policy = build(settings)
+    except ValueError as exc:
+        print(exc)  # never echoes a value: the messages above name the setting only
+        return 2
+    limits = Limits(
+        page_cap=settings.page_cap, cap_window_s=float(settings.page_cap_window_seconds)
+    )
+    worker = Worker(db, ntfy, policy, limits=limits, health_file=settings.health_file)
+    if args.command == "ok-now":
+        try:
+            delivery = worker.send_ok(datetime.now(UTC) - timedelta(days=7))
+        except psycopg.Error as exc:
+            print(f"database error: {type(exc).__name__}")
+            return 1
+        finally:
+            db.close()
+        print(f"ok push: {delivery.outcome} ({delivery.code})")
+        return 0 if delivery.outcome == "sent" else 1
+
+    stopping = False
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    log.info("worker outcome=started policy_entries=%d", len(policy))
+    worker.run(lambda: stopping, settings.worker_tick_seconds)
+    db.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

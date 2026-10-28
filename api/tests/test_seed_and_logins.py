@@ -348,4 +348,4 @@ def test_a_known_revision_still_upgrades_normally(db: TestDb) -> None:
     assert soc_db.newer_revision(db.sqlalchemy_url()) is None
     soc_db.upgrade(db.sqlalchemy_url())
     with db.connect() as c:
-        assert c.execute("SELECT version_num FROM alembic_version").fetchone() == ("0002",)
+        assert c.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003",)

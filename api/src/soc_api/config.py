@@ -53,6 +53,20 @@ class Settings(BaseSettings):
     ingest_rate_per_ip: int = 60
     ingest_rate_per_source: int = 600
 
+    # The pager worker (its own service; worker.env holds the first two).
+    # A role that can only call the worker functions (soc_worker).
+    worker_database_url: SecretStr = SecretStr("")
+    # The ntfy topic is the secret: anyone who knows it can read and post to it.
+    ntfy_topic: SecretStr = SecretStr("")
+    ntfy_server: str = "https://ntfy.sh"
+    # JSON object: detection category -> ntfy priority 0-5 (0 = case, no push).
+    page_policy: str = ""
+    worker_tick_seconds: float = 5.0
+    # At most this many pushes per window; the rest wait (and one notice says so).
+    page_cap: int = 10
+    page_cap_window_seconds: int = 600
+    health_file: str = "/tmp/worker-health"  # noqa: S108 - the container's own tmpfs
+
     @property
     def console_allowlist(self) -> set[str]:
         return {u.strip().lower() for u in self.console_users.split(",") if u.strip()}
