@@ -17,9 +17,9 @@ def test_the_database_network_is_internal() -> None:
     assert COMPOSE["networks"]["db"] == {"internal": True}
 
 
-def test_only_api_db_and_migrate_are_on_the_database_network() -> None:
+def test_only_api_db_migrate_and_worker_are_on_the_database_network() -> None:
     on_db = {n for n, s in SERVICES.items() if "db" in s.get("networks", [])}
-    assert on_db == {"api", "db", "migrate"}
+    assert on_db == {"api", "db", "migrate", "worker"}
     # The tunnel (overlay) keeps the default network only.
     assert "networks" not in OVERLAY["services"]["tunnel"]
     # db and migrate are not on the default network the tunnel shares.
@@ -81,3 +81,67 @@ def test_the_owner_url_never_reaches_a_long_running_service() -> None:
     for name in ("api", "console", "db"):
         env = SERVICES[name].get("environment", {})
         assert "SOC_MIGRATE_URL" not in env
+
+
+# ---- the pager worker ----
+
+WORKER = SERVICES["worker"]
+
+
+def test_the_worker_is_on_the_database_and_egress_networks_and_never_on_default() -> None:
+    assert WORKER["networks"] == ["db", "egress"]  # `default` is the tunnel's network
+    assert COMPOSE["networks"]["egress"] == {}  # outbound for pushes: not internal
+    on_egress = {n for n, s in SERVICES.items() if "egress" in s.get("networks", [])}
+    assert on_egress == {"worker"}
+    assert "networks" not in OVERLAY["services"]["tunnel"]
+
+
+def test_the_worker_listens_on_nothing_and_publishes_nothing() -> None:
+    assert "ports" not in WORKER and "expose" not in WORKER
+    assert WORKER.get("network_mode") is None
+
+
+def test_the_worker_is_hardened_like_the_other_services() -> None:
+    assert WORKER["read_only"] is True
+    assert WORKER["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in WORKER["security_opt"]
+    assert "mem_limit" in WORKER and "pids_limit" in WORKER
+    assert "user" not in WORKER or WORKER["user"] != "0"
+    assert WORKER["tmpfs"] == ["/tmp"]  # noqa: S108 - the health file lives here
+
+
+def test_the_worker_is_optional_and_does_not_hold_up_a_deploy() -> None:
+    assert WORKER["profiles"] == ["worker"]  # `up -d` never starts it without the profile
+    assert "depends_on" not in WORKER  # a database outage must not fail a deploy
+    assert WORKER["image"] == SERVICES["api"]["image"]
+    assert WORKER["command"] == ["python", "-m", "soc_api.worker"]
+
+
+def test_the_worker_has_a_healthcheck_on_its_own_heartbeat_file() -> None:
+    test = " ".join(WORKER["healthcheck"]["test"])
+    assert "/tmp/worker-health" in test  # noqa: S108
+    from soc_api.config import Settings
+
+    assert Settings().health_file == "/tmp/worker-health"  # noqa: S108
+
+
+def env_files(name: str) -> dict[str, bool]:
+    return {Path(e["path"]).name: e["required"] for e in SERVICES[name].get("env_file", [])}
+
+
+def test_the_worker_secrets_go_to_the_worker_and_the_login_password_to_migrate_only() -> None:
+    assert env_files("worker") == {"worker.env": True, "policy.env": False}
+    assert env_files("migrate") == {"db-owner.env": True, "worker-owner.env": False}
+    for name in ("api", "console", "db", "tunnel"):
+        names = env_files(name) if name in SERVICES else {}
+        assert not {"worker.env", "worker-owner.env", "policy.env"} & set(names), name
+    assert "worker.env" not in " ".join(
+        e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
+    )
+
+
+def test_the_worker_never_gets_the_owner_the_ingest_or_the_edr_credentials() -> None:
+    names = set(env_files("worker"))
+    assert not names & {"db.env", "db-owner.env", "ingest.env", "console.env", "lc.env"}
+    env = WORKER.get("environment", {})
+    assert not {k for k in env if k.startswith(("SOC_MIGRATE", "SOC_INGEST", "SOC_LC"))}

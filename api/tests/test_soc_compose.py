@@ -105,3 +105,19 @@ def test_it_refuses_before_the_first_deploy_or_without_a_command(
     r, argv = run(tmp_path, *args)
     assert r.returncode != 0
     assert argv == []
+
+
+def test_a_worker_file_turns_the_worker_profile_on_here_too(tmp_path: Path) -> None:
+    state(tmp_path)
+    (tmp_path / "env" / "worker.env").write_text("SOC_NTFY_TOPIC=x\n")
+    r, argv = run(tmp_path, "ps")
+    assert r.returncode == 0, r.stderr
+    assert argv[0] == "profiles=db,worker"
+
+
+def test_the_worker_profile_needs_the_database_profile(tmp_path: Path) -> None:
+    state(tmp_path, db=False)
+    (tmp_path / "env" / "worker.env").write_text("SOC_NTFY_TOPIC=x\n")
+    r, argv = run(tmp_path, "ps")
+    assert r.returncode == 0, r.stderr
+    assert argv[0] == "profiles=unset"

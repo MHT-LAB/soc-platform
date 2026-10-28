@@ -24,4 +24,9 @@ if [[ -s "$STATE/env/db.env" && -s "$STATE/env/db-owner.env" ]]; then
   export COMPOSE_PROFILES=db
 fi
 
+# ...and so does the worker profile: env/worker.env (with the database) turns it on.
+if [[ -n "${COMPOSE_PROFILES:-}" && -s "$STATE/env/worker.env" ]]; then
+  export COMPOSE_PROFILES=db,worker
+fi
+
 exec docker compose -p soc -f "$HERE/compose.yml" -f "$HERE/$OVERLAY" --env-file "$IMAGE_ENV" "$@"

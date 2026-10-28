@@ -517,14 +517,20 @@ def test_failed_attempts_count_toward_the_cap_too(fx: Fixture, ntfy_server: Fake
     for i in range(6):
         fx.alert(host=f"host-{i}")
     ntfy_server.default = 503
-    worker = make_worker(fx, ntfy_server, limits=w.Limits(page_cap=3))
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock, limits=w.Limits(page_cap=3))
+
+    def page_sends() -> int:
+        return len([t for t in ntfy_server.titles() if t != "SOC: pages held"])
+
     worker.tick()
-    assert (
-        len(
-            [r for r in ntfy_server.requests if json.loads(r["body"])["title"] != "SOC: pages held"]
-        )
-        == 3
-    )
+    assert page_sends() == 3
+    clock.advance(seconds=30)
+    worker.tick()
+    assert page_sends() == 3  # three more are due, but three attempts already used the cap
+    clock.advance(seconds=600)
+    worker.tick()
+    assert page_sends() > 3
 
 
 def test_the_weekly_ok_is_armed_first_then_sent_once_per_slot(

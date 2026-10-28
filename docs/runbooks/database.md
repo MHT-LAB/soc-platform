@@ -71,7 +71,7 @@ ones the data directory was created with.
 
 PostgreSQL 16 runs as the `db` service in `deploy/compose.yml` (profile `db`, turned
 on by `deploy.sh` when the secret files exist). It lives on an **internal** compose
-network that only `api`, `db` and the one-off `migrate` job join. The tunnel is not
+network that only `api`, `db`, the one-off `migrate` job and the optional `worker` join. The tunnel is not
 on it, nothing is published on the host, and the console does not use the database
 yet. The data directory is `/srv/soc/pgdata` (uid 999, mode 700).
 
@@ -80,6 +80,15 @@ yet. The data directory is `/srv/soc/pgdata` (uid 999, mode 700).
 | `env/db.env` | `POSTGRES_PASSWORD` (superuser, used once at first start) and `SOC_DB_OWNER_PASSWORD` | `db` |
 | `env/db-owner.env` | `SOC_MIGRATE_URL` (the `soc_owner` URL, host `db`) and `SOC_INGEST_DB_PASSWORD` | `migrate` |
 | `env/ingest.env` | the webhook secrets and the `soc_ingest` URL (same password) | `api` |
+
+The pager worker adds two more (created by `deploy/init-worker.sh`, see below) and one
+optional, non-secret file:
+
+| File (mode 600) | Holds | Read by |
+|---|---|---|
+| `env/worker.env` | `SOC_NTFY_TOPIC` and the `soc_worker` URL | `worker` |
+| `env/worker-owner.env` | `SOC_WORKER_DB_PASSWORD` (the migration job gives `soc_worker` its login) | `migrate` |
+| `env/policy.env` (optional) | `SOC_PAGE_POLICY={"<category>": <0-5>, ...}` (0 = case, no push); also `SOC_PAGE_CAP` and `SOC_PAGE_CAP_WINDOW_SECONDS` | `worker` |
 
 First start (an empty `pgdata`) runs `deploy/db/initdb/`: it creates `soc_owner` (can
 log in, `CREATEROLE`, not a superuser) and the database `soc`, then rewrites
@@ -193,3 +202,51 @@ Real client rows come from the private deploy repo.
 repeat adds nothing, a bad signature stores nothing, the tunnel's network cannot
 resolve or reach `db`, the superuser is refused over the network, `soc_ingest` can
 read nothing, and a stopped database gives a 503 while `/healthz` stays up.
+
+## The pager worker on the host
+
+`deploy/compose.yml` has a `worker` service (profile `worker`): alerts become cases, cases
+become phone pushes (ntfy), plus a weekly "SOC OK" push (Sunday 18:00 America/New_York) and
+a "SOC STALE" push when a page has waited over ten minutes, a page failed in the last day
+or the caser is behind (each at most once per six hours). It is on the internal `db`
+network and on `egress` (outbound), never on `default` (the tunnel's network), publishes
+nothing and has no `depends_on`: a database outage does not fail a deploy, the loop retries.
+`deploy.sh` and `soc-compose.sh` turn the profile on exactly when `env/worker.env` exists
+and the host has a database; a worker file without a database, or an empty one, is refused
+before anything changes.
+
+**Set it up (root on the host, once, after `init-secrets.sh`):**
+
+    deploy/init-worker.sh
+
+It writes `env/worker.env` and `env/worker-owner.env` (mode 600), never overwrites, and
+prints once: the topic to subscribe the phone to (in the ntfy app, default server) and a
+`NAME=value` block for the secrets manager's folder `/soc` (`SOC_NTFY_TOPIC`,
+`SOC_DB_WORKER_PASSWORD`). Do not paste that output into chat. After saving it, clear the
+terminal and its scrollback, then run `deploy.sh`: the migration job gives `soc_worker` its
+login and the worker starts. Lost host: `init-worker.sh --restore` rebuilds both files from
+`SOC_NTFY_TOPIC` and `SOC_DB_WORKER_PASSWORD` in the environment.
+
+**Checks:**
+
+    deploy/soc-compose.sh ps                              # worker healthy
+    deploy/soc-compose.sh logs --since 10m worker         # page outcome=..., caser alerts=...
+    deploy/soc-compose.sh exec -T worker python -m soc_api.worker ok-now   # send the OK push now
+
+**Operating it.** A push that failed for good is `status = 'failed'` in `notification`
+(`last_error` is a short code such as `http_400`) and raises the STALE push. The send
+timeout is ten seconds, far under the two-minute claim lease. If the push server is down
+the worker keeps retrying on the schedule above and gives up after a day. To change who
+is paged how loudly, edit `env/policy.env` and restart the worker. To rotate the topic:
+make a new one by hand (any 16-64 characters of letters, digits, `-`, `_`), put it in
+`worker.env` and the secrets manager, restart the worker and subscribe the phone to it.
+
+**Rollback.** A rollback swaps the image only. An image from before the worker existed has
+no `soc_api.worker`: move `env/worker.env` aside first, or the worker will crash-loop
+(harmless, but noisy).
+
+**Tests.** `scripts/test-db-stack.sh` runs a real alert through the worker to a fake push
+server on the worker's own network and checks: one push per case, nothing for a repeat in
+the same case, a new rule is a new push, the topic is only in the push body (never in the
+worker's log), the worker is on the `db` and `egress` networks only, and `soc_worker` can
+log in but cannot read the alert payload.

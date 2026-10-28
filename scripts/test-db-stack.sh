@@ -10,6 +10,12 @@
 # superuser is refused over the network while the service roles work; soc_ingest
 # can read nothing; with the database stopped a delivery gets a 503 and stores
 # nothing while /healthz stays up.
+# Then the pager worker (note 23, P2): init-worker.sh creates its files, a fake push
+# server on the worker's own network receives what it sends, and the checks are: one
+# push per case (a repeat in the same case adds none, a new rule adds one), the topic
+# is only in the push body and never in the worker's log, the worker cannot reach the
+# public app and the app cannot reach the push server, and soc_worker can read nothing.
+# (The worker runs with SOC_ENV=dev here only so it may talk plain http to the fake.)
 # Needs Docker only: the data directory is handed to uid 999 by a throwaway
 # container, so no sudo is involved.
 # Every secret here is a throwaway value for containers that live for this run.
@@ -26,7 +32,8 @@ compose() { docker compose -p "$P" -f "$HERE/../deploy/compose.yml" "$@"; }
 # Run a command as root in a throwaway container with the work directory mounted.
 as_root() { docker run --rm --user 0 -v "$WORK:/w" --entrypoint "$1" "$IMAGE" "${@:2}"; }
 cleanup() {
-  compose down -v --remove-orphans > /dev/null 2>&1 || true
+  docker rm -f "$P-fakentfy" > /dev/null 2>&1 || true
+  COMPOSE_PROFILES=db,worker compose down -v --remove-orphans > /dev/null 2>&1 || true
   as_root rm -rf /w/pgdata > /dev/null 2>&1 || true
   rm -rf "$WORK"
 }
@@ -77,14 +84,15 @@ wait_api() {
 rows() { compose exec -T db psql -U postgres -d soc -Atc "SELECT count(*) FROM alert WHERE event_id = '$1'"; }
 
 # Sign and POST one delivery from inside the api container (the secret never
-# leaves it). $1 detect id, $2 gen_time in ms, $3 "good" or "bad" signature.
+# leaves it). $1 detect id, $2 gen_time in ms, $3 "good" or "bad" signature,
+# $4 optional rule name (default smoke-test).
 deliver() {
-  compose exec -T api python - "$1" "$2" "$3" << 'PY'
+  compose exec -T api python - "$1" "$2" "$3" "${4:-smoke-test}" << 'PY'
 import hashlib, hmac, json, os, sys, urllib.error, urllib.request
-detect_id, gen_time, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+detect_id, gen_time, mode, rule = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 slug, secrets = next(iter(json.loads(os.environ["SOC_INGEST_SECRETS"]).items()))
 body = json.dumps({"author": "ci@example.com", "cat": "smoke", "detect_id": detect_id,
-                   "gen_time": gen_time, "priority": 3, "source_rule": "smoke-test"},
+                   "gen_time": gen_time, "priority": 3, "source_rule": rule},
                   separators=(",", ":"), sort_keys=True).encode()
 sig = hmac.new(secrets[0].encode(), body, hashlib.sha256).hexdigest()
 if mode == "bad":
@@ -101,7 +109,7 @@ PY
 # A throwaway container on a given compose network, running a Python snippet.
 probe() {
   local net="$1"; shift
-  docker run --rm --network "${P}_$net" -e SUPER_PW="$SUPER_PW" -e OWNER_PW="$OWNER_PW" -e INGEST_PW="$INGEST_PW" \
+  docker run --rm --network "${P}_$net" -e SUPER_PW="$SUPER_PW" -e OWNER_PW="$OWNER_PW" -e INGEST_PW="$INGEST_PW" -e WORKER_PW="${WORKER_PW:-}" \
     --entrypoint python "$IMAGE" -c "$1"
 }
 
@@ -177,6 +185,98 @@ wait_db || { fail "db did not come back"; exit 1; }
 [[ "$(rows "$ID2")" == 0 ]] && pass "the refused delivery stored nothing" || fail "a 503 delivery was stored"
 [[ "$(deliver "$ID2" "$NOW" good)" == 200 ]] && pass "after recovery the same delivery is accepted" || fail "app did not recover after the database came back"
 [[ "$(rows "$ID2")" == 1 ]] && pass "and stored once" || fail "recovered delivery not stored once"
+
+# --- the pager worker ---------------------------------------------------------
+FK="$P-fakentfy"
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-worker.sh" > "$WORK/init-worker.out" 2>&1 \
+  && pass "init-worker.sh created the worker's secret files" \
+  || { cat "$WORK/init-worker.out"; fail "init-worker.sh failed"; exit 1; }
+rm -f "$WORK/init-worker.out"
+WORKER_PW="$(envval worker-owner.env SOC_WORKER_DB_PASSWORD)"
+TOPIC="$(envval worker.env SOC_NTFY_TOPIC)"
+compose run --rm migrate && pass "migration job gave soc_worker its login" || { fail "migrate (worker login) failed"; exit 1; }
+
+# The fake push server lives on the worker's own network, under the name the worker is told.
+echo 'SOC_NTFY_SERVER=http://fakentfy:8089' > "$WORK/env/policy.env"
+chmod 600 "$WORK/env/policy.env"
+export COMPOSE_PROFILES=db,worker
+SOC_ENV=dev compose create worker > /dev/null
+docker run -d --name "$FK" --network "${P}_egress" --network-alias fakentfy --entrypoint python "$IMAGE" -c "
+import http.server, json
+LOG = []
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        LOG.append(self.rfile.read(int(self.headers.get('content-length') or 0)).decode())
+        self.send_response(200); self.send_header('Content-Length', '0'); self.end_headers()
+    def do_GET(self):
+        b = json.dumps(LOG).encode()
+        self.send_response(200); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(('0.0.0.0', 8089), H).serve_forever()
+" > /dev/null
+fk_py() { docker exec "$FK" python -c "import json, urllib.request; L = json.load(urllib.request.urlopen('http://127.0.0.1:8089/')); $1"; }
+npush() { fk_py 'print(len(L))'; }
+wait_pushes() { # N: wait until the fake server holds at least N pushes
+  for _ in $(seq 1 60); do [[ "$(npush 2> /dev/null || echo 0)" -ge "$1" ]] && return 0; sleep 1; done
+  return 1
+}
+for _ in $(seq 1 30); do fk_py 'print(0)' > /dev/null 2>&1 && break; sleep 1; done
+
+SOC_ENV=dev compose up -d worker > /dev/null
+# The earlier deliveries are two cases (rule smoke-test, rule soc-selftest), both in
+# Unassigned: so exactly two pushes.
+wait_pushes 2 && pass "worker: the existing alerts were pushed" || { compose logs worker; fail "worker: no pushes arrived"; exit 1; }
+sleep 12
+[[ "$(npush)" == 2 ]] && pass "worker: exactly one push per case (two cases, two pushes)" || fail "worker: wrong number of pushes ($(npush))"
+[[ "$(fk_py 'print(*sorted(json.loads(x)["title"] for x in L), sep="|")')" == "unassigned: smoke-test|unassigned: soc-selftest" ]] \
+  && pass "worker: titles name the client and the rule" || fail "worker: unexpected titles"
+[[ "$(fk_py "print(all(json.loads(x)['topic'] == '$TOPIC' and sorted(json.loads(x)) == ['message', 'priority', 'title', 'topic'] and json.loads(x)['priority'] >= 4 for x in L))")" == True ]] \
+  && pass "worker: JSON body with the topic, unassigned pages at priority 4 or more" || fail "worker: push body is not as expected"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT count(*) FILTER (WHERE status = 'sent'), count(*) FROM notification")" == "2|2" ]] \
+  && pass "worker: both pages are recorded as sent" || fail "worker: pages are not all recorded as sent"
+
+NOW2="$(( $(date +%s) * 1000 ))"
+[[ "$(deliver "smoke-same-$(rand 6)" "$NOW2" good)" == 200 ]] || fail "worker: delivery for the same case was not a 200"
+sleep 14
+[[ "$(npush)" == 2 ]] && pass "worker: another alert in the same case adds no push" || fail "worker: a second push went out for the same case"
+[[ "$(deliver "smoke-new-$(rand 6)" "$NOW2" good smoke-two)" == 200 ]] || fail "worker: delivery for a new rule was not a 200"
+wait_pushes 3 && pass "worker: an alert for a new rule is a new case and one more push" || fail "worker: the new case was not pushed"
+sleep 8
+[[ "$(npush)" == 3 ]] && pass "worker: and only one" || fail "worker: more than one push for the new case"
+
+for _ in $(seq 1 40); do
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' "$(compose ps -q worker)" 2> /dev/null)" == healthy ]] && break
+  sleep 2
+done
+[[ "$(docker inspect --format '{{.State.Health.Status}}' "$(compose ps -q worker)")" == healthy ]] \
+  && pass "worker: container is healthy" || fail "worker: container is not healthy"
+WLOG="$(compose logs worker 2>&1)"
+[[ "$WLOG" == *"page outcome=sent"* && "$WLOG" != *"$TOPIC"* && "$WLOG" != *"$WORKER_PW"* ]] \
+  && pass "worker: logs the outcomes and neither the topic nor its password" || fail "worker: log is missing outcomes or leaks a secret"
+[[ -z "$(docker port "$(compose ps -q worker)" 2> /dev/null)" ]] && pass "worker: publishes no host port" || fail "worker: publishes a host port"
+
+# worker's networks: the database and the push server's network, never `default`
+# (the tunnel's). It shares the internal db network with the app, as both are database
+# clients; the app is not on the worker's egress network.
+NETS="$(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(compose ps -q worker)" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')"
+[[ "$NETS" == "${P}_db ${P}_egress " ]] \
+  && pass "worker: on the db and egress networks only, not on the tunnel's network" || fail "worker: unexpected networks: $NETS"
+compose exec -T worker python -c "import socket; socket.getaddrinfo('db', 5432)" > /dev/null 2>&1 \
+  && pass "worker: can resolve the database" || fail "worker: cannot resolve the database"
+compose exec -T api python -c "import socket; socket.getaddrinfo('fakentfy', 8089)" > /dev/null 2>&1 \
+  && fail "the public app CAN resolve the push server's network" || pass "the public app cannot reach the worker's egress network"
+probe default "import socket; socket.getaddrinfo('fakentfy', 8089)" > /dev/null 2>&1 \
+  && fail "a container on the tunnel's network CAN resolve the push server" || pass "a container on the tunnel's network cannot resolve the push server"
+login soc_worker WORKER_PW && pass "soc_worker can log in" || fail "soc_worker cannot log in"
+probe db "
+import os, psycopg
+c = psycopg.connect(host='db', dbname='soc', user='soc_worker', password=os.environ['WORKER_PW'])
+try:
+    c.execute('SELECT raw FROM alert')
+except psycopg.errors.InsufficientPrivilege:
+    raise SystemExit(0)
+raise SystemExit(1)" > /dev/null 2>&1 \
+  && pass "soc_worker cannot read the alert payload" || fail "soc_worker can read the alert payload"
 
 echo
 [[ "$FAILS" -eq 0 ]] && echo "all database checks passed" || { echo "$FAILS database check(s) failed"; exit 1; }

@@ -177,3 +177,54 @@ def test_a_missing_data_directory_is_refused_before_anything_changes(tmp_path: P
     assert r.returncode == 1
     assert "pgdata is missing" in r.stdout
     assert not host.changed_the_host
+
+
+# ---- the pager worker is an optional profile ----
+
+
+def test_a_host_with_a_worker_file_turns_the_worker_profile_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    (host.state / "env" / "worker.env").write_text("SOC_NTFY_TOPIC=x\n")
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    calls = host.calls()
+    assert calls and all("[profiles=db,worker]" in c for c in calls)
+    assert index(calls, " run --rm migrate") < index(calls, " up -d --remove-orphans")
+
+
+def test_without_a_worker_file_the_worker_stays_off(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db]" in c for c in host.calls())  # no worker profile
+
+
+def test_a_worker_file_without_a_database_is_refused_before_anything_changes(
+    tmp_path: Path,
+) -> None:
+    host = DbHost(tmp_path, db_env=False, owner_env=False)
+    (host.state / "env" / "worker.env").write_text("SOC_NTFY_TOPIC=x\n")
+    r = host.deploy()
+    assert r.returncode == 1
+    assert "has no database" in r.stdout
+    assert host.calls() == [] and not host.image_env.exists()
+
+
+def test_an_empty_worker_file_is_refused(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    (host.state / "env" / "worker.env").write_text("")
+    r = host.deploy()
+    assert r.returncode == 1
+    assert "is empty" in r.stdout
+    assert host.calls() == []
+
+
+def test_a_profile_set_in_the_shell_cannot_turn_the_worker_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy(COMPOSE_PROFILES="db,worker")
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db]" in c for c in host.calls())

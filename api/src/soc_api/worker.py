@@ -53,7 +53,6 @@ EASTERN = ZoneInfo("America/New_York")
 NTFY_TIMEOUT_SECONDS = 10.0
 LC_LINK_PREFIX = "https://app.limacharlie.io/"
 TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
-CODE_RE = re.compile(r"[a-z0-9_]{1,40}")
 
 # Only plain HTTP(S): no file:// or ftp:// handler, no redirects, no proxy from the
 # environment. The topic is in the request body, so a redirect must never be followed.
@@ -380,7 +379,7 @@ class Worker:
             return
         self._sends.append(self.clock())
         delivery = self.ntfy.publish(title=title, message=message, priority=priority, click=click)
-        code = delivery.code if CODE_RE.fullmatch(delivery.code) else "error"
+        code = delivery.code  # from classify(): a short lowercase code
         self.db.finish_page(page["id"], delivery.outcome, code)
         log.info(
             "page outcome=%s code=%s priority=%d attempts=%d id=%s",
