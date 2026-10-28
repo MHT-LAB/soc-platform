@@ -22,6 +22,9 @@
 #    stops; the running api and console are never touched. Migrations therefore
 #    have to keep working with the previous image (expand, then contract): a
 #    rollback swaps the image only and never runs a downgrade.
+# 3c. When env/worker.env exists (deploy/init-worker.sh) and the host has a database, the
+#    pager worker profile is on too: the migration job gives its database role a
+#    login, and `up` starts it. A worker file without a database is refused.
 # 4. Start the stack (public api and host-network console), wait for both to be
 #    healthy, and confirm both containers use exactly the verified digest. On any
 #    failure, roll back to the previous one.
@@ -104,6 +107,17 @@ elif [[ -e "$DB_ENV" || -e "$DB_OWNER_ENV" ]]; then
   die "$DB_ENV and $DB_OWNER_ENV must both exist and be non-empty (or neither)"
 else
   DB=0
+fi
+
+# The pager worker is optional too (init-worker.sh creates env/worker.env). It needs the
+# database, so a worker file without one is refused here, before anything changes.
+WORKER_ENV="$STATE/env/worker.env"
+if [[ -s "$WORKER_ENV" ]]; then
+  [[ "$DB" == 1 ]] \
+    || die "$WORKER_ENV exists but this host has no database (env/db.env and env/db-owner.env)"
+  export COMPOSE_PROFILES=db,worker
+elif [[ -e "$WORKER_ENV" ]]; then
+  die "$WORKER_ENV is empty; remove it, or restore it with init-worker.sh --restore"
 fi
 
 # The Stage A edge is a locally managed tunnel. Without its config and

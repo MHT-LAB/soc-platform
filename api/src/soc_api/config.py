@@ -7,7 +7,7 @@ mounted by the deploy script). Nothing secret is ever baked into the image.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,6 +52,21 @@ class Settings(BaseSettings):
     # Requests per minute, per client IP and per source. Failed auth costs double.
     ingest_rate_per_ip: int = 60
     ingest_rate_per_source: int = 600
+
+    # The pager worker (its own service; worker.env holds the first two).
+    # A role that can only call the worker functions (soc_worker).
+    worker_database_url: SecretStr = SecretStr("")
+    # The ntfy topic is the secret: anyone who knows it can read and post to it.
+    ntfy_topic: SecretStr = SecretStr("")
+    ntfy_server: str = "https://ntfy.sh"
+    # JSON object: detection category -> ntfy priority 0-5 (0 = case, no push).
+    page_policy: str = ""
+    # Bounded so a typo cannot silence the pager (cap 0) or hammer the database (tick 0).
+    worker_tick_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
+    # At most this many pushes per window; the rest wait (and one notice says so).
+    page_cap: int = Field(default=10, ge=1, le=1000)
+    page_cap_window_seconds: int = Field(default=600, ge=60, le=86400)
+    health_file: str = "/tmp/worker-health"  # noqa: S108 - the container's own tmpfs
 
     @property
     def console_allowlist(self) -> set[str]:

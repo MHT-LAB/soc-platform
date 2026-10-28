@@ -135,6 +135,48 @@ services:
       retries: 6
       start_period: 20s
 
+  # The pager worker: alerts -> cases -> phone pushes, plus the weekly OK and STALE
+  # pushes. Its own profile: deploy.sh turns it on only when env/worker.env exists
+  # (deploy/init-worker.sh creates it), so a host without one deploys as before.
+  # On the database network and on `egress` (outbound to the push server) and NOT on
+  # `default`, the tunnel's network. (It shares the internal db network with the public
+  # app, as both are database clients; the app is not on `egress`.) Nothing listens and
+  # nothing is published. The database being down must not fail a deploy,
+  # so there is no depends_on; the loop retries. Healthy = it completed a pass in the
+  # last minute.
+  worker:
+    profiles: [worker]
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    restart: unless-stopped
+    command: ["python", "-m", "soc_api.worker"]
+    environment:
+      SOC_ENV: ${SOC_ENV:-prod}
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/worker.env
+        required: true
+      # Optional, not secret: SOC_PAGE_POLICY={"<category>": <priority 0-5>, ...}
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/policy.env
+        required: false
+    networks:
+      - db
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/worker-health') < 60 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 45s
+
   # One-off: `docker compose run --rm migrate` applies the schema and gives
   # soc_ingest its login (python -m soc_api.db deploy), as the owner role. Needs
   # db-owner.env (SOC_MIGRATE_URL, SOC_INGEST_DB_PASSWORD). To seed a tenant:
@@ -151,6 +193,9 @@ services:
     env_file:
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/db-owner.env
         required: true
+      # SOC_WORKER_DB_PASSWORD (init-worker.sh): gives soc_worker its login.
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/worker-owner.env
+        required: false
     volumes:
       - ${SOC_STATE_DIR:-/srv/soc}/seed:/seed:ro
     depends_on:
@@ -170,3 +215,5 @@ networks:
   # No route out and none in from the default network.
   db:
     internal: true
+  # Outbound only, for the worker's pushes. Only the worker is on it.
+  egress: {}

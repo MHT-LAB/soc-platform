@@ -23,6 +23,7 @@ WORKER_FUNCTIONS = [
     "heartbeat_counts(timestamptz)",
     "worker_state_get(text)",
     "worker_state_set(text, text)",
+    "due_page_count()",
 ]
 
 
@@ -454,6 +455,23 @@ def test_many_workers_claiming_together_share_the_pages_without_overlap(fx: Fixt
         t.join(20)
     flat = [i for part in taken for i in part]
     assert len(flat) == len(set(flat)) == 12
+
+
+def test_due_page_count_counts_only_pending_pages_that_are_due(fx: Fixture) -> None:
+    ids = make_pages(fx, [5, 4, 3, 2])
+    with fx.worker() as w:
+        assert w.execute("SELECT due_page_count()").fetchone() == (4,)
+    fx.run("UPDATE notification SET status = 'sent' WHERE id = %s", (ids[0],))
+    fx.run("UPDATE notification SET status = 'failed' WHERE id = %s", (ids[1],))
+    fx.run(
+        "UPDATE notification SET next_attempt_at = now() + interval '1 hour' WHERE id = %s",
+        (ids[2],),
+    )
+    with fx.worker() as w:
+        assert w.execute("SELECT due_page_count()").fetchone() == (1,)
+    claim(fx)  # a claim takes the lease, so the page is no longer due
+    with fx.worker() as w:
+        assert w.execute("SELECT due_page_count()").fetchone() == (0,)
 
 
 # ---- recording the outcome ----
