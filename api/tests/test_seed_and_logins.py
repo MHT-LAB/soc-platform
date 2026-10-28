@@ -320,3 +320,32 @@ def test_deploy_stops_on_a_worker_password_that_is_set_but_too_short(
     monkeypatch.setenv("SOC_WORKER_DB_PASSWORD", "short")
     assert soc_db.main(["deploy"]) == 2
     assert "soc_worker password must be at least" in capsys.readouterr().out
+
+
+# ---- rollback to an older release ----
+
+
+def test_a_database_newer_than_the_code_is_left_alone_so_a_rollback_can_deploy(
+    db: TestDb, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What an older image's migrate job sees after a newer release migrated."""
+    with db.connect() as c:
+        c.execute("UPDATE alembic_version SET version_num = '9999_from_the_future'")
+    monkeypatch.setenv("SOC_MIGRATE_URL", db.sqlalchemy_url())
+    monkeypatch.setenv("SOC_INGEST_DB_PASSWORD", PASSWORD)
+    assert soc_db.main(["deploy"]) == 0
+    assert "newer than this release" in capsys.readouterr().out
+    with db.connect() as c:
+        assert c.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "9999_from_the_future",
+        )
+    verifier = role_row(db)[2]
+    assert verifier is not None and scram_matches(verifier, PASSWORD)  # logins still ran
+
+
+def test_a_known_revision_still_upgrades_normally(db: TestDb) -> None:
+    soc_db.downgrade(db.sqlalchemy_url(), "0001")
+    assert soc_db.newer_revision(db.sqlalchemy_url()) is None
+    soc_db.upgrade(db.sqlalchemy_url())
+    with db.connect() as c:
+        assert c.execute("SELECT version_num FROM alembic_version").fetchone() == ("0002",)

@@ -146,6 +146,13 @@ downgrade. So every migration must keep working with the previous release's code
 add columns and tables first, remove or rename in a later release once nothing old
 runs. A migration that breaks the previous image breaks the rollback.
 
+A manual rollback (`deploy.sh <older tag>`) runs the older image's migration job against
+a schema a newer release already moved forward. From `0002` on, `soc_api.db upgrade`
+sees that the database's revision is unknown to it, prints `database is at revision
+..., newer than this release; not migrating` and carries on (logins still run), so the
+rollback is not refused. Images built before this change do not have that guard: to go
+back to one of them, swap `image.env` by hand instead of running `deploy.sh`.
+
 If the job fails, the deploy stops with the previous image restored and the
 services untouched. Each Alembic migration is one transaction, so a failed one
 leaves the schema as it was.

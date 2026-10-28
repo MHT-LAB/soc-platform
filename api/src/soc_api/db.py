@@ -17,7 +17,10 @@ from pathlib import Path
 import psycopg
 from alembic import command
 from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from psycopg import sql
+from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
 MIGRATIONS = Path(__file__).parent / "migrations"
@@ -30,7 +33,26 @@ def _config(url: str) -> Config:
     return cfg
 
 
+def newer_revision(url: str) -> str | None:
+    """The database's revision if this code does not know it (a newer release ran)."""
+    known = {s.revision for s in ScriptDirectory.from_config(_config(url)).walk_revisions()}
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            heads = MigrationContext.configure(conn).get_current_heads()
+    finally:
+        engine.dispose()
+    return next((h for h in heads if h not in known), None)
+
+
 def upgrade(url: str, revision: str = "head") -> None:
+    # A manual rollback (deploy.sh <older tag>) runs the older image's migrate job
+    # against a schema a newer release already moved forward. Migrations are
+    # expand-then-contract, so the older code works with it; Alembic would instead stop
+    # with "can't locate revision" and the rollback would be refused.
+    if revision == "head" and (newer := newer_revision(url)):
+        print(f"database is at revision {newer}, newer than this release; not migrating")
+        return
     command.upgrade(_config(url), revision)
 
 
