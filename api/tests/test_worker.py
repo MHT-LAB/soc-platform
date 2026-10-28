@@ -735,3 +735,97 @@ def test_a_malformed_topic_is_refused_without_echoing_it(
     assert w.main(["run"]) == 2
     out = capsys.readouterr().out
     assert "topic" in out and "bad topic" not in out
+
+
+# ---- review fixes ----
+
+
+def unreachable_db() -> w.Db:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    db = w.Db(f"postgresql+psycopg://soc_worker:x@127.0.0.1:{port}/nope")
+    OPEN.append(db)
+    return db
+
+
+def test_a_database_that_stays_down_is_reported_straight_to_the_phone(
+    ntfy_server: FakeNtfy,
+) -> None:
+    clock = Clock()
+    worker = w.Worker(unreachable_db(), client(ntfy_server), {}, clock=clock)
+    worker.tick()
+    clock.advance(minutes=9)
+    worker.tick()
+    assert ntfy_server.requests == []  # a short outage is not a page
+    clock.advance(minutes=2)
+    worker.tick()
+    assert ntfy_server.titles() == ["SOC STALE"]
+    assert ntfy_server.pushes[0]["message"] == w.STALE_TEXT["db_unreachable"]
+    assert ntfy_server.pushes[0]["priority"] == 5
+    for _ in range(5):
+        clock.advance(minutes=30)
+        worker.tick()
+    assert len(ntfy_server.requests) == 1  # at most once per six hours
+    clock.advance(hours=4)
+    worker.tick()
+    assert len(ntfy_server.requests) == 2
+
+
+def test_a_database_that_comes_back_resets_the_outage_clock(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    good_port = worker.db._params["port"]
+    worker.db._params["port"] = 1
+    worker.tick()
+    clock.advance(minutes=8)
+    worker.tick()
+    worker.db._params["port"] = good_port
+    clock.advance(minutes=1)
+    assert worker.tick() is True
+    worker.db._params["port"] = 1
+    worker.db.close()  # drop the working connection so the next pass really fails
+    clock.advance(minutes=8)
+    assert worker.tick() is False  # 17 minutes since the first failure, 8 since recovery
+    assert "SOC STALE" not in ntfy_server.titles()
+    clock.advance(minutes=11)
+    worker.tick()  # 11 minutes into the second outage (it began at the failed pass above)
+    assert ntfy_server.titles().count("SOC STALE") == 1
+
+
+def test_a_stale_push_for_the_database_that_fails_is_retried_a_minute_later(
+    ntfy_server: FakeNtfy,
+) -> None:
+    clock = Clock()
+    worker = w.Worker(unreachable_db(), client(ntfy_server), {}, clock=clock)
+    worker.tick()
+    clock.advance(minutes=11)
+    ntfy_server.statuses.extend([503])
+    worker.tick()
+    worker.tick()
+    assert len(ntfy_server.requests) == 1
+    clock.advance(seconds=61)
+    worker.tick()
+    assert len(ntfy_server.requests) == 2
+    assert ntfy_server.titles() == ["SOC STALE", "SOC STALE"]
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("page_cap", 0),
+        ("page_cap", -1),
+        ("page_cap_window_seconds", 0),
+        ("page_cap_window_seconds", 59),
+        ("worker_tick_seconds", 0),
+        ("worker_tick_seconds", 0.1),
+    ],
+)
+def test_settings_refuse_values_that_would_silence_or_hammer(field: str, bad: float) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(**{field: bad})
+    Settings(page_cap=1, page_cap_window_seconds=60, worker_tick_seconds=1)

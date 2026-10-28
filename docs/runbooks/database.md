@@ -88,7 +88,7 @@ optional, non-secret file:
 |---|---|---|
 | `env/worker.env` | `SOC_NTFY_TOPIC` and the `soc_worker` URL | `worker` |
 | `env/worker-owner.env` | `SOC_WORKER_DB_PASSWORD` (the migration job gives `soc_worker` its login) | `migrate` |
-| `env/policy.env` (optional) | `SOC_PAGE_POLICY={"<category>": <0-5>, ...}` (0 = case, no push); also `SOC_PAGE_CAP` and `SOC_PAGE_CAP_WINDOW_SECONDS` | `worker` |
+| `env/policy.env` (optional) | `SOC_PAGE_POLICY={"<category>": <0-5>, ...}` (0 = case, no push); also `SOC_PAGE_CAP` (1-1000, default 10) and `SOC_PAGE_CAP_WINDOW_SECONDS` (60-86400, default 600); a value outside those bounds stops the worker at start instead of silencing it | `worker` |
 
 First start (an empty `pgdata`) runs `deploy/db/initdb/`: it creates `soc_owner` (can
 log in, `CREATEROLE`, not a superuser) and the database `soc`, then rewrites
@@ -207,8 +207,10 @@ read nothing, and a stopped database gives a 503 while `/healthz` stays up.
 
 `deploy/compose.yml` has a `worker` service (profile `worker`): alerts become cases, cases
 become phone pushes (ntfy), plus a weekly "SOC OK" push (Sunday 18:00 America/New_York) and
-a "SOC STALE" push when a page has waited over ten minutes, a page failed in the last day
-or the caser is behind (each at most once per six hours). It is on the internal `db`
+a "SOC STALE" push when a page has waited over ten minutes, a page failed in the last day,
+the caser is behind, or the worker has not reached the database for over ten minutes (that
+one goes straight to the push server, since every other check needs the database). Each
+reason pushes at most once per six hours. It is on the internal `db`
 network and on `egress` (outbound), never on `default` (the tunnel's network), publishes
 nothing and has no `depends_on`: a database outage does not fail a deploy, the loop retries.
 `deploy.sh` and `soc-compose.sh` turn the profile on exactly when `env/worker.env` exists

@@ -300,6 +300,7 @@ STALE_TEXT = {
     "pages_pending": "A page has been waiting to go out for over 10 minutes.",
     "page_failed": "A page failed to send in the last 24 hours.",
     "caser_behind": "New alerts are not becoming cases (over 10 minutes behind).",
+    "db_unreachable": "The pager cannot reach its database (over 10 minutes).",
 }
 
 
@@ -324,6 +325,8 @@ class Worker:
         self._held_at: datetime | None = None
         self._next_stale_check: datetime | None = None
         self._tried: dict[str, datetime] = {}
+        self._db_down_since: datetime | None = None
+        self._db_stale_at: datetime | None = None
 
     # one pass; True when no phase hit a database error
     def tick(self) -> bool:
@@ -343,7 +346,39 @@ class Worker:
                 Path(self.health_file).touch()
             except OSError:
                 log.error("health outcome=cannot_write")
+        self._watch_database(ok)
         return ok
+
+    def _watch_database(self, ok: bool) -> None:
+        """Every other STALE check needs the database. When it is the database that is
+        gone, nothing would page at all, so say so straight to the push server. The
+        repeat guard lives in memory: the database cannot hold it."""
+        now = self.clock()
+        if ok:
+            self._db_down_since = None
+            return
+        if self._db_down_since is None:
+            self._db_down_since = now
+        down_for = (now - self._db_down_since).total_seconds()
+        if down_for <= self.limits.stale_after_s:
+            return
+        if (
+            self._db_stale_at
+            and (now - self._db_stale_at).total_seconds() < self.limits.stale_repeat_s
+        ):
+            return
+        if not self._may_try("stale_db_unreachable", now):
+            return
+        delivery = self.ntfy.publish(
+            title="SOC STALE", message=STALE_TEXT["db_unreachable"], priority=5
+        )
+        log.warning(
+            "heartbeat kind=stale reason=db_unreachable outcome=%s code=%s",
+            delivery.outcome,
+            delivery.code,
+        )
+        if delivery.outcome == "sent":
+            self._db_stale_at = now
 
     # ---- caser ----
 
