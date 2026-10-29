@@ -158,6 +158,10 @@ MESSAGES = {
 
 def with_csp(response: Response) -> Response:
     response.headers["Content-Security-Policy"] = CASES_CSP
+    # Not the app-wide no-referrer: with it, a browser sends `Origin: null` on a form post
+    # (Fetch standard), and the Origin check would refuse every Acknowledge and Close.
+    # same-origin still sends nothing to other sites.
+    response.headers["Referrer-Policy"] = "same-origin"
     return response
 
 
