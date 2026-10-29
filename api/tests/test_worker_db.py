@@ -620,7 +620,7 @@ def test_worker_state_rejects_a_huge_value(fx: Fixture) -> None:
 # ---- what the worker role can and cannot do ----
 
 
-@pytest.mark.parametrize("table", [*ALL_TABLES, "worker_state"])
+@pytest.mark.parametrize("table", [*ALL_TABLES, "worker_state", "reconcile_cursor"])
 def test_the_worker_login_cannot_read_or_write_any_table(fx: Fixture, table: str) -> None:
     fx.alert()
     fx.assign()
@@ -697,7 +697,7 @@ def test_the_writer_role_owns_no_tables_and_holds_only_what_it_needs(fx: Fixture
                 )
                 for p in ("SELECT", "INSERT", "UPDATE", "DELETE")
             )
-            for t in [*ALL_TABLES, "worker_state"]
+            for t in [*ALL_TABLES, "worker_state", "reconcile_cursor"]
         }
         alert_cols = {
             col: bool(
