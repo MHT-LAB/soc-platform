@@ -305,6 +305,20 @@ def test_behind_a_proxy_that_rewrites_host_the_configured_address_is_what_works(
     assert ok.status_code == 303 and state(fx, case)[0] == "acknowledged"
 
 
+def test_the_case_pages_let_the_browser_send_their_origin_on_a_form_post(fx: Fixture) -> None:
+    """Under `Referrer-Policy: no-referrer` a browser sends `Origin: null` on a POST (Fetch
+    standard), which the Origin check rightly refuses: found on CT 110 when the first real
+    Acknowledge was refused. The case pages use same-origin, which still tells other sites
+    nothing; the rest of the console and the public app keep no-referrer."""
+    case = one_case(fx)
+    c = make_client(fx)
+    for path in ("/console/cases", f"/console/case/{case}"):
+        assert c.get(path, headers=get_headers()).headers["referrer-policy"] == "same-origin"
+    refused = post(c, case, "close", fields={"note": ""})  # a page shown after a refusal
+    assert refused.headers["referrer-policy"] == "same-origin"
+    assert c.get("/healthz").headers["referrer-policy"] == "no-referrer"
+
+
 # ---- the queue ----
 
 
