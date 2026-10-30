@@ -78,9 +78,25 @@ class Settings(BaseSettings):
     # only (env/pager-ack.env); never the form secret, because this one crosses the push server.
     ack_key: SecretStr = SecretStr("")
 
-    # The catch-up worker (a later PR; env/reconcile-db.env): a role that can only call
-    # ingest_alert() and the cursor functions (soc_reconcile).
+    # The catch-up worker (soc_api.reconcile). env/reconcile-db.env holds the URL of a role
+    # that can only call ingest_alert() and the cursor functions (soc_reconcile);
+    # env/reconcile-lc.env holds the read-only API key, the organization id and the ingest
+    # source it fills in for; the categories (not secret) come from policy.env.
     reconcile_database_url: SecretStr = SecretStr("")
+    reconcile_lc_key: SecretStr = SecretStr("")
+    reconcile_lc_oid: str = ""
+    reconcile_source: str = ""
+    # Comma-separated detection categories to fetch (the ones the webhook output sends).
+    reconcile_categories: str = ""
+    # The interval is capped so the container's health check (15 minutes) always holds.
+    reconcile_interval_seconds: float = Field(default=300.0, ge=60.0, le=600.0)
+    # With no cursor yet (first start) look back this far, not the full day: older
+    # detections were never meant for this pipeline.
+    reconcile_first_lookback_seconds: int = Field(default=3600, ge=300, le=86400)
+    reconcile_health_file: str = "/tmp/reconcile-health"  # noqa: S108 - the container's tmpfs
+    # Overridable for tests only in practice: plain http is refused outside SOC_ENV=dev.
+    reconcile_api_url: str = "https://api.limacharlie.io"
+    reconcile_jwt_url: str = "https://jwt.limacharlie.io"
     # How long after an urgent page was sent it is sent again if nobody acknowledged it.
     repage_first_seconds: int = Field(default=900, ge=1, le=86400)
     repage_second_seconds: int = Field(default=3600, ge=2, le=604800)

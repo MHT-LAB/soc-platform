@@ -121,3 +121,29 @@ def test_the_worker_profile_needs_the_database_profile(tmp_path: Path) -> None:
     r, argv = run(tmp_path, "ps")
     assert r.returncode == 0, r.stderr
     assert argv[0] == "profiles=unset"
+
+
+def test_both_catch_up_files_turn_its_profile_on_here_too(tmp_path: Path) -> None:
+    state(tmp_path)
+    (tmp_path / "env" / "reconcile-db.env").write_text("SOC_RECONCILE_DATABASE_URL=x\n")
+    (tmp_path / "env" / "reconcile-lc.env").write_text("SOC_RECONCILE_LC_KEY=x\n")
+    r, argv = run(tmp_path, "ps")
+    assert r.returncode == 0, r.stderr
+    assert argv[0] == "profiles=db,reconcile"
+    (tmp_path / "env" / "worker.env").write_text("SOC_NTFY_TOPIC=x\n")
+    r, argv = run(tmp_path, "ps")
+    assert argv[0] == "profiles=db,worker,reconcile"
+
+
+def test_one_catch_up_file_is_not_enough_and_it_needs_the_database(tmp_path: Path) -> None:
+    state(tmp_path)
+    (tmp_path / "env" / "reconcile-db.env").write_text("SOC_RECONCILE_DATABASE_URL=x\n")
+    r, argv = run(tmp_path, "ps")
+    assert argv[0] == "profiles=db"
+    (tmp_path / "nodb").mkdir()
+    state(tmp_path / "nodb", db=False)
+    (tmp_path / "nodb" / "env").mkdir(exist_ok=True)
+    (tmp_path / "nodb" / "env" / "reconcile-db.env").write_text("x\n")
+    (tmp_path / "nodb" / "env" / "reconcile-lc.env").write_text("x\n")
+    r, argv = run(tmp_path / "nodb", "ps")
+    assert argv[0] == "profiles=unset"
