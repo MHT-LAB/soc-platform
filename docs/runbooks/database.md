@@ -11,10 +11,10 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_app` | console, workers | Read and write rows of **one client**: the one in the session setting `app.client_id`. With it unset it sees nothing. No `DELETE`; `case_event` is append-only. |
 | `soc_ingest` | the public ingest handler | **No table privileges.** It can only call `ingest_alert()`, which maps a delivery to a source, attributes it (unknown tenant -> the Unassigned client) and inserts idempotently on `(source, event_id)`. |
 | `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
-| `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call six functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`. Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
+| `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call nine functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`, `due_page_count`, `queue_repages` and `reconcile_health` (two numbers about the catch-up worker: how many sources have a cursor and the longest any has gone without a good run; no names, no errors). Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
 | `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call four functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case` and `close_case` (a note is required). Staff view across clients; per-client roles come with sign-in. |
 | `soc_console_writer` | nobody (never logs in) | Owns those four functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; each behind an RLS policy for this role. |
-| `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, each behind an RLS policy for this role. No `DELETE`. |
+| `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, `SELECT (last_success, started_at)` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
 | `soc_reconcile` | the catch-up worker (migration `0006`; its login comes with the worker) | **No table privileges.** It can call `ingest_alert()` (the same insert as the webhook, so a detection fetched later is attributed and de-duplicated the same way) and three cursor functions: `reconcile_cursor_get`, `reconcile_cursor_advance` (only forward, never past the present) and `reconcile_cursor_fail` (a short, cleaned failure code; never moves the cursor). |
 | `soc_reconcile_writer` | nobody (never logs in) | Owns the three cursor functions. Table access: `SELECT (id, slug, enabled)` on `source` and `SELECT`/`INSERT`/`UPDATE` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
 
@@ -228,9 +228,12 @@ read nothing, and a stopped database gives a 503 while `/healthz` stays up.
 `deploy/compose.yml` has a `worker` service (profile `worker`): alerts become cases, cases
 become phone pushes (ntfy), plus a weekly "SOC OK" push (Sunday 18:00 America/New_York) and
 a "SOC STALE" push when a page has waited over ten minutes, a page failed in the last day,
-the caser is behind, or the worker has not reached the database for over ten minutes (that
-one goes straight to the push server, since every other check needs the database). Each
-reason pushes at most once per six hours. It is on the internal `db`
+the caser is behind, the catch-up worker has a cursor but no good run for over 30 minutes,
+or the worker has not reached the database for over ten minutes (that one goes straight to
+the push server, since every other check needs the database). Each reason pushes at most
+once per six hours. A first page whose alert reached us more than five minutes after it was
+detected (after an outage, through the catch-up worker) is titled `LATE:`; re-sends say
+`REPEAT:` instead. It is on the internal `db`
 network and on `egress` (outbound), never on `default` (the tunnel's network), publishes
 nothing and has no `depends_on`: a database outage does not fail a deploy, the loop retries.
 `deploy.sh` and `soc-compose.sh` turn the profile on exactly when `env/worker.env` exists
