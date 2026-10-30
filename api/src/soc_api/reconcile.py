@@ -74,6 +74,10 @@ MAX_TOKEN = 8192
 MAX_CURSOR = 2048
 TOKEN_REFRESH_S = 45 * 60  # the token lives about an hour
 FULL_RECORD_KEYS = ("source_rule", "gen_time", "priority")  # a webhook body has them all
+# The webhook refuses a gen_time outside a narrow window before converting it; these windows
+# are older by design, so here an implausible one only means "detection time unknown".
+GEN_TIME_PAST_S = 7 * 86400
+GEN_TIME_FUTURE_S = 86400
 SUMMARY_KEYS = ("detect_id", "cat", "source_rule", "gen_time", "priority", "link", "namespace")
 
 
@@ -541,7 +545,9 @@ class Reconciler:
         try:
             cleaned = clean_doc(doc)
             body = json.dumps(cleaned, separators=(",", ":")).encode()
-            result = self.store.insert(self.source, normalize(cleaned, body))
+            alert = normalize(self._without_impossible_time(cleaned), body)
+            alert.raw = body.decode()  # stored as received, whatever the time said
+            result = self.store.insert(self.source, alert)
         except (ValueError, TypeError, RecursionError):
             c.malformed += 1
             self._remember(detect_id)
@@ -555,6 +561,15 @@ class Reconciler:
         else:  # invalid_payload, invalid_event_id: permanent, not worth another try
             c.malformed += 1
         self._remember(detect_id)
+
+    def _without_impossible_time(self, doc: dict[str, Any]) -> dict[str, Any]:
+        gen_time = doc.get("gen_time")
+        if not isinstance(gen_time, int) or isinstance(gen_time, bool):
+            return doc  # normalize() already ignores anything but a whole number
+        now_ms = self.clock().timestamp() * 1000
+        if now_ms - GEN_TIME_PAST_S * 1000 <= gen_time <= now_ms + GEN_TIME_FUTURE_S * 1000:
+            return doc
+        return {k: v for k, v in doc.items() if k != "gen_time"}
 
     # -- the loop --
 

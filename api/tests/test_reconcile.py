@@ -1152,3 +1152,22 @@ def test_the_check_command_rejects_a_silly_window(
     finally:
         config.get_settings.cache_clear()
     assert "--minutes" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("gen_time", [10**20, -(10**20), 10**30, 2**63, 0, "soon", None])
+def test_an_impossible_detection_time_is_stored_as_unknown_and_never_blocks_the_cursor(
+    fx: Fixture, lc: FakeLc, gen_time: Any
+) -> None:
+    """The webhook refuses such a time before it is converted; this path has no such check,
+    so an impossible value must become 'detection time unknown' instead of an exception
+    that would fail every pass until the record ages out of the window."""
+    clock = Clock()
+    rec = record("d1", at=clock.now - timedelta(minutes=10))
+    rec["gen_time"] = gen_time
+    lc.records = [rec, record("d2", at=clock.now - timedelta(minutes=10))]
+    lc.summary_only = False
+    counts = make(fx, lc, clock=clock).run_once()
+    assert (counts.inserted, counts.windows) == (2, 1)
+    rows = dict(fx.rows("SELECT event_id, detected_at FROM alert"))
+    assert rows["d1"] is None and rows["d2"] is not None
+    assert fx.one("SELECT raw->'gen_time' FROM alert WHERE event_id = 'd1'")[0] == gen_time
