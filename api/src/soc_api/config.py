@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     # Signs the Acknowledge link on a phone notification. Held by the console and the worker
     # only (env/pager-ack.env); never the form secret, because this one crosses the push server.
     ack_key: SecretStr = SecretStr("")
+
+    # The catch-up worker (a later PR; env/reconcile-db.env): a role that can only call
+    # ingest_alert() and the cursor functions (soc_reconcile).
+    reconcile_database_url: SecretStr = SecretStr("")
     # How long after an urgent page was sent it is sent again if nobody acknowledged it.
     repage_first_seconds: int = Field(default=900, ge=1, le=86400)
     repage_second_seconds: int = Field(default=3600, ge=2, le=604800)

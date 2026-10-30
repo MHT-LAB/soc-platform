@@ -209,6 +209,11 @@ SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-console-db.sh" > "$W
   || { cat "$WORK/init-console.out"; fail "init-console-db.sh failed"; exit 1; }
 rm -f "$WORK/init-console.out"
 CONSOLE_PW="$(envval console-owner.env SOC_CONSOLE_DB_PASSWORD)"
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-reconcile.sh" > "$WORK/init-reconcile.out" 2>&1 \
+  && pass "init-reconcile.sh created the catch-up worker's secret files" \
+  || { cat "$WORK/init-reconcile.out"; fail "init-reconcile.sh failed"; exit 1; }
+rm -f "$WORK/init-reconcile.out"
+RECONCILE_PW="$(envval reconcile-owner.env SOC_RECONCILE_DB_PASSWORD)"
 
 # The fake push server lives on the worker's own network, under the name the worker is told.
 # The console's address and short re-send times (20 s and 60 s instead of 15 and 60 minutes)
@@ -301,6 +306,31 @@ raise SystemExit(1)" > /dev/null 2>&1 \
 
 # --- the console's database access (loopback publish) ---------------------------
 compose run --rm migrate && pass "migration job gave soc_console its login" || { fail "migrate (console login) failed"; exit 1; }
+
+# The catch-up worker's login, from a container on the database's own network (where its
+# service will run): the cursor functions and the webhook's insert work, tables do not.
+RECONCILE_CHECK='
+import os, psycopg
+c = psycopg.connect(host="db", dbname="soc", user="soc_reconcile", password=os.environ["PW"], connect_timeout=5, autocommit=True)
+slug = os.environ["SLUG"]
+before = c.execute("SELECT reconcile_cursor_get(%s)", (slug,)).fetchone()[0]
+moved = c.execute("SELECT reconcile_cursor_advance(%s, now())", (slug,)).fetchone()[0]
+back = c.execute("SELECT reconcile_cursor_advance(%s, now() - %s::interval)", (slug, "1 hour")).fetchone()[0]
+same = back == moved
+unknown = c.execute("SELECT ingest_alert(%s, %s, %s, %s, %s, %s, %s, NULL, now(), %s::jsonb)",
+                    ("no-such-source", "t", "e", "r", "low", "s", "a", "{}")).fetchone()[0]
+try:
+    c.execute("SELECT raw FROM alert")
+    read = "READ"
+except psycopg.errors.InsufficientPrivilege:
+    read = "denied"
+print("ok", before is None, moved is not None, same, unknown, read)'
+OUT="$(docker run --rm --network "${P}_db" -e PW="$RECONCILE_PW" -e SLUG="$SLUG" --entrypoint python "$IMAGE" -c "$RECONCILE_CHECK" 2>&1)"
+[[ "$OUT" == "ok True True True unknown_source denied" ]] \
+  && pass "soc_reconcile, on the db network: cursor moves forward only, webhook insert reachable, cannot read tables" \
+  || fail "soc_reconcile check: $OUT"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT sources FROM reconcile_health()")" == 1 ]] \
+  && pass "reconcile_health sees the cursor" || fail "reconcile_health does not see the cursor"
 
 DBID="$(compose ps -q db)"
 [[ "$(docker port "$DBID" 5432/tcp)" == "127.0.0.1:5432" ]] \

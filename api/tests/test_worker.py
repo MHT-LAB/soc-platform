@@ -1031,3 +1031,143 @@ def test_the_default_resends_are_at_fifteen_and_sixty_minutes() -> None:
     s = Settings()
     assert (s.repage_first_seconds, s.repage_second_seconds) == (900, 3600)
     assert w.Limits().repage_first_s == 900.0 and w.Limits().repage_second_s == 3600.0
+
+
+# ---- late pages and the catch-up worker's health ----
+
+
+@pytest.mark.parametrize(
+    ("late_s", "late"),
+    [
+        (301, True),
+        (86400.5, True),
+        (300, False),
+        (300.0, False),
+        (5, False),
+        (0, False),
+        (-3600, False),
+        (None, False),
+        (True, False),
+        ("900", False),
+        (float("nan"), False),
+    ],
+)
+def test_a_page_whose_alert_came_late_says_so(late_s: Any, late: bool) -> None:
+    title = w.push_text(page(late_s=late_s))[0]
+    assert title == ("LATE: " if late else "") + "client-a: Rule One"
+
+
+def test_a_page_without_lateness_information_is_not_late() -> None:
+    assert w.push_text(page())[0] == "client-a: Rule One"  # an older claim_pages, or none
+
+
+def test_the_lateness_limit_can_be_changed() -> None:
+    assert w.push_text(page(late_s=120), late_after_s=60)[0] == "LATE: client-a: Rule One"
+    assert w.push_text(page(late_s=120), late_after_s=600)[0] == "client-a: Rule One"
+    assert w.Limits().late_after_s == w.LATE_AFTER_S == 300.0
+
+
+@pytest.mark.parametrize("kind", ["repage1", "repage2"])
+def test_a_resend_says_repeat_and_never_late(kind: str) -> None:
+    assert w.push_text(page(kind=kind, late_s=9999))[0] == "REPEAT: client-a: Rule One"
+    assert w.push_text(page(kind="page", late_s=9999))[0] == "LATE: client-a: Rule One"
+
+
+def test_a_late_title_stays_short_and_plain() -> None:
+    title = w.push_text(page(late_s=9999, rule="r" * 500, client_slug="c" * 100))[0]
+    assert len(title) <= 80 and title.startswith("LATE: ")
+    assert "\n" not in w.push_text(page(late_s=9999, rule="a\nb‮c"))[0]
+
+
+def test_an_alert_that_arrived_late_is_pushed_with_late_in_the_title(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    fx.alert(event="late-one", host="h1")
+    fx.run("UPDATE alert SET detected_at = received_at - interval '20 minutes'")
+    fx.alert(event="on-time", host="h2")
+    make_worker(fx, ntfy_server).tick()
+    assert sorted(ntfy_server.titles()) == ["LATE: client-a: Rule One", "client-a: Rule One"]
+
+
+def quiet_cursor(fx: Fixture, last_success_min: float | None, started_min: float = 600) -> None:
+    fx.run(
+        "INSERT INTO reconcile_cursor (source_id, window_end, last_success, started_at) "
+        "SELECT id, now(), now() - make_interval(secs => %s::float8 * 60), "
+        "now() - make_interval(secs => %s::float8 * 60) FROM source WHERE slug = 'src-a'",
+        (last_success_min, started_min),
+    )
+
+
+def stale_pushes(fake: FakeNtfy) -> list[dict[str, Any]]:
+    return [p for p in fake.pushes if p["title"] == "SOC STALE"]
+
+
+def test_no_catch_up_cursor_means_nothing_to_go_stale(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    for _ in range(3):
+        worker.tick()
+        clock.advance(hours=7)
+    assert stale_pushes(ntfy_server) == []
+
+
+def test_a_catch_up_worker_quiet_for_over_half_an_hour_raises_stale(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    quiet_cursor(fx, last_success_min=31)
+    make_worker(fx, ntfy_server).tick()
+    [push] = stale_pushes(ntfy_server)
+    assert push["message"] == w.STALE_TEXT["reconcile_quiet"] and push["priority"] == 5
+    assert "30 minutes" in push["message"]
+
+
+def test_a_catch_up_worker_that_ran_recently_is_fine(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    quiet_cursor(fx, last_success_min=29)
+    make_worker(fx, ntfy_server).tick()
+    assert stale_pushes(ntfy_server) == []
+
+
+def test_a_source_that_only_ever_failed_still_goes_stale(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    quiet_cursor(fx, last_success_min=None, started_min=120)
+    make_worker(fx, ntfy_server).tick()
+    assert [p["message"] for p in stale_pushes(ntfy_server)] == [w.STALE_TEXT["reconcile_quiet"]]
+
+
+def test_a_fresh_failing_source_is_not_stale_yet(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    quiet_cursor(fx, last_success_min=None, started_min=5)
+    make_worker(fx, ntfy_server).tick()
+    assert stale_pushes(ntfy_server) == []
+
+
+def test_the_quiet_limit_can_be_changed(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    quiet_cursor(fx, last_success_min=3)
+    make_worker(fx, ntfy_server, limits=w.Limits(reconcile_stale_s=120)).tick()
+    assert len(stale_pushes(ntfy_server)) == 1
+
+
+def test_the_catch_up_stale_push_repeats_only_every_six_hours_and_stops_on_recovery(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    quiet_cursor(fx, last_success_min=40)
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    worker.tick()
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(stale_pushes(ntfy_server)) == 1  # not again within the repeat window
+    clock.advance(hours=6)
+    worker.tick()
+    assert len(stale_pushes(ntfy_server)) == 2
+    fx.run("UPDATE reconcile_cursor SET last_success = now()")  # the catch-up worker is back
+    clock.advance(hours=7)
+    worker.tick()
+    assert len(stale_pushes(ntfy_server)) == 2
+
+
+def test_the_workers_lateness_limit_reaches_the_title(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    fx.alert()
+    fx.run("UPDATE alert SET detected_at = received_at - interval '20 minutes'")
+    make_worker(fx, ntfy_server, limits=w.Limits(late_after_s=3600)).tick()
+    assert ntfy_server.titles() == ["client-a: Rule One"]

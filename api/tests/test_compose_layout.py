@@ -151,6 +151,7 @@ def test_the_worker_secrets_go_to_the_worker_and_the_login_password_to_migrate_o
         "db-owner.env": True,
         "worker-owner.env": False,
         "console-owner.env": False,
+        "reconcile-owner.env": False,
     }
     for name in ("api", "console", "db", "tunnel"):
         names = env_files(name) if name in SERVICES else {}
@@ -204,3 +205,13 @@ def test_the_phone_ack_key_goes_to_the_console_and_the_worker_only() -> None:
     )
     # the worker still never gets the form secret or the console's database login
     assert not {"console-db.env", "console-owner.env"} & set(env_files("worker"))
+
+
+def test_the_catch_up_worker_login_password_goes_to_migrate_only_for_now() -> None:
+    """Its service comes in a later change; until then nothing may read its files."""
+    holders = {n for n in SERVICES if "reconcile-owner.env" in env_files(n)}
+    assert holders == {"migrate"}
+    assert not any("reconcile-db.env" in env_files(n) for n in SERVICES)
+    assert "reconcile" not in " ".join(
+        e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
+    )
