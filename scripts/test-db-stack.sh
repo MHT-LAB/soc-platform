@@ -38,7 +38,7 @@ compose() { docker compose -p "$P" -f "$HERE/../deploy/compose.yml" "$@"; }
 # Run a command as root in a throwaway container with the work directory mounted.
 as_root() { docker run --rm --user 0 -v "$WORK:/w" --entrypoint "$1" "$IMAGE" "${@:2}"; }
 cleanup() {
-  docker rm -f "$P-fakentfy" > /dev/null 2>&1 || true
+  docker rm -f "$P-fakentfy" "$P-fakelc" > /dev/null 2>&1 || true
   COMPOSE_PROFILES=db,worker compose down -v --remove-orphans > /dev/null 2>&1 || true
   as_root rm -rf /w/pgdata > /dev/null 2>&1 || true
   rm -rf "$WORK"
@@ -462,6 +462,111 @@ sleep 50
 [[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT c.status, count(n.*) FILTER (WHERE n.status = 'sent'), count(n.*) FILTER (WHERE n.kind = 'repage2' AND n.status = 'sent') FROM soc_case c JOIN notification n ON n.case_id = c.id JOIN alert a ON a.case_id = c.id WHERE a.event_id = '$URG' GROUP BY c.status")" == "acknowledged|2|0" ]] \
   && pass "the case is acknowledged, two pages went out and the second repeat never did" \
   || fail "unexpected case or page state after the phone Ack"
+# --- the catch-up worker ---------------------------------------------------------
+# A fake vendor API (token, a list view without the rule name, detection time and priority,
+# and the whole record by id) on the database network. It holds one detection the webhook
+# never delivered, "detected" twenty minutes ago. The real `reconcile` service definition
+# fetches it: stored once, with its rule, and paged as LATE.
+LCF="$P-fakelc"
+LC_OID="00000000-0000-4000-8000-0000000000aa"
+LCKEY="$(rand 20)"
+cat > "$WORK/fakelc.py" << 'PY'
+import base64, gzip, http.server, json, time, urllib.parse
+
+OID = "00000000-0000-4000-8000-0000000000aa"
+NOW = time.time()
+REC = {
+    "cat": "CAT_STACK", "detect_id": "stack-reconciled-1",
+    "detect": {"event": {"COMMAND_LINE": "/usr/bin/true"}},
+    "detect_mtd": {"description": "Stack test."},
+    "link": "https://app.limacharlie.io/orgs/o/sensors/s/timeline?time=1",
+    "namespace": "general", "routing": {"hostname": "ws-demo-01", "oid": OID},
+    "source": "o.i.s.2", "ts": int((NOW - 600) * 1000),
+    "gen_time": int((NOW - 1200) * 1000), "priority": 4, "source_rule": "general.Stack Rule",
+}
+SUMMARY = {k: v for k, v in REC.items() if k not in ("gen_time", "priority", "source_rule")}
+
+class H(http.server.BaseHTTPRequestHandler):
+    def reply(self, code, doc=None):
+        body = json.dumps(doc).encode() if doc is not None else b""
+        self.send_response(code); self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.reply(200, {"jwt": "aaa.bbb.ccc"})
+    def do_GET(self):
+        if self.headers.get("Authorization") != "Bearer aaa.bbb.ccc":
+            return self.reply(401)
+        parts = urllib.parse.urlsplit(self.path)
+        q = dict(urllib.parse.parse_qsl(parts.query))
+        if parts.path == f"/v1/insight/{OID}/detections":
+            hit = int(q["start"]) * 1000 <= REC["ts"] <= int(q["end"]) * 1000
+            raw = json.dumps([SUMMARY] if hit else []).encode()
+            return self.reply(200, {"detects": base64.b64encode(gzip.compress(raw)).decode(), "next_cursor": None})
+        if parts.path == f"/v1/insight/{OID}/detections/{REC['detect_id']}":
+            return self.reply(200, {"detection": {"event": REC}})
+        self.reply(404)
+    def log_message(self, *a): pass
+
+http.server.ThreadingHTTPServer(("0.0.0.0", 8090), H).serve_forever()
+PY
+docker run -d --name "$LCF" --network "${P}_db" --network-alias fakelc -v "$WORK/fakelc.py:/fakelc.py:ro" \
+  --entrypoint python "$IMAGE" /fakelc.py > /dev/null
+for _ in $(seq 1 30); do
+  docker exec "$LCF" python -c "import socket; socket.create_connection(('127.0.0.1', 8090), 2)" > /dev/null 2>&1 && break
+  sleep 1
+done
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" SOC_LC_RECONCILE_KEY="$LCKEY" SOC_LC_OID="$LC_OID" SOC_INGEST_LC_SLUG="$SLUG" \
+  "$HERE/../deploy/init-reconcile-lc.sh" --restore > "$WORK/init-lc.out" 2>&1 \
+  && pass "init-reconcile-lc.sh wrote the vendor-API file" \
+  || { cat "$WORK/init-lc.out"; fail "init-reconcile-lc.sh failed"; exit 1; }
+rm -f "$WORK/init-lc.out"
+cat >> "$WORK/env/policy.env" << 'ENV'
+SOC_RECONCILE_CATEGORIES=CAT_STACK,CAT_UNUSED
+SOC_RECONCILE_API_URL=http://fakelc:8090
+SOC_RECONCILE_JWT_URL=http://fakelc:8090/jwt
+ENV
+export COMPOSE_PROFILES=db,worker,reconcile
+rec() { SOC_ENV=dev compose run --rm reconcile python -m soc_api.reconcile "$@" 2>&1; }
+
+OUT="$(rec check --minutes 60)"
+[[ "$OUT" == *"check ok: auth=ok window=60m listed=1 matching=1"* && "$OUT" == *"found at: detection.event=1"* \
+   && "$OUT" == *"listed fields (1 records): detect_id=1 cat=1 source_rule=0 gen_time=0 priority=0"* && "$OUT" != *"$LCKEY"* ]] \
+  && pass "reconcile check: auth works, the list view is a summary, the whole record has the rest" \
+  || fail "reconcile check: $OUT"
+
+BEFORE_LC="$(npush)"
+OUT="$(rec once)"
+[[ "$OUT" == *"reconcile outcome=ok windows=1 listed=1 kept=1 inserted=1 duplicate=0 skipped=0 malformed=0 enriched=1 degraded=0"* && "$OUT" != *"$LCKEY"* ]] \
+  && pass "reconcile: a detection only the source had was fetched and stored (no key in the log)" \
+  || fail "reconcile once: $OUT"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT count(*), min(rule), min(severity) FROM alert WHERE event_id = 'stack-reconciled-1'")" == "1|general.Stack Rule|medium" ]] \
+  && pass "reconcile: stored once, with its rule and priority from the whole record" \
+  || fail "reconcile: the stored alert is not as expected"
+OUT="$(rec once)"
+[[ "$OUT" == *"inserted=0 duplicate=1"* ]] && pass "reconcile: the next pass sees it again and stores nothing" || fail "reconcile second pass: $OUT"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT count(*) FROM alert WHERE event_id = 'stack-reconciled-1'")" == 1 ]] \
+  && pass "reconcile: still exactly one alert" || fail "reconcile: the alert was stored twice"
+wait_pushes $((BEFORE_LC + 1)) && pass "reconcile: the pager pushed it" || fail "reconcile: no push for the caught-up alert"
+[[ "$(fk_py 'print(sum(json.loads(x)["title"] == "LATE: smoke: Stack Rule" for x in L))')" == 1 ]] \
+  && pass "reconcile: the push says LATE, once" || fail "reconcile: the push is not marked LATE exactly once"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT sources FROM reconcile_health()")" == 1 ]] \
+  && pass "reconcile: the pager's health view sees the cursor" || fail "reconcile: no cursor"
+
+SOC_ENV=dev compose up -d reconcile > /dev/null
+RID="$(compose ps -q reconcile)"
+for _ in $(seq 1 40); do
+  docker exec "$RID" python -c "import os; os.stat('/tmp/reconcile-health')" > /dev/null 2>&1 && break
+  sleep 1
+done
+docker exec "$RID" python -c "import os; os.stat('/tmp/reconcile-health')" > /dev/null 2>&1 \
+  && pass "reconcile service: running, and its health file is written" || fail "reconcile service: no health file"
+[[ "$(docker inspect "$RID" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}')" == "${P}_db ${P}_egress " ]] \
+  && pass "reconcile service: on the database and egress networks only" || fail "reconcile service: unexpected networks"
+[[ "$(docker inspect "$RID" --format '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{len .HostConfig.PortBindings}}')" == "true [ALL] 0" ]] \
+  && pass "reconcile service: read-only, no capabilities, nothing published" || fail "reconcile service: not hardened as declared"
+compose stop reconcile > /dev/null
+
 # The database has no way out: an outbound connection from its own container fails.
 docker exec "$DBID" timeout 5 bash -c 'exec 3<> /dev/tcp/1.1.1.1/443' > /dev/null 2>&1 \
   && { [[ "$(uname)" == Linux ]] && fail "the database container CAN open an outbound connection" || echo "skip - outbound check (Docker Desktop's network is not a Linux bridge)"; } \

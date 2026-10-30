@@ -228,3 +228,92 @@ def test_a_profile_set_in_the_shell_cannot_turn_the_worker_on(tmp_path: Path) ->
     r = host.deploy(COMPOSE_PROFILES="db,worker")
     assert r.returncode == 0, r.stdout
     assert all("[profiles=db]" in c for c in host.calls())
+
+
+# ---- the catch-up worker is an optional profile, on only when both its files exist ----
+
+
+def reconcile_files(host: "DbHost", *, db: bool = True, lc: bool = True) -> None:
+    if db:
+        (host.state / "env" / "reconcile-db.env").write_text("SOC_RECONCILE_DATABASE_URL=x\n")
+    if lc:
+        (host.state / "env" / "reconcile-lc.env").write_text("SOC_RECONCILE_LC_KEY=x\n")
+
+
+def test_both_catch_up_files_turn_the_catch_up_profile_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    reconcile_files(host)
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    calls = host.calls()
+    assert calls and all("[profiles=db,reconcile]" in c for c in calls)
+    assert index(calls, " run --rm migrate") < index(calls, " up -d --remove-orphans")
+
+
+def test_the_pager_and_catch_up_profiles_can_both_be_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    (host.state / "env" / "worker.env").write_text("SOC_NTFY_TOPIC=x\n")
+    reconcile_files(host)
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db,worker,reconcile]" in c for c in host.calls())
+
+
+def test_the_database_file_alone_leaves_the_catch_up_worker_off(tmp_path: Path) -> None:
+    """After init-reconcile.sh and before the vendor key: the deploy gives the role its login."""
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    reconcile_files(host, lc=False)
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db]" in c for c in host.calls())
+
+
+def test_without_catch_up_files_it_stays_off(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert not any("reconcile" in c for c in host.calls())
+
+
+def test_the_vendor_key_file_without_the_database_file_is_refused(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    reconcile_files(host, db=False)
+    r = host.deploy()
+    assert r.returncode == 1
+    assert "init-reconcile.sh" in r.stdout
+    assert host.calls() == [] and not host.image_env.exists()
+
+
+@pytest.mark.parametrize("empty", ["reconcile-db.env", "reconcile-lc.env"])
+def test_an_empty_catch_up_file_is_refused(tmp_path: Path, empty: str) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    reconcile_files(host)
+    (host.state / "env" / empty).write_text("")
+    r = host.deploy()
+    assert r.returncode == 1
+    assert host.calls() == []
+
+
+def test_catch_up_files_without_a_database_are_refused_before_anything_changes(
+    tmp_path: Path,
+) -> None:
+    host = DbHost(tmp_path, db_env=False, owner_env=False)
+    reconcile_files(host)
+    r = host.deploy()
+    assert r.returncode == 1
+    assert "has no database" in r.stdout
+    assert host.calls() == [] and not host.image_env.exists()
+
+
+def test_a_profile_set_in_the_shell_cannot_turn_the_catch_up_worker_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy(COMPOSE_PROFILES="db,reconcile")
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db]" in c for c in host.calls())

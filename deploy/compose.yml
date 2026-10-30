@@ -198,6 +198,50 @@ services:
       retries: 3
       start_period: 45s
 
+  # The catch-up worker: asks the detection source's API for the last stretch of
+  # detections and stores what the webhook never delivered (python -m soc_api.reconcile).
+  # Its own profile: deploy.sh turns it on only when both env/reconcile-db.env
+  # (deploy/init-reconcile.sh) and env/reconcile-lc.env (deploy/init-reconcile-lc.sh) exist.
+  # Like the worker it is on the database network and on `egress` (outbound to the
+  # vendor's API), never on `default`, publishes nothing and has no depends_on. It holds
+  # the read-only vendor API key and nothing else secret: no worker, console or ingest
+  # file. Healthy = a pass ran in the last 15 minutes (a failing source still counts: the
+  # pager's STALE check watches progress).
+  reconcile:
+    profiles: [reconcile]
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    restart: unless-stopped
+    command: ["python", "-m", "soc_api.reconcile"]
+    environment:
+      SOC_ENV: ${SOC_ENV:-prod}
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/reconcile-db.env
+        required: true
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/reconcile-lc.env
+        required: true
+      # Optional, not secret: SOC_RECONCILE_CATEGORIES (and the pager's settings, unused here).
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/policy.env
+        required: false
+    networks:
+      - db
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/reconcile-health') < 900 else 1)"]
+      interval: 60s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
+
   # One-off: `docker compose run --rm migrate` applies the schema and gives
   # soc_ingest its login (python -m soc_api.db deploy), as the owner role. Needs
   # db-owner.env (SOC_MIGRATE_URL, SOC_INGEST_DB_PASSWORD). To seed a tenant:

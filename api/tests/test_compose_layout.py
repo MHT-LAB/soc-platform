@@ -17,9 +17,9 @@ def test_the_database_network_is_internal() -> None:
     assert COMPOSE["networks"]["db"] == {"internal": True}
 
 
-def test_only_api_db_migrate_and_worker_are_on_the_database_network() -> None:
+def test_only_api_db_migrate_worker_and_reconcile_are_on_the_database_network() -> None:
     on_db = {n for n, s in SERVICES.items() if "db" in s.get("networks", [])}
-    assert on_db == {"api", "db", "migrate", "worker"}
+    assert on_db == {"api", "db", "migrate", "worker", "reconcile"}
     # The tunnel (overlay) keeps the default network only.
     assert "networks" not in OVERLAY["services"]["tunnel"]
     # db and migrate are not on the default network the tunnel shares.
@@ -108,7 +108,7 @@ def test_the_worker_is_on_the_database_and_egress_networks_and_never_on_default(
     assert WORKER["networks"] == ["db", "egress"]  # `default` is the tunnel's network
     assert COMPOSE["networks"]["egress"] == {}  # outbound for pushes: not internal
     on_egress = {n for n, s in SERVICES.items() if "egress" in s.get("networks", [])}
-    assert on_egress == {"worker"}
+    assert on_egress == {"worker", "reconcile"}
     assert "networks" not in OVERLAY["services"]["tunnel"]
 
 
@@ -207,11 +207,77 @@ def test_the_phone_ack_key_goes_to_the_console_and_the_worker_only() -> None:
     assert not {"console-db.env", "console-owner.env"} & set(env_files("worker"))
 
 
-def test_the_catch_up_worker_login_password_goes_to_migrate_only_for_now() -> None:
-    """Its service comes in a later change; until then nothing may read its files."""
-    holders = {n for n in SERVICES if "reconcile-owner.env" in env_files(n)}
-    assert holders == {"migrate"}
-    assert not any("reconcile-db.env" in env_files(n) for n in SERVICES)
-    assert "reconcile" not in " ".join(
-        e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
-    )
+# ---- the catch-up worker ----
+
+RECONCILE = SERVICES["reconcile"]
+
+
+def test_the_catch_up_worker_is_on_the_database_and_egress_networks_and_never_on_default() -> None:
+    assert RECONCILE["networks"] == ["db", "egress"]
+    assert "ports" not in RECONCILE and "expose" not in RECONCILE
+    assert RECONCILE.get("network_mode") is None
+
+
+def test_the_catch_up_worker_is_hardened_like_the_pager_worker() -> None:
+    assert RECONCILE["read_only"] is True
+    assert RECONCILE["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in RECONCILE["security_opt"]
+    assert "mem_limit" in RECONCILE and "pids_limit" in RECONCILE
+    assert "user" not in RECONCILE or RECONCILE["user"] != "0"
+    assert RECONCILE["tmpfs"] == ["/tmp"]  # noqa: S108 - the health file lives here
+
+
+def test_the_catch_up_worker_is_optional_and_does_not_hold_up_a_deploy() -> None:
+    assert RECONCILE["profiles"] == ["reconcile"]
+    assert "depends_on" not in RECONCILE  # a vendor or database outage must not fail a deploy
+    assert RECONCILE["image"] == SERVICES["api"]["image"]
+    assert RECONCILE["command"] == ["python", "-m", "soc_api.reconcile"]
+
+
+def test_its_health_check_watches_its_own_file_with_room_for_the_longest_interval() -> None:
+    from soc_api.config import Settings
+
+    test = " ".join(RECONCILE["healthcheck"]["test"])
+    assert "/tmp/reconcile-health" in test  # noqa: S108
+    assert Settings().reconcile_health_file == "/tmp/reconcile-health"  # noqa: S108
+    limit = int(test.split("< ")[1].split(" ")[0])
+    longest = Settings.model_fields["reconcile_interval_seconds"].metadata[-1].le
+    assert limit > 1.4 * longest  # a pass every `longest` seconds never looks stale
+
+
+def test_the_catch_up_files_go_to_the_catch_up_worker_and_the_login_password_to_migrate() -> None:
+    assert env_files("reconcile") == {
+        "reconcile-db.env": True,
+        "reconcile-lc.env": True,
+        "policy.env": False,
+    }
+    for name, expected in (
+        ("reconcile-db.env", {"reconcile"}),
+        ("reconcile-lc.env", {"reconcile"}),
+        ("reconcile-owner.env", {"migrate"}),
+    ):
+        assert {n for n in SERVICES if name in env_files(n)} == expected, name
+    for name in ("reconcile-db.env", "reconcile-lc.env", "reconcile-owner.env"):
+        assert name not in " ".join(
+            e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
+        )
+
+
+def test_the_catch_up_worker_never_gets_anyone_elses_secrets() -> None:
+    names = set(env_files("reconcile"))
+    assert not names & {
+        "db.env",
+        "db-owner.env",
+        "ingest.env",
+        "console.env",
+        "console-db.env",
+        "lc.env",
+        "worker.env",
+        "worker-owner.env",
+        "pager-ack.env",
+    }
+    env = RECONCILE.get("environment", {})
+    assert not {k for k in env if k.startswith(("SOC_MIGRATE", "SOC_INGEST", "SOC_WORKER"))}
+    # ...and nobody else gets its vendor key
+    for name in ("api", "console", "worker", "db", "migrate"):
+        assert "reconcile-lc.env" not in set(env_files(name)), name

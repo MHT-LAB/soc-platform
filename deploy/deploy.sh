@@ -25,6 +25,8 @@
 # 3c. When env/worker.env exists (deploy/init-worker.sh) and the host has a database, the
 #    pager worker profile is on too: the migration job gives its database role a
 #    login, and `up` starts it. A worker file without a database is refused.
+# 3d. The same for the catch-up worker, once both env/reconcile-db.env and
+#    env/reconcile-lc.env exist (the first alone only gives its database role a login).
 # 4. Start the stack (public api and host-network console), wait for both to be
 #    healthy, and confirm both containers use exactly the verified digest. On any
 #    failure, roll back to the previous one.
@@ -118,6 +120,22 @@ if [[ -s "$WORKER_ENV" ]]; then
   export COMPOSE_PROFILES=db,worker
 elif [[ -e "$WORKER_ENV" ]]; then
   die "$WORKER_ENV is empty; remove it, or restore it with init-worker.sh --restore"
+fi
+
+# The catch-up worker needs its database file (init-reconcile.sh) and its vendor-API file
+# (init-reconcile-lc.sh). The first alone is fine: the migration job gives the database role
+# its login and the service stays off until the second exists. The second without the
+# first, or either empty, or either without a database, is refused here.
+RECONCILE_DB_ENV="$STATE/env/reconcile-db.env"
+RECONCILE_LC_ENV="$STATE/env/reconcile-lc.env"
+if [[ -s "$RECONCILE_DB_ENV" && -s "$RECONCILE_LC_ENV" ]]; then
+  [[ "$DB" == 1 ]] \
+    || die "$RECONCILE_LC_ENV exists but this host has no database (env/db.env and env/db-owner.env)"
+  export COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}reconcile"
+elif [[ -e "$RECONCILE_LC_ENV" ]]; then
+  die "$RECONCILE_LC_ENV needs a non-empty $RECONCILE_DB_ENV (init-reconcile.sh) and must not be empty itself"
+elif [[ -e "$RECONCILE_DB_ENV" && ! -s "$RECONCILE_DB_ENV" ]]; then
+  die "$RECONCILE_DB_ENV is empty; remove it, or restore it with init-reconcile.sh --restore"
 fi
 
 # The Stage A edge is a locally managed tunnel. Without its config and

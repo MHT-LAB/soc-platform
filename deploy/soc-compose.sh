@@ -29,4 +29,9 @@ if [[ -n "${COMPOSE_PROFILES:-}" && -s "$STATE/env/worker.env" ]]; then
   export COMPOSE_PROFILES=db,worker
 fi
 
+# ...and the catch-up worker's: both of its files (and the database) turn it on.
+if [[ -n "${COMPOSE_PROFILES:-}" && -s "$STATE/env/reconcile-db.env" && -s "$STATE/env/reconcile-lc.env" ]]; then
+  export COMPOSE_PROFILES="$COMPOSE_PROFILES,reconcile"
+fi
+
 exec docker compose -p soc -f "$HERE/compose.yml" -f "$HERE/$OVERLAY" --env-file "$IMAGE_ENV" "$@"

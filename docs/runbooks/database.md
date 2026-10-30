@@ -368,3 +368,60 @@ database password: new value in `console-db.env` and `console-owner.env`, then `
   Acknowledging twice is harmless; the link stops working after a day.
 - **What crosses the push server** is now also a case page address and the signed Ack link; the
   link alone cannot do anything without a tailnet connection and an allow-listed identity.
+
+## The catch-up worker on the host
+
+The detection source's webhook gives up after a few fast retries, so any outage of ours loses
+alerts, and after a failure it also skips new ones for a while. The `reconcile` service
+(`python -m soc_api.reconcile`, compose profile `reconcile`) closes that gap. Every five
+minutes it asks the source's API for the detections of a time window and feeds each one
+through exactly the path a webhook delivery takes (`normalize()`, then `ingest_alert()`, which
+de-duplicates on the detection id): a detection both paths deliver is stored once, whichever
+came first. A caught-up alert pages normally, titled `LATE:` when it reached us more than five
+minutes after it was detected.
+
+* **Windows.** From the cursor minus ten minutes (so a detection that reached the source late is
+  still caught) to one minute ago, cut into hours. The cursor is kept in the database, per
+  source (`reconcile_cursor`), and moves only after a window was fetched completely and every
+  detection in it stored. Any error leaves it where it was and records a short failure code; the
+  pager's STALE check raises a push when a source has had no good run for 30 minutes. A first
+  start looks back one hour; nothing older than a day is ever fetched.
+* **What it keeps.** Only the categories in `SOC_RECONCILE_CATEGORIES` (comma-separated, in
+  `env/policy.env`): the ones the webhook output sends. The list view of the API is a summary, so
+  a detection without its rule name, detection time or priority is fetched whole by id first;
+  that is what makes a caught-up alert look like a webhook one and group into the same case.
+* **Containment.** The service is on the `db` and `egress` networks, never `default`, publishes
+  nothing, runs read-only with no capabilities, and holds only two secrets: the database login
+  of `soc_reconcile` (`env/reconcile-db.env`, which can call `ingest_alert()` and the cursor
+  functions and nothing else) and a read-only API key (`env/reconcile-lc.env`). The API's
+  answers are data: size-capped (also after decompression), parsed as JSON, cleaned like a webhook
+  body, never executed; https only, no redirects, timeouts; the key is never logged (every
+  failure is a short code, one summary line per pass).
+
+**Set it up (root on the host, once, after `init-secrets.sh`):**
+
+    deploy/init-reconcile.sh        # the database side; prints one value for the secrets manager
+    deploy/deploy.sh edge           # the migration job gives soc_reconcile its login
+    deploy/init-reconcile-lc.sh     # asks for the API key (hidden), the organization id, the source slug
+
+Create the key in the vendor's console first: read-only, with only the permission to list and
+read detections (`insight.det.get`), named for this service. `init-reconcile-lc.sh` writes
+`env/reconcile-lc.env` (mode 600) and never prints the key; keep the key itself in the secrets
+manager (`SOC_LC_RECONCILE_KEY`, `SOC_LC_OID`). Add `SOC_RECONCILE_CATEGORIES=...` to
+`env/policy.env`. `deploy.sh` and `soc-compose.sh` turn the profile on exactly when both
+`reconcile-db.env` and `reconcile-lc.env` exist (and the host has a database); the first alone
+only gives the role its login. Lost host: `init-reconcile.sh --restore` and
+`init-reconcile-lc.sh --restore` rebuild the files from the secrets manager's values.
+
+**Checks (nothing here prints a key, an identifier or a detection):**
+
+    deploy/soc-compose.sh run --rm reconcile python -m soc_api.reconcile check --minutes 60
+        # read-only: auth works? how many detections? which fields does the list view carry?
+    deploy/soc-compose.sh run --rm reconcile python -m soc_api.reconcile once
+        # one pass now; prints the summary line (windows, listed, kept, inserted, duplicate, ...)
+    deploy/soc-compose.sh logs --since 15m reconcile
+
+Failure codes in the log and in `reconcile_cursor.last_error`: `jwt_*` (the key was refused or the
+token reply was wrong), `http_401/403/429/4xx/5xx`, `timeout`, `network`, `redirect`, `too_large`,
+`bad_json`, `bad_shape`, `bad_cursor`, `too_many_pages`, `too_many_items`, `unknown_source` (the
+configured slug is not an enabled source), `db_error`, `db_unavailable`, `internal`.

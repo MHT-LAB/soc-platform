@@ -43,6 +43,7 @@ select = ["E", "F", "I", "B", "S", "UP"]
 "tests/test_worker_db.py" = ["S608"]  # same: parametrized over fixed table names
 "tests/test_console_db.py" = ["S608"]  # same
 "tests/test_reconcile_db.py" = ["S608"]  # same
+"tests/test_reconcile.py" = ["S105"]  # fake tokens and keys for a fake server
 "src/soc_api/migrations/**" = ["S608"]  # f-string SQL over fixed table names and one constant
 
 [tool.mypy]
