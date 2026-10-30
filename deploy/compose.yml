@@ -220,6 +220,9 @@ services:
       # SOC_CONSOLE_DB_PASSWORD (init-console-db.sh): gives soc_console its login.
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/console-owner.env
         required: false
+      # SOC_RECONCILE_DB_PASSWORD (init-reconcile.sh): gives soc_reconcile its login.
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/reconcile-owner.env
+        required: false
     volumes:
       - ${SOC_STATE_DIR:-/srv/soc}/seed:/seed:ro
     depends_on:

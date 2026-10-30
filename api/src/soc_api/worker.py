@@ -9,8 +9,8 @@ One loop, three jobs, each isolated from the others' failures:
 * caser: `assign_cases()` turns new alerts into cases and queues their pages.
 * sender: claims due pages, pushes them to ntfy, records the outcome. At most
   `page_cap` pushes per window; the rest wait and one notice says so.
-* heartbeat: a weekly "SOC OK" with counts, and a "SOC STALE" push when pages are stuck
-  or the caser is behind.
+* heartbeat: a weekly "SOC OK" with counts, and a "SOC STALE" push when pages are stuck,
+  the caser is behind or the catch-up worker has gone quiet.
 
 The worker has no table privileges. Everything goes through the functions in migration
 0002/0003, which never hand back the raw payload. What crosses ntfy's servers (a third
@@ -55,6 +55,7 @@ EASTERN = ZoneInfo("America/New_York")
 # A claim is a two-minute lease (migration 0002). One send, with its timeout, must
 # finish far inside that, or a slow send could be claimed and pushed a second time.
 NTFY_TIMEOUT_SECONDS = 10.0
+LATE_AFTER_S = 300.0  # an alert received this long after it was detected is "LATE"
 TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
 # Only plain HTTP(S): no file:// or ftp:// handler, no redirects, no proxy from the
@@ -73,11 +74,23 @@ for _handler in (
 # ---- text that crosses ntfy ----
 
 
-def push_text(page: dict[str, Any]) -> tuple[str, str, int, str | None]:
-    """(title, message, ntfy priority, click) for a claimed page."""
+def push_text(
+    page: dict[str, Any], late_after_s: float = LATE_AFTER_S
+) -> tuple[str, str, int, str | None]:
+    """(title, message, ntfy priority, click) for a claimed page.
+
+    "LATE:" marks a first page whose alert reached us long after it was detected (the
+    catch-up path after an outage); a re-send says REPEAT instead."""
     rule = re.sub(r"^general\.", "", page.get("rule") or "") or "alert"
     again = "REPEAT: " if page.get("kind") in ("repage1", "repage2") else ""
-    title = clean(f"{again}{page['client_slug']}: {rule}", 80)
+    lateness = page.get("late_s")
+    is_late = (
+        not again
+        and isinstance(lateness, int | float)
+        and not isinstance(lateness, bool)
+        and lateness > late_after_s
+    )
+    title = clean(f"{again}{'LATE: ' if is_late else ''}{page['client_slug']}: {rule}", 80)
     detected = page.get("detected_at")
     when = f"{detected.astimezone(EASTERN):%H:%M} ET" if isinstance(detected, datetime) else "?"
     host = clean(page.get("host"), 64) or "unknown"
@@ -275,6 +288,12 @@ class Db:
         )
         return int(rows[0][0])
 
+    def reconcile_health(self) -> tuple[int, float | None]:
+        """(sources with a catch-up cursor, longest seconds any has gone without a good run)."""
+        _, rows = self._run("SELECT sources, quiet_s FROM reconcile_health()")
+        quiet = rows[0][1]
+        return int(rows[0][0]), None if quiet is None else float(quiet)
+
     def due_page_count(self) -> int:
         _, rows = self._run("SELECT due_page_count()")
         return int(rows[0][0])
@@ -316,6 +335,8 @@ class Limits:
     repage_first_s: float = 900.0
     repage_second_s: float = 3600.0
     stale_check_s: float = 300.0
+    reconcile_stale_s: float = 1800.0  # the catch-up worker runs every few minutes
+    late_after_s: float = LATE_AFTER_S
     retry_notice_s: float = 60.0  # between tries of a notice that could not be sent
 
 
@@ -324,6 +345,7 @@ STALE_TEXT = {
     "page_failed": "A page failed to send in the last 24 hours.",
     "caser_behind": "New alerts are not becoming cases (over 10 minutes behind).",
     "db_unreachable": "The pager cannot reach its database (over 10 minutes).",
+    "reconcile_quiet": "The catch-up worker has not completed a run in over 30 minutes.",
 }
 
 
@@ -441,7 +463,7 @@ class Worker:
 
     def _send_page(self, page: dict[str, Any]) -> None:
         try:
-            title, message, priority, _ = push_text(page)
+            title, message, priority, _ = push_text(page, self.limits.late_after_s)
         except (KeyError, TypeError, ValueError, AttributeError):
             # A page that cannot be described must not crash-loop the worker.
             self.db.finish_page(page["id"], "fail", "bad_page")
@@ -534,11 +556,13 @@ class Worker:
 
     def _stale(self, now: datetime) -> None:
         c = self.db.heartbeat_counts(now)
+        sources, quiet = self.db.reconcile_health()
         after = self.limits.stale_after_s
         firing = {
             "pages_pending": (c["oldest_pending_page_s"] or 0) > after,
             "page_failed": (c["failed_last_24h"] or 0) > 0,
             "caser_behind": (c["oldest_unassigned_alert_s"] or 0) > after,
+            "reconcile_quiet": sources > 0 and (quiet or 0) > self.limits.reconcile_stale_s,
         }
         for reason, is_firing in firing.items():
             if not is_firing:

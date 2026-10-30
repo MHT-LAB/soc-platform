@@ -25,6 +25,7 @@ WORKER_FUNCTIONS = [
     "worker_state_set(text, text)",
     "due_page_count()",
     "queue_repages(interval, interval)",
+    "reconcile_health()",
 ]
 
 
@@ -348,6 +349,7 @@ def test_claim_returns_only_what_a_push_needs(fx: Fixture) -> None:
         "detected_at",
         "case_id",
         "kind",
+        "late_s",
     }
     assert page["client_slug"] == "client-a" and page["rule"] == "general.DEMO - Rule"
     assert page["host"] == "ws-demo-01" and page["link"] == LINK and page["priority"] == 5

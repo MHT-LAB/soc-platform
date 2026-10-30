@@ -76,7 +76,9 @@ def db() -> Iterator[TestDb]:
     # Roles are cluster-wide; give them a login so tests connect as the real thing.
     with test_db.connect() as admin:
         for role in ("soc_app", "soc_ingest", "soc_worker", "soc_console", "soc_reconcile"):
-            admin.execute(f"ALTER ROLE {role} LOGIN PASSWORD '{ROLE_PASSWORD}'")
+            # Roles are cluster-wide, so a login test's connection cap (soc_api.db) from an
+            # earlier run on the same server must not leak into this one.
+            admin.execute(f"ALTER ROLE {role} LOGIN PASSWORD '{ROLE_PASSWORD}' CONNECTION LIMIT -1")
     yield test_db
     with psycopg.connect(make_conninfo(**params), autocommit=True) as admin:
         admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
