@@ -78,7 +78,7 @@ def events(fx: Fixture, case: Any) -> list[tuple[Any, ...]]:
 # ---- what the login can and cannot do ----
 
 
-@pytest.mark.parametrize("table", [*ALL_TABLES, "worker_state"])
+@pytest.mark.parametrize("table", [*ALL_TABLES, "worker_state", "reconcile_cursor"])
 def test_the_console_login_cannot_read_or_write_any_table(fx: Fixture, table: str) -> None:
     one_case(fx)
     with console(fx) as c:
@@ -177,7 +177,7 @@ def test_the_writer_holds_only_what_the_console_functions_need(fx: Fixture) -> N
                 has(c, "SELECT has_table_privilege('soc_console_writer', %s, %s)", t, p)
                 for p in ("SELECT", "INSERT", "UPDATE", "DELETE")
             )
-            for t in [*ALL_TABLES, "worker_state"]
+            for t in [*ALL_TABLES, "worker_state", "reconcile_cursor"]
         }
         columns = {
             (t, col): has(

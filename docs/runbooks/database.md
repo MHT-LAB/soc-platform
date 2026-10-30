@@ -15,8 +15,10 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call four functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case` and `close_case` (a note is required). Staff view across clients; per-client roles come with sign-in. |
 | `soc_console_writer` | nobody (never logs in) | Owns those four functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; each behind an RLS policy for this role. |
 | `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, each behind an RLS policy for this role. No `DELETE`. |
+| `soc_reconcile` | the catch-up worker (migration `0006`; its login comes with the worker) | **No table privileges.** It can call `ingest_alert()` (the same insert as the webhook, so a detection fetched later is attributed and de-duplicated the same way) and three cursor functions: `reconcile_cursor_get`, `reconcile_cursor_advance` (only forward, never past the present) and `reconcile_cursor_fail` (a short, cleaned failure code; never moves the cursor). |
+| `soc_reconcile_writer` | nobody (never logs in) | Owns the three cursor functions. Table access: `SELECT (id, slug, enabled)` on `source` and `SELECT`/`INSERT`/`UPDATE` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
 
-All seven service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
+All nine service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
 `CREATEROLE` or `CREATEDB`. Roles are cluster-wide, so they can already exist: if one has
 any of those (or a `*_writer` role can log in), the migration stops instead of reusing it. Deploy gives each a login and a password
 from the secrets manager; no credential is in this repo.

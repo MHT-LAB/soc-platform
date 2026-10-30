@@ -113,7 +113,7 @@ def test_migrations_apply_and_create_every_table(db: TestDb) -> None:
         tables = {
             r[0] for r in c.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         }
-    assert tables - {"alembic_version"} == {*ALL_TABLES, "worker_state"}
+    assert tables - {"alembic_version"} == {*ALL_TABLES, "worker_state", "reconcile_cursor"}
 
 
 def test_unassigned_client_is_seeded(db: TestDb) -> None:
@@ -458,6 +458,8 @@ SERVICE_ROLES = (
     "soc_worker_writer",
     "soc_console",
     "soc_console_writer",
+    "soc_reconcile",
+    "soc_reconcile_writer",
 )
 
 
@@ -505,7 +507,9 @@ def test_migrations_run_as_a_non_superuser_owner() -> None:
 
 
 @pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS", "CREATEROLE", "CREATEDB"])
-@pytest.mark.parametrize("role", ["soc_app", "soc_ingest", "soc_worker", "soc_console"])
+@pytest.mark.parametrize(
+    "role", ["soc_app", "soc_ingest", "soc_worker", "soc_console", "soc_reconcile"]
+)
 def test_a_privileged_existing_role_stops_the_migration(
     db: TestDb, role: str, attribute: str
 ) -> None:
@@ -523,7 +527,10 @@ def test_a_privileged_existing_role_stops_the_migration(
             admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
 
 
-@pytest.mark.parametrize("writer", ["soc_ingest_writer", "soc_worker_writer", "soc_console_writer"])
+@pytest.mark.parametrize(
+    "writer",
+    ["soc_ingest_writer", "soc_worker_writer", "soc_console_writer", "soc_reconcile_writer"],
+)
 def test_a_writer_role_that_can_log_in_stops_the_migration(db: TestDb, writer: str) -> None:
     params = _admin_params()
     name = f"soc_test_{uuid.uuid4().hex[:12]}"

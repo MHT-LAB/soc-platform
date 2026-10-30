@@ -75,7 +75,7 @@ def db() -> Iterator[TestDb]:
     soc_db.upgrade(test_db.sqlalchemy_url())
     # Roles are cluster-wide; give them a login so tests connect as the real thing.
     with test_db.connect() as admin:
-        for role in ("soc_app", "soc_ingest", "soc_worker", "soc_console"):
+        for role in ("soc_app", "soc_ingest", "soc_worker", "soc_console", "soc_reconcile"):
             admin.execute(f"ALTER ROLE {role} LOGIN PASSWORD '{ROLE_PASSWORD}'")
     yield test_db
     with psycopg.connect(make_conninfo(**params), autocommit=True) as admin:
