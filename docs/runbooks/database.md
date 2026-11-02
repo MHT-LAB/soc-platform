@@ -417,8 +417,12 @@ only gives the role its login. Lost host: `init-reconcile.sh --restore` and
 
     deploy/soc-compose.sh run --rm reconcile python -m soc_api.reconcile check --minutes 60
         # read-only: auth works? how many detections? which fields does the list view carry?
+    deploy/soc-compose.sh stop reconcile
     deploy/soc-compose.sh run --rm reconcile python -m soc_api.reconcile once
         # one pass now; prints the summary line (windows, listed, kept, inserted, duplicate, ...)
+    deploy/soc-compose.sh start reconcile
+        # soc_reconcile is capped at 3 connections and the running service holds 2, so a
+        # one-off pass beside it fails with db_unavailable when it tries to store
     deploy/soc-compose.sh logs --since 15m reconcile
 
 Failure codes in the log and in `reconcile_cursor.last_error`: `jwt_*` (the key was refused or the
