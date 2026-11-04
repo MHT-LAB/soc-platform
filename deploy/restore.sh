@@ -206,8 +206,29 @@ grep -q 'CREATE ROLE' "$TMP/globals.sql" || fail "roles_dump_has_no_roles"
 if grep -Eqi "PASSWORD +'" "$TMP/globals.sql"; then
   fail "roles_dump_contains_a_password"
 fi
-# every role line must be the plain form below, so it can be turned into "create if missing"
-BAD="$(grep -E '^CREATE ROLE ' "$TMP/globals.sql" | grep -Evc '^CREATE ROLE [A-Za-z_][A-Za-z0-9_]*;$' || true)"
+# The roles file is replayed as the superuser, so every line must be one of the forms
+# pg_dumpall --globals-only writes (checked against the pinned image): comments, SET, the
+# \restrict guard, CREATE ROLE name;, ALTER ROLE name WITH <flags>;, ALTER ROLE name SET
+# <setting>, GRANT role TO role. Anything else (a psql meta-command such as \!, a second
+# statement on a line) is refused. Only the superuser may be given SUPERUSER, BYPASSRLS or
+# REPLICATION, and no role is given a built-in pg_* role (pg_execute_server_program runs
+# programs on the database host): the platform grants none, and a role that gained one here
+# would step around every policy.
+BAD="$(awk '
+  BEGIN { id = "[A-Za-z_][A-Za-z0-9_]*"; val = "('\''[^'\'';]*'\''|[A-Za-z0-9_.$-]+)" }
+  /^$/ || /^--/ { next }
+  /^\\(restrict|unrestrict) [A-Za-z0-9]+$/ { next }
+  /^SET [a-z_]+ = [A-Za-z0-9_'\''.-]+;$/ { next }
+  $0 ~ "^CREATE ROLE " id ";$" { next }
+  $0 ~ "^ALTER ROLE " id " WITH( [A-Z]+| CONNECTION LIMIT -?[0-9]+| VALID UNTIL '\''[^'\'';]*'\'')*;$" {
+    if ($3 != "postgres" && $0 ~ / (SUPERUSER|BYPASSRLS|REPLICATION)( |;)/) { bad++ }
+    next }
+  $0 ~ "^ALTER ROLE " id "( IN DATABASE " id ")? SET [a-z_.]+ (TO|=) " val "(, " val ")*;$" { next }
+  $0 ~ "^GRANT " id " TO " id "( WITH [A-Z]+ (TRUE|FALSE|OPTION)(, [A-Z]+ (TRUE|FALSE|OPTION))*)?( GRANTED BY " id ")?;$" {
+    if ($2 ~ /^pg_/) { bad++ }
+    next }
+  { bad++ }
+  END { print bad + 0 }' "$TMP/globals.sql")"
 [[ "$BAD" == 0 ]] || fail "roles_dump_has_a_line_this_does_not_understand"
 
 # --- refuse unless this is an empty database on a stopped stack ---------------------------

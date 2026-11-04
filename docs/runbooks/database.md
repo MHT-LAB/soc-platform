@@ -533,7 +533,18 @@ settled in the restore drill (note 26, B1e).
 database; stop and ask the owner, do not look for a way round it. `stack_is_running` means step 4
 was skipped. `checksum_does_not_match` means a file was copied badly or changed: copy the set
 again. `could_not_decrypt` means the wrong key or a damaged file. `a_backup_or_restore_is_running`
-means another run holds the lock.
+means another run holds the lock. `roles_dump_has_a_line_this_does_not_understand` means the roles
+file holds something `pg_dumpall` does not write (a psql command, a second statement, a role given
+`SUPERUSER`, `BYPASSRLS`, `REPLICATION` or a built-in `pg_*` role): treat the set as tampered with,
+use an older one and tell the owner. A failure at `step=migrate`, `check` or `start-app` comes after
+the data was loaded, so running the script again is refused (`database_already_has_data`): fix
+the cause (usually a missing owner file) and run `deploy/soc-compose.sh run --rm migrate`, then
+`deploy/soc-compose.sh up -d api console`.
+
+**Only restore a set this platform made.** The checksums catch a damaged copy, not a forged one:
+anyone with the age public key can make a set that decrypts, and the dump is loaded as the
+superuser. Take sets only from `/srv/soc/backups`, the NAS archive or the off-site copy, never
+from a file someone sent.
 
 Checked on real containers by `scripts/test-restore-stack.sh` (CI): a source stack is backed up,
 destroyed and rebuilt on a fresh host from the set; every row, every owner, grant, policy and role

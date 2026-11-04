@@ -22,7 +22,13 @@ BASH = shutil.which("bash") or "/bin/bash"
 SECRET = "AGE-SECRET-KEY-1" + "Q" * 58
 OTHER_SECRET = "AGE-SECRET-KEY-1" + "Z" * 58
 PLAIN_DUMP = "PGDMP-fake-database-dump\nrow: customer-host-17\n"
+# shaped like pg_dumpall --globals-only --no-role-passwords from the pinned image (16.15)
 GLOBALS = (
+    "--\n-- PostgreSQL database cluster dump\n--\n\n"
+    "\\restrict XvI2voZN4o7th9GDbfa3kp6EwY1Tlyeg\n\n"
+    "SET default_transaction_read_only = off;\n\n"
+    "SET client_encoding = 'UTF8';\n"
+    "SET standard_conforming_strings = on;\n\n"
     "CREATE ROLE postgres;\n"
     "ALTER ROLE postgres WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS;\n"
     "CREATE ROLE soc_owner;\n"
@@ -30,7 +36,10 @@ GLOBALS = (
     "CREATE ROLE soc_ingest;\n"
     "ALTER ROLE soc_ingest WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN "
     "CONNECTION LIMIT 10;\n"
+    "ALTER ROLE soc_ingest SET search_path TO 'public';\n"
     "GRANT soc_worker_writer TO soc_owner GRANTED BY postgres;\n"
+    "GRANT soc_worker_writer TO soc_ingest WITH INHERIT TRUE GRANTED BY postgres;\n\n"
+    "\\unrestrict XvI2voZN4o7th9GDbfa3kp6EwY1Tlyeg\n"
 )
 SET = "soc-20261104T061700Z"
 
@@ -574,6 +583,35 @@ def test_a_database_that_will_not_start_is_reported(tmp_path: Path, stubs: Path)
         ),
         (
             {"globals_": GLOBALS + "CREATE ROLE a; DROP DATABASE soc;\n"},
+            "roles_dump_has_a_line_this_does_not_understand",
+        ),
+        # the roles file runs as the superuser: nothing but the forms pg_dumpall writes
+        (
+            {"globals_": GLOBALS + "\\! id > /tmp/owned\n"},
+            "roles_dump_has_a_line_this_does_not_understand",
+        ),
+        (
+            {"globals_": GLOBALS + "DROP DATABASE soc;\n"},
+            "roles_dump_has_a_line_this_does_not_understand",
+        ),
+        (
+            {"globals_": GLOBALS + "ALTER ROLE soc_ingest WITH SUPERUSER;\n"},
+            "roles_dump_has_a_line_this_does_not_understand",
+        ),
+        (
+            {"globals_": GLOBALS + "ALTER ROLE soc_ingest WITH NOSUPERUSER BYPASSRLS LOGIN;\n"},
+            "roles_dump_has_a_line_this_does_not_understand",
+        ),
+        (
+            {"globals_": GLOBALS + "ALTER ROLE soc_ingest SET search_path TO 'x'; DROP TABLE x;\n"},
+            "roles_dump_has_a_line_this_does_not_understand",
+        ),
+        (
+            {"globals_": GLOBALS + "GRANT pg_execute_server_program TO soc_ingest; SELECT 1;\n"},
+            "roles_dump_has_a_line_this_does_not_understand",
+        ),
+        (
+            {"globals_": GLOBALS + "GRANT pg_execute_server_program TO soc_ingest;\n"},
             "roles_dump_has_a_line_this_does_not_understand",
         ),
     ],
