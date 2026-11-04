@@ -465,7 +465,8 @@ of the key: it can write backups and cannot read them.
     systemctl enable --now soc-backup.timer
 
 **Checks:** `ls -l /srv/soc/backups`, `systemctl list-timers soc-backup.timer`, and
-`(cd /srv/soc/backups && sha256sum -c soc-<time>.sha256)`. The timer avoids the host's container
-backup window (02:00 onward), which freezes the container while it copies it.
+`(cd /srv/soc/backups && sha256sum -c soc-<time>.sha256)`. The timer runs at 00:17, 06:17, 12:17
+and 18:17 America/New_York (the PVE host's zone, written into the timer), clear of the host's
+container backup window (02:00 onward), which freezes the container while it copies it.
 
 Restoring from these files, the alert when they stop, and the off-site copy are separate steps.

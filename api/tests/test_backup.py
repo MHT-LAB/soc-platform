@@ -379,11 +379,12 @@ def test_a_lock_left_by_a_dead_run_is_taken_over(tmp_path: Path, stubs: Path) ->
 
 
 @not_root
-@pytest.mark.skipif(
-    not (Path("/usr/bin/age").exists() and Path("/usr/bin/age-keygen").exists()),
-    reason="age is not installed",
-)
 def test_the_real_age_round_trip(tmp_path: Path, stubs: Path) -> None:
+    if not (Path("/usr/bin/age").exists() and Path("/usr/bin/age-keygen").exists()):
+        # CI installs age and sets this, so the one test of the real tool can't skip there
+        if os.environ.get("SOC_REQUIRE_AGE"):
+            pytest.fail("SOC_REQUIRE_AGE is set but age is not installed")
+        pytest.skip("age is not installed")
     pair = subprocess.run(  # noqa: S603
         ["/usr/bin/age-keygen"], capture_output=True, text=True, check=True
     )
@@ -526,7 +527,10 @@ def test_the_timer_runs_every_six_hours_and_never_in_the_hosts_backup_window() -
     text = (DEPLOY / "systemd" / "soc-backup.timer").read_text()
     assert "Persistent=true" in text  # a missed run (host off) is made up at boot
     cal = next(x for x in text.splitlines() if x.startswith("OnCalendar="))
-    hours = cal.split()[1].split(":")[0].split(",")
+    parts = cal.split()
+    hours = parts[1].split(":")[0].split(",")
     assert [int(h) for h in hours] == [0, 6, 12, 18]
-    # the host's container backup starts at 02:00 and froze CT 110 until about 03:30
+    # the host's container backup starts at 02:00 and froze CT 110 until about 03:30, in the
+    # PVE host's zone: without the same zone here, 06:17 UTC is 02:17 in summer time
+    assert parts[-1] == "America/New_York"
     assert not any(2 <= int(h) <= 3 for h in hours)

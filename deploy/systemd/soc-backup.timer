@@ -1,10 +1,12 @@
-# Every six hours, away from the host's nightly container backup (02:00 onward), which
-# freezes this container while it copies it. UTC.
+# Every six hours, away from the host's nightly container backup (02:00 onward, the PVE
+# host's time, America/New_York), which freezes this container while it copies it. The zone
+# is written out so the hours line up with that job whatever zone the container uses, and
+# across daylight saving time.
 [Unit]
 Description=SOC database backup, every six hours
 
 [Timer]
-OnCalendar=*-*-* 00,06,12,18:17:00
+OnCalendar=*-*-* 00,06,12,18:17:00 America/New_York
 RandomizedDelaySec=120
 Persistent=true
 
