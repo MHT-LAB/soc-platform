@@ -1,0 +1,12 @@
+# Every six hours, away from the host's nightly container backup (02:00 onward), which
+# freezes this container while it copies it. UTC.
+[Unit]
+Description=SOC database backup, every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:17:00
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target
