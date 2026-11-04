@@ -1,0 +1,20 @@
+# One encrypted database backup (deploy/backup.sh). Started by soc-backup.timer; run it by
+# hand with `systemctl start soc-backup.service`, read the result with
+# `journalctl -u soc-backup.service -n 20`. Install: see docs/runbooks/database.md.
+[Unit]
+Description=SOC database backup (encrypted dump)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/soc-platform/deploy/backup.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

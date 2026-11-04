@@ -48,6 +48,8 @@ jobs:
       SOC_TEST_DATABASE_URL: postgresql://postgres:ci-only@127.0.0.1:5432/postgres
       # Missing database config fails the job instead of skipping the schema tests.
       SOC_REQUIRE_DB: "1"
+      # ...and a missing age fails the real encryption test instead of skipping it.
+      SOC_REQUIRE_AGE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,6 +57,8 @@ jobs:
       - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           version: ${{ env.UV_VERSION }}
+      - name: install age (deploy/backup.sh encrypts with it)
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends age
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .

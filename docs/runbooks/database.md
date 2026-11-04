@@ -429,3 +429,44 @@ Failure codes in the log and in `reconcile_cursor.last_error`: `jwt_*` (the key 
 token reply was wrong), `http_401/403/429/4xx/5xx`, `timeout`, `network`, `redirect`, `too_large`,
 `bad_json`, `bad_shape`, `bad_cursor`, `too_many_pages`, `too_many_items`, `unknown_source` (the
 configured slug is not an enabled source), `db_error`, `db_unavailable`, `internal`.
+
+## Backups
+
+The database is exported every six hours, encrypted, and the export stays on the host for the
+container backup (and, later, an off-site copy) to carry away. The host holds only the public half
+of the key: it can write backups and cannot read them.
+
+* **What a run does** (`deploy/backup.sh`, root; the timer in `deploy/systemd`). It refuses unless
+  the database is healthy and at least `SOC_BACKUP_MIN_FREE_MB` (default 500) is free. It dumps the
+  database and, separately, the roles (`--no-role-passwords`: logins are re-created from the
+  secrets manager, never from a backup), checks both are readable, encrypts them to
+  `env/backup-age.pub` and writes a checksum file last, so a set is complete exactly when its
+  `.sha256` exists. It keeps the newest `SOC_BACKUP_KEEP` sets (default 8, two days) and never
+  overwrites a file. The plain dumps exist only in a mode-700 temporary folder, removed on every exit.
+  One line is printed: `backup outcome=ok set=... bytes=... kept=...`, or
+  `backup outcome=failed step=... reason=...` on stderr with a non-zero exit.
+* **Files** in `/srv/soc/backups` (mode 700, files 600): `soc-<UTC time>.dump.age`,
+  `soc-<UTC time>.globals.sql.age`, `soc-<UTC time>.sha256`.
+* **The key.** `deploy/init-backup.sh` makes an `age` key pair, keeps the public key in
+  `env/backup-age.pub` and prints the private key **once**, never to a file. Store it as
+  `SOC_BACKUP_AGE_KEY` in the secrets manager and on paper; also store `SOC_BACKUP_AGE_PUB` (not
+  secret). Whoever holds the private key can read every backup; without it none can be read.
+  Lost host: `init-backup.sh --restore` rebuilds the public key file from `SOC_BACKUP_AGE_PUB`.
+  Never run `init-backup.sh` a second time to "fix" something: a new key cannot read the old backups.
+
+**Set it up (root on the host, once, after `init-secrets.sh`):**
+
+    apt install age
+    deploy/init-backup.sh           # prints the private key once; save it, then clear the screen
+    install -m 644 deploy/systemd/soc-backup.service deploy/systemd/soc-backup.timer /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl start soc-backup.service     # a first run now
+    journalctl -u soc-backup.service -n 20
+    systemctl enable --now soc-backup.timer
+
+**Checks:** `ls -l /srv/soc/backups`, `systemctl list-timers soc-backup.timer`, and
+`(cd /srv/soc/backups && sha256sum -c soc-<time>.sha256)`. The timer runs at 00:17, 06:17, 12:17
+and 18:17 America/New_York (the PVE host's zone, written into the timer), clear of the host's
+container backup window (02:00 onward), which freezes the container while it copies it.
+
+Restoring from these files, the alert when they stop, and the off-site copy are separate steps.
