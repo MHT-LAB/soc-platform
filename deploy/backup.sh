@@ -12,7 +12,9 @@
 #   4. encrypts both to the public key in env/backup-age.pub (init-backup.sh): the host can
 #      encrypt but never decrypt; the private key is in the secrets manager and on paper;
 #   5. writes a checksum file last, so a set is complete exactly when its checksum exists;
-#   6. keeps the newest SOC_BACKUP_KEEP complete sets (default 8) and removes the rest.
+#   6. keeps the newest SOC_BACKUP_KEEP complete sets (default 8) and removes the rest;
+#   7. records the good dump in the database (backup_mark_ok, as the superuser over the
+#      same socket), which is what the pager's "backup older than 13 hours" check reads.
 #
 # Files, in $SOC_STATE_DIR/backups (mode 700), each mode 600:
 #   soc-<UTC time>.dump.age   soc-<UTC time>.globals.sql.age   soc-<UTC time>.sha256
@@ -195,5 +197,12 @@ if (( KEPT > KEEP )); then
   KEPT=$KEEP
 fi
 
-MOVED="" # done: nothing to take back
+# The set is complete and checked: keep it whatever happens next. Then tell the database,
+# so the pager knows the last good dump is fresh. If that call fails the run fails (the
+# timer shows it, and the pager goes stale in 13 hours), but the good set stays.
+MOVED=""
+STEP=mark
+[[ "$BYTES" =~ ^[0-9]+$ ]] && (( BYTES > 0 )) || fail "bad_dump_size"
+"$COMPOSE" exec -T db psql -U postgres -d soc -v ON_ERROR_STOP=1 -qAt \
+  -c "SELECT backup_mark_ok($BYTES)" >/dev/null 2>&1 || fail "could_not_record_the_dump"
 echo "backup outcome=ok set=$NAME bytes=$BYTES kept=$KEPT"

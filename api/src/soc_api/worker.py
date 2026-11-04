@@ -294,6 +294,12 @@ class Db:
         quiet = rows[0][1]
         return int(rows[0][0]), None if quiet is None else float(quiet)
 
+    def backup_health(self) -> tuple[float, int | None]:
+        """(seconds since the last good dump or since the migration, size of that dump or None)."""
+        _, rows = self._run("SELECT age_s, bytes FROM backup_health()")
+        size = rows[0][1]
+        return float(rows[0][0]), None if size is None else int(size)
+
     def due_page_count(self) -> int:
         _, rows = self._run("SELECT due_page_count()")
         return int(rows[0][0])
@@ -336,6 +342,7 @@ class Limits:
     repage_second_s: float = 3600.0
     stale_check_s: float = 300.0
     reconcile_stale_s: float = 1800.0  # the catch-up worker runs every few minutes
+    backup_stale_s: float = 13 * 3600.0  # the dump runs every 6 h: two missed runs
     late_after_s: float = LATE_AFTER_S
     retry_notice_s: float = 60.0  # between tries of a notice that could not be sent
 
@@ -346,7 +353,20 @@ STALE_TEXT = {
     "caser_behind": "New alerts are not becoming cases (over 10 minutes behind).",
     "db_unreachable": "The pager cannot reach its database (over 10 minutes).",
     "reconcile_quiet": "The catch-up worker has not completed a run in over 30 minutes.",
+    "backup_old": "The last good database backup is over 13 hours old.",
 }
+
+
+def backup_line(age_s: float, size: int | None) -> str:
+    """The backup part of the weekly OK text: size and age of the last good dump."""
+    if size is None:
+        return "backup: none yet"
+    if size >= 1_000_000:
+        shown = f"{size / 1_000_000:.1f} MB"
+    else:
+        shown = f"{max(size // 1000, 1)} kB"
+    hours = int(age_s // 3600)
+    return f"backup: {shown}, {hours} h ago" if hours >= 1 else f"backup: {shown}, under 1 h ago"
 
 
 class Worker:
@@ -529,7 +549,8 @@ class Worker:
         c = self.db.heartbeat_counts(since)
         return (
             f"7d: {c['alerts_received']} alerts, {c['cases_opened']} cases, "
-            f"{c['pages_sent']} pages sent, {c['pages_failed']} failed"
+            f"{c['pages_sent']} pages sent, {c['pages_failed']} failed; "
+            + backup_line(*self.db.backup_health())
         )
 
     def send_ok(self, since: datetime) -> Delivery:
@@ -557,12 +578,14 @@ class Worker:
     def _stale(self, now: datetime) -> None:
         c = self.db.heartbeat_counts(now)
         sources, quiet = self.db.reconcile_health()
+        backup_age, _ = self.db.backup_health()
         after = self.limits.stale_after_s
         firing = {
             "pages_pending": (c["oldest_pending_page_s"] or 0) > after,
             "page_failed": (c["failed_last_24h"] or 0) > 0,
             "caser_behind": (c["oldest_unassigned_alert_s"] or 0) > after,
             "reconcile_quiet": sources > 0 and (quiet or 0) > self.limits.reconcile_stale_s,
+            "backup_old": backup_age > self.limits.backup_stale_s,
         }
         for reason, is_firing in firing.items():
             if not is_firing:

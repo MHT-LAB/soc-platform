@@ -557,7 +557,7 @@ def test_the_weekly_ok_is_armed_first_then_sent_once_per_slot(
     worker.tick()
     oks = [p for p in ntfy_server.pushes if p["title"] == "SOC OK"]
     assert len(oks) == 1 and oks[0]["priority"] == 2
-    assert oks[0]["message"] == "7d: 1 alerts, 1 cases, 1 pages sent, 0 failed"
+    assert oks[0]["message"] == ("7d: 1 alerts, 1 cases, 1 pages sent, 0 failed; backup: none yet")
     worker.tick()
     clock.advance(hours=3)
     worker.tick()
@@ -1171,3 +1171,110 @@ def test_the_workers_lateness_limit_reaches_the_title(fx: Fixture, ntfy_server: 
     fx.run("UPDATE alert SET detected_at = received_at - interval '20 minutes'")
     make_worker(fx, ntfy_server, limits=w.Limits(late_after_s=3600)).tick()
     assert ntfy_server.titles() == ["client-a: Rule One"]
+
+
+# ---- backups (B1b) ----
+
+
+def backup_at(
+    fx: Fixture,
+    hours_ago: float | None,
+    size: int | None = 5_000_000,
+    *,
+    started_hours_ago: float = 0,
+) -> None:
+    """Set the backup state as the owner: when the last good dump was, and when it began."""
+    fx.run(
+        "UPDATE backup_state SET "
+        "last_ok_at = CASE WHEN %s::float8 IS NULL THEN NULL "
+        "ELSE now() - make_interval(secs => %s::float8 * 3600) END, "
+        "last_bytes = %s, started_at = now() - make_interval(secs => %s::float8 * 3600)",
+        (hours_ago, hours_ago, size if hours_ago is not None else None, started_hours_ago),
+    )
+
+
+def backup_pushes(fake: FakeNtfy) -> list[dict[str, Any]]:
+    return [p for p in stale_pushes(fake) if p["message"] == w.STALE_TEXT["backup_old"]]
+
+
+def test_a_fresh_database_with_no_backup_yet_is_not_stale(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    make_worker(fx, ntfy_server).tick()
+    assert stale_pushes(ntfy_server) == []
+
+
+def test_a_last_good_backup_over_13_hours_old_raises_stale(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    backup_at(fx, 13.1, started_hours_ago=100)
+    make_worker(fx, ntfy_server).tick()
+    [push] = backup_pushes(ntfy_server)
+    assert push["priority"] == 5 and "13 hours" in push["message"]
+
+
+def test_a_backup_under_13_hours_old_is_fine(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    backup_at(fx, 12.9, started_hours_ago=100)
+    make_worker(fx, ntfy_server).tick()
+    assert backup_pushes(ntfy_server) == []
+
+
+def test_a_database_that_never_got_a_backup_goes_stale_13_hours_after_it_began(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    backup_at(fx, None, None, started_hours_ago=12.9)
+    make_worker(fx, ntfy_server).tick()
+    assert backup_pushes(ntfy_server) == []
+    backup_at(fx, None, None, started_hours_ago=13.1)
+    make_worker(fx, ntfy_server).tick()
+    assert len(backup_pushes(ntfy_server)) == 1
+
+
+def test_the_backup_limit_can_be_changed(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    backup_at(fx, 1, started_hours_ago=100)
+    make_worker(fx, ntfy_server, limits=w.Limits(backup_stale_s=1800)).tick()
+    assert len(backup_pushes(ntfy_server)) == 1
+
+
+def test_the_backup_stale_push_repeats_only_every_six_hours_and_stops_on_recovery(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    backup_at(fx, 20, started_hours_ago=100)
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    worker.tick()
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(backup_pushes(ntfy_server)) == 1
+    clock.advance(hours=6)
+    worker.tick()
+    assert len(backup_pushes(ntfy_server)) == 2
+    fx.run("SELECT backup_mark_ok(7000000)")  # a good dump arrives
+    clock.advance(hours=7)
+    worker.tick()
+    assert len(backup_pushes(ntfy_server)) == 2
+
+
+@pytest.mark.parametrize(
+    ("age_s", "size", "text"),
+    [
+        (3 * 3600 + 5, 5_240_000, "backup: 5.2 MB, 3 h ago"),
+        (59 * 60, 48_000_000, "backup: 48.0 MB, under 1 h ago"),
+        (26 * 3600, 900_000, "backup: 900 kB, 26 h ago"),
+        (100.0, 10, "backup: 1 kB, under 1 h ago"),
+        (7 * 3600, None, "backup: none yet"),
+    ],
+)
+def test_the_backup_part_of_the_weekly_ok_reads_plainly(
+    age_s: float, size: int | None, text: str
+) -> None:
+    assert w.backup_line(age_s, size) == text
+
+
+def test_the_weekly_ok_says_how_big_and_how_old_the_last_backup_is(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    backup_at(fx, 3.5, 5_240_000, started_hours_ago=100)
+    worker = make_worker(fx, ntfy_server)
+    msg = worker.ok_message(datetime.now(UTC) - timedelta(days=7))
+    assert msg.endswith("; backup: 5.2 MB, 3 h ago")

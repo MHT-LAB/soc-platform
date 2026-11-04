@@ -113,7 +113,12 @@ def test_migrations_apply_and_create_every_table(db: TestDb) -> None:
         tables = {
             r[0] for r in c.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         }
-    assert tables - {"alembic_version"} == {*ALL_TABLES, "worker_state", "reconcile_cursor"}
+    assert tables - {"alembic_version"} == {
+        *ALL_TABLES,
+        "worker_state",
+        "reconcile_cursor",
+        "backup_state",
+    }
 
 
 def test_unassigned_client_is_seeded(db: TestDb) -> None:

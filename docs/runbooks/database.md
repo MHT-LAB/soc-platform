@@ -226,10 +226,12 @@ read nothing, and a stopped database gives a 503 while `/healthz` stays up.
 ## The pager worker on the host
 
 `deploy/compose.yml` has a `worker` service (profile `worker`): alerts become cases, cases
-become phone pushes (ntfy), plus a weekly "SOC OK" push (Sunday 18:00 America/New_York) and
+become phone pushes (ntfy), plus a weekly "SOC OK" push (Sunday 18:00 America/New_York; it ends with the last good
+backup's size and age, or `backup: none yet`) and
 a "SOC STALE" push when a page has waited over ten minutes, a page failed in the last day,
 the caser is behind, the catch-up worker has a cursor but no good run for over 30 minutes,
-or the worker has not reached the database for over ten minutes (that one goes straight to
+the last good database backup is over 13 hours old (two missed six-hourly runs; until the
+first backup the clock runs from when migration 0008 was applied), or the worker has not reached the database for over ten minutes (that one goes straight to
 the push server, since every other check needs the database). Each reason pushes at most
 once per six hours. A first page whose alert reached us more than five minutes after it was
 detected (after an outage, through the catch-up worker) is titled `LATE:`; re-sends say
@@ -443,6 +445,10 @@ of the key: it can write backups and cannot read them.
   `env/backup-age.pub` and writes a checksum file last, so a set is complete exactly when its
   `.sha256` exists. It keeps the newest `SOC_BACKUP_KEEP` sets (default 8, two days) and never
   overwrites a file. The plain dumps exist only in a mode-700 temporary folder, removed on every exit.
+  Last, it records the good dump in the database (`backup_mark_ok`, as the superuser over the
+  container's socket; no service role may call it), which is what the pager's 13-hour STALE
+  check and the weekly OK line read. If that call fails the run fails with `step=mark`, but the
+  verified set is kept.
   One line is printed: `backup outcome=ok set=... bytes=... kept=...`, or
   `backup outcome=failed step=... reason=...` on stderr with a non-zero exit.
 * **Files** in `/srv/soc/backups` (mode 700, files 600): `soc-<UTC time>.dump.age`,

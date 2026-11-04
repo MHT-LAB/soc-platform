@@ -49,6 +49,10 @@ case "$cmd" in
     body="$(cat)"
     [[ "$body" != *BAD* ]] || exit 1
     [[ -n "${STUB_NO_TABLES:-}" ]] || echo "; TABLE public alert soc_owner" ;;
+  psql)
+    # backup_mark_ok: record what was asked, so a test can see the call and its arguments
+    [[ -z "${STUB_PSQL_LOG:-}" ]] || echo "$*" >> "$STUB_PSQL_LOG"
+    [[ -z "${STUB_MARK_FAIL:-}" ]] ;;
   *) exit 98 ;;
 esac
 """
@@ -537,3 +541,81 @@ def test_the_timer_runs_every_six_hours_and_never_in_the_hosts_backup_window() -
     # PVE host's zone: without the same zone here, 06:17 UTC is 02:17 in summer time
     assert parts[-1] == "America/New_York"
     assert not any(2 <= int(h) <= 3 for h in hours)
+
+
+# ---- backup.sh: telling the database (B1b) ----
+
+
+def marks(log: Path) -> list[str]:
+    return log.read_text().splitlines() if log.exists() else []
+
+
+@not_root
+def test_a_good_run_records_the_dump_once_as_the_superuser_with_its_size(
+    tmp_path: Path, stubs: Path
+) -> None:
+    host(tmp_path)
+    log = tmp_path / "psql.log"
+    r = run_backup(tmp_path, stubs, SOC_BACKUP_NOW=stamp(1), STUB_PSQL_LOG=str(log))
+    assert r.returncode == 0, r.stderr
+    size = (tmp_path / "backups" / "soc-20261103T000001Z.dump.age").stat().st_size
+    [call] = marks(log)
+    assert "-U postgres" in call and "-d soc" in call and "ON_ERROR_STOP=1" in call
+    assert f"SELECT backup_mark_ok({size})" in call
+    assert f"bytes={size} " in r.stdout
+
+
+@not_root
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"STUB_DB_DOWN": "1"},
+        {"STUB_DUMP_FAIL": "1"},
+        {"STUB_DUMP_EMPTY": "1"},
+        {"STUB_DUMP_BODY": "BAD"},
+        {"STUB_NO_TABLES": "1"},
+        {"STUB_ROLES_FAIL": "1"},
+        {"STUB_ROLES_EMPTY": "1"},
+        {"STUB_ROLE_PASSWORD": "1"},
+        {"STUB_AGE_FAIL": "1"},
+    ],
+)
+def test_a_dump_that_failed_a_check_is_never_recorded_as_good(
+    tmp_path: Path, stubs: Path, broken: dict[str, str]
+) -> None:
+    host(tmp_path)
+    log = tmp_path / "psql.log"
+    r = run_backup(tmp_path, stubs, STUB_PSQL_LOG=str(log), **broken)
+    assert r.returncode != 0
+    assert marks(log) == []
+
+
+@not_root
+def test_a_run_that_cannot_record_the_dump_fails_but_keeps_the_good_set(
+    tmp_path: Path, stubs: Path
+) -> None:
+    host(tmp_path)
+    log = tmp_path / "psql.log"
+    r = run_backup(
+        tmp_path, stubs, SOC_BACKUP_NOW=stamp(1), STUB_PSQL_LOG=str(log), STUB_MARK_FAIL="1"
+    )
+    assert r.returncode != 0
+    assert "outcome=failed step=mark reason=could_not_record_the_dump" in r.stderr
+    assert r.stdout == ""
+    assert sets(tmp_path) == ["soc-20261103T000001Z"]  # the verified set is not thrown away
+    assert len(marks(log)) == 1
+
+
+@not_root
+def test_the_recording_call_prints_nothing_secret_and_leaves_no_extra_files(
+    tmp_path: Path, stubs: Path
+) -> None:
+    host(tmp_path)
+    r = run_backup(tmp_path, stubs, SOC_BACKUP_NOW=stamp(1), STUB_PSQL_LOG=str(tmp_path / "l"))
+    assert r.returncode == 0
+    assert "postgres" not in r.stdout + r.stderr and "backup_mark_ok" not in r.stdout + r.stderr
+    assert sorted(p.name for p in (tmp_path / "backups").iterdir()) == [
+        "soc-20261103T000001Z.dump.age",
+        "soc-20261103T000001Z.globals.sql.age",
+        "soc-20261103T000001Z.sha256",
+    ]
