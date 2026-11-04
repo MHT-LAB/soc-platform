@@ -172,6 +172,10 @@ jobs:
           scripts/test-console-isolation.sh soc-api:ci
       - name: database layer (compose db, migrate, seed, signed delivery, outage, isolation)
         run: scripts/test-db-stack.sh soc-api:ci
+      - name: install age (the restore test makes and reads real encrypted backups)
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends age
+      - name: backup and restore (real backup, destroyed stack, fresh host, row-for-row comparison)
+        run: scripts/test-restore-stack.sh soc-api:ci
       - name: public app starts in prod without a console allowlist
         run: |
           docker run -d --name pubnoallow --read-only --tmpfs /tmp --cap-drop ALL -p 127.0.0.1:8090:8080 soc-api:ci
