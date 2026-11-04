@@ -471,7 +471,10 @@ def test_init_needs_the_other_secrets_to_exist_first(tmp_path: Path, stubs: Path
 @not_root
 def test_init_without_age_creates_nothing(tmp_path: Path) -> None:
     host(tmp_path, key=False)
-    r = run_init(tmp_path, None)
+    # a PATH with no age on it, so the test holds where age is installed (CI installs it)
+    empty = tmp_path / "stubs"
+    empty.mkdir()
+    r = run_init(tmp_path, None, SOC_TEST_PATH=str(empty))
     assert r.returncode == 1 and "apt install age" in r.stderr
     assert files(tmp_path) == {"env", "env/db-owner.env"}
 
