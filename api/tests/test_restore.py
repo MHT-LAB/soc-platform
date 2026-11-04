@@ -424,6 +424,27 @@ def test_a_wrong_key_stops_at_decryption_before_the_database_is_touched(
 
 
 @not_root
+@pytest.mark.parametrize("victim", [f"{SET}.dump.age", f"{SET}.globals.sql.age"])
+def test_one_file_that_cannot_be_decrypted_stops_the_run_even_if_the_other_can(
+    tmp_path: Path, stubs: Path, victim: str
+) -> None:
+    host(tmp_path)
+    sums = make_set(tmp_path / "backups")
+    folder = tmp_path / "backups"
+    (folder / victim).write_text("not an age file at all\n")  # the checksum is made to match
+    sums.write_text(
+        "".join(
+            f"{hashlib.sha256((folder / name).read_bytes()).hexdigest()}  {name}\n"
+            for name in (f"{SET}.dump.age", f"{SET}.globals.sql.age")
+        )
+    )
+    log = tmp_path / "calls.log"
+    r = run_restore(tmp_path, stubs, STUB_LOG=str(log))
+    assert r.returncode != 0 and "step=decrypt reason=could_not_decrypt" in r.stderr
+    assert not log.exists() and leftovers(tmp_path) == []
+
+
+@not_root
 @pytest.mark.parametrize(
     "typed",
     [
