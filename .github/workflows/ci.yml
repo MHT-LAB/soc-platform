@@ -50,6 +50,8 @@ jobs:
       SOC_REQUIRE_DB: "1"
       # ...and a missing age fails the real encryption test instead of skipping it.
       SOC_REQUIRE_AGE: "1"
+      # ...and so does a missing restic for the off-site tests (real repository, real restore).
+      SOC_REQUIRE_RESTIC: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,8 +59,8 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
-      - name: install age (deploy/backup.sh encrypts with it)
-        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends age
+      - name: install age and restic (deploy/backup.sh encrypts with age; offsite.sh sends with restic)
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends age restic
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -176,6 +178,8 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends age
       - name: backup and restore (real backup, destroyed stack, fresh host, row-for-row comparison)
         run: scripts/test-restore-stack.sh soc-api:ci
+      - name: off-site copy container (pinned restic image, egress only, read-only backup folder)
+        run: scripts/test-offsite-stack.sh
       - name: public app starts in prod without a console allowlist
         run: |
           docker run -d --name pubnoallow --read-only --tmpfs /tmp --cap-drop ALL -p 127.0.0.1:8090:8080 soc-api:ci
