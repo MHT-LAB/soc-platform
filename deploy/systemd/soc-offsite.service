@@ -1,0 +1,24 @@
+# Send the encrypted backup sets off-site (deploy/offsite.sh). Started by soc-backup.service
+# when a backup finishes well; run it by hand with `systemctl start soc-offsite.service`,
+# read the result with `journalctl -u soc-offsite.service -n 20`. A failure shows in
+# `systemctl --failed` and does not touch the local backups. On a host without
+# env/offsite.env (init-offsite.sh) the condition below skips it quietly.
+# Install: see docs/runbooks/database.md.
+[Unit]
+Description=SOC off-site backup copy (restic to B2)
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/srv/soc/env/offsite.env
+
+[Service]
+Type=oneshot
+ExecStart=/opt/soc-platform/deploy/offsite.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=45min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

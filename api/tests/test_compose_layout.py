@@ -108,7 +108,7 @@ def test_the_worker_is_on_the_database_and_egress_networks_and_never_on_default(
     assert WORKER["networks"] == ["db", "egress"]  # `default` is the tunnel's network
     assert COMPOSE["networks"]["egress"] == {}  # outbound for pushes: not internal
     on_egress = {n for n, s in SERVICES.items() if "egress" in s.get("networks", [])}
-    assert on_egress == {"worker", "reconcile"}
+    assert on_egress == {"worker", "reconcile", "offsite"}
     assert "networks" not in OVERLAY["services"]["tunnel"]
 
 

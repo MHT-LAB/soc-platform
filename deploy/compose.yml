@@ -242,6 +242,37 @@ services:
       retries: 3
       start_period: 120s
 
+  # One-off: `soc-compose.sh run --rm offsite <restic command>` (deploy/offsite.sh does it)
+  # sends the encrypted backup sets in $SOC_STATE_DIR/backups to the off-site restic
+  # repository. Its own profile and `restart: no`, so `up -d` never starts it. It is on
+  # `egress` ONLY: no database network (so no way to the database), not the tunnel's
+  # network, nothing published. It sees the backup folder read-only, and the only
+  # secrets it holds are the repository's own (env/offsite.env: a storage key that can
+  # add files but not delete them, and the repository password). The files are already
+  # age-encrypted; restic encrypts again. The image is digest-pinned.
+  offsite:
+    profiles: [offsite]
+    image: restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+    restart: "no"
+    entrypoint: ["/usr/bin/restic"]
+    command: ["version"]
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/offsite.env
+        required: true
+    volumes:
+      - ${SOC_STATE_DIR:-/srv/soc}/backups:/backups:ro
+    networks:
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+
   # One-off: `docker compose run --rm migrate` applies the schema and gives
   # soc_ingest its login (python -m soc_api.db deploy), as the owner role. Needs
   # db-owner.env (SOC_MIGRATE_URL, SOC_INGEST_DB_PASSWORD). To seed a tenant:
@@ -291,5 +322,6 @@ networks:
   dbhost:
     driver_opts:
       com.docker.network.bridge.enable_ip_masquerade: "false"
-  # Outbound only, for the worker's pushes. Only the worker is on it.
+  # Outbound only: the worker's pushes, the catch-up worker's API calls and the off-site
+  # copy. None of them is the tunnel's network, and only the first two are database clients.
   egress: {}
