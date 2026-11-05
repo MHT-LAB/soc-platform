@@ -5,6 +5,9 @@
 Description=SOC database backup (encrypted dump)
 After=docker.service
 Requires=docker.service
+# A backup that finished well starts the off-site copy (soc-offsite.service, which does
+# nothing on a host without env/offsite.env). A failed backup sends nothing.
+OnSuccess=soc-offsite.service
 
 [Service]
 Type=oneshot

@@ -550,3 +550,101 @@ Checked on real containers by `scripts/test-restore-stack.sh` (CI): a source sta
 destroyed and rebuilt on a fresh host from the set; every row, every owner, grant, policy and role
 matches; the old password of a login without an owner file does not work; a second restore is
 refused and changes nothing.
+
+### Off-site copy (restic to Backblaze B2)
+
+After every good backup, the encrypted sets are also sent to a private storage bucket, so losing the
+host, the NAS and the house at once still leaves a copy. The sets are already `age`-encrypted (the
+host cannot decrypt them); restic encrypts the repository again with its own password.
+
+* **What a run does** (`deploy/offsite.sh`, root; `soc-offsite.service`, which `soc-backup.service`
+  starts through `OnSuccess=` when a backup finishes well). It checks `env/offsite.env` (mode 600,
+  exactly four lines, the address must be a Backblaze `s3.<region>.backblazeb2.com` bucket), takes
+  the same lock as `backup.sh` and `restore.sh`, then runs restic in a short-lived container on
+  the `egress` network only: it cannot reach the database, sees `/srv/soc/backups` read-only, and
+  holds only the repository's own key. It backs up the folder (leaving out the lock and half-written
+  sets), then asks the repository for the snapshot it just made, and only then says
+  `offsite outcome=ok snapshot=... added_bytes=...`. Failures print
+  `offsite outcome=failed step=... reason=...` and exit non-zero.
+* **A failure does not touch the local backups** or the database's record of the last good dump:
+  those were finished before this ran. It shows as a failed unit (`systemctl --failed`,
+  `journalctl -u soc-offsite.service -n 20`); the next backup sends everything again, and restic
+  stores only what is new. **Today nothing pages on an off-site failure** (the pager's backup check
+  watches the local dump only): look at the unit after the first week and when you touch the host.
+  On a host with no `env/offsite.env` the unit is skipped quietly.
+* **Why the key cannot delete.** A thief on the host can add junk to the repository but cannot erase
+  or rewrite history: the storage key has no delete right and the bucket has Object Lock.
+  `restic backup` still takes restic's own lock (it ignores `--no-lock`; only the read-only steps
+  skip the lock). With this key, removing the lock only hides the small file, and the provider
+  keeps the old version until the retention ends. While a backup holds its lock, a prune refuses to
+  start; pruning (below) is still done with the timer stopped.
+
+**The bucket and the two keys (made by hand in the Backblaze console; values never in chat):**
+
+| | Host key (writes) | Prune key (monthly clean-up) |
+|---|---|---|
+| Workflow | `offsite.sh` on CT 110 sends the sets | `restic forget --prune` from the Mac, once a month |
+| Console name | `soc-ct110-offsite-write` | `soc-offsite-prune` |
+| Limited to | the one bucket only | the one bucket only |
+| Allowed | list, read, write | list, read, write, **delete** |
+| Rotation | 90 days | 90 days |
+| Secrets manager (folder `/soc`) | `SOC_OFFSITE_KEY_ID`, `SOC_OFFSITE_APP_KEY` | `SOC_OFFSITE_PRUNE_KEY_ID`, `SOC_OFFSITE_PRUNE_APP_KEY` |
+
+Also in `/soc`: `SOC_OFFSITE_REPOSITORY` and `SOC_OFFSITE_PASSWORD` (the restic repository password;
+also on paper in the safe, beside the age key). Bucket: private, **Object Lock on** with a default
+retention of 30 days, plus a lifecycle rule "keep only the last version" so that deleted files go
+away when the retention ends. Each key also gets its reminders: the secrets manager reminder, a row
+in the rotation register and a calendar event on the rotate-by date.
+
+**Set it up (root on the host, once, after `init-backup.sh`):**
+
+    apt install restic     # only needed to run offsite.sh by hand outside the container: optional
+    export SOC_OFFSITE_REPOSITORY='s3:https://s3.<region>.backblazeb2.com/<bucket>/ct110'
+    export SOC_OFFSITE_KEY_ID='<host key id>'
+    deploy/init-offsite.sh          # asks for the host key (hidden); prints the password once
+    deploy/offsite.sh --init        # creates the empty repository, once
+    install -m 644 deploy/systemd/soc-backup.service deploy/systemd/soc-offsite.service /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl start soc-backup.service    # a backup, which then starts the off-site copy
+    journalctl -u soc-backup.service -u soc-offsite.service -n 20
+
+Lost host: `init-offsite.sh --restore` rebuilds `env/offsite.env` from `SOC_OFFSITE_REPOSITORY`,
+`SOC_OFFSITE_KEY_ID`, `SOC_OFFSITE_APP_KEY` and `SOC_OFFSITE_PASSWORD`. Never run `init-offsite.sh`
+or `offsite.sh --init` a second time to "fix" something: a new password cannot open the old
+repository (both refuse when the file or the repository already exists).
+
+**Monthly prune (Mac, with the prune key; the host key cannot do this).** Keep the newest snapshots
+and thin out the rest:
+
+1. On the host (root): `systemctl stop soc-backup.timer`, then wait until
+   `systemctl is-active soc-backup.service soc-offsite.service` says `inactive` twice.
+2. On the Mac, with the repository address, password and prune key in the environment
+   (`RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, taken from
+   the secrets manager for this shell only):
+
+       restic forget --keep-last 8 --keep-daily 30 --keep-weekly 12 --keep-monthly 12 --prune
+       restic check --read-data-subset=10%
+
+   If prune says the repository is locked and step 1 showed nothing running, a backup was cut
+   off and left its lock: `restic unlock` (removes only stale locks), then run prune again.
+3. On the host (root): `systemctl start soc-backup.timer`.
+
+The 30-day Object Lock means files that prune removes stay in the bucket (hidden, and billed) until
+the retention ends. **To confirm in the restore drill:** that the host key really cannot delete,
+that `init`, `backup` and `snapshots` work with it (uploads into an Object Lock bucket, and the
+backup's lock removed by hiding it), and that prune with the other key frees space after the
+retention.
+
+**Restoring from the off-site copy** (host lost; any machine with `restic` and the secrets-manager
+values; the host key is enough, the prune key also works):
+
+    restic snapshots
+    restic restore latest --target /tmp/offsite --include '/backups/soc-<time>.*'
+    deploy/restore.sh /tmp/offsite/backups/soc-<time>.sha256
+
+then follow "Restore" above (the age private key is typed at the prompt).
+
+Checked by `api/tests/test_offsite.py` (the real script against a stubbed container runtime, and
+against real restic and a local repository) and `scripts/test-offsite-stack.sh` (CI: the pinned
+image under the service's hardening, egress network only, read-only mount, a restic round trip).
+Not checked anywhere until the drill: the real Backblaze bucket, Object Lock and the no-delete key.
