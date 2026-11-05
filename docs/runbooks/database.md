@@ -573,9 +573,11 @@ host cannot decrypt them); restic encrypts the repository again with its own pas
   watches the local dump only): look at the unit after the first week and when you touch the host.
   On a host with no `env/offsite.env` the unit is skipped quietly.
 * **Why the key cannot delete.** A thief on the host can add junk to the repository but cannot erase
-  or rewrite history: the storage key has no delete right and the bucket has Object Lock. For the
-  same reason restic runs with `--no-lock` (releasing its lock file would need a delete). The cost:
-  nothing stops two restic jobs at once, so pruning (below) is done with the timer stopped.
+  or rewrite history: the storage key has no delete right and the bucket has Object Lock.
+  `restic backup` still takes restic's own lock (it ignores `--no-lock`; only the read-only steps
+  skip the lock). With this key, removing the lock only hides the small file, and the provider
+  keeps the old version until the retention ends. While a backup holds its lock, a prune refuses to
+  start; pruning (below) is still done with the timer stopped.
 
 **The bucket and the two keys (made by hand in the Backblaze console; values never in chat):**
 
@@ -623,12 +625,15 @@ and thin out the rest:
        restic forget --keep-last 8 --keep-daily 30 --keep-weekly 12 --keep-monthly 12 --prune
        restic check --read-data-subset=10%
 
+   If prune says the repository is locked and step 1 showed nothing running, a backup was cut
+   off and left its lock: `restic unlock` (removes only stale locks), then run prune again.
 3. On the host (root): `systemctl start soc-backup.timer`.
 
 The 30-day Object Lock means files that prune removes stay in the bucket (hidden, and billed) until
 the retention ends. **To confirm in the restore drill:** that the host key really cannot delete,
-that `init`, `backup` and `snapshots` work with it, and that prune with the other key frees space
-after the retention.
+that `init`, `backup` and `snapshots` work with it (uploads into an Object Lock bucket, and the
+backup's lock removed by hiding it), and that prune with the other key frees space after the
+retention.
 
 **Restoring from the off-site copy** (host lost; any machine with `restic` and the secrets-manager
 values; the host key is enough, the prune key also works):

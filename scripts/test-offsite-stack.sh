@@ -92,7 +92,7 @@ OUT="$(compose run --rm -T --no-deps --entrypoint sh offsite -c "
   set -e
   $STAGE
   /usr/bin/restic init --no-cache > /dev/null
-  /usr/bin/restic backup \$SRC --json --no-lock --no-cache --host soc --tag soc-backup \
+  /usr/bin/restic backup \$SRC --json --no-cache --host soc --tag soc-backup \
     --exclude .lock --exclude '.tmp.*' > /tmp/b.json
   grep -q '\"snapshot_id\"' /tmp/b.json
   /usr/bin/restic check --no-lock --no-cache > /dev/null

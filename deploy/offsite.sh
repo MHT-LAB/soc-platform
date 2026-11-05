@@ -19,9 +19,11 @@
 # The sets are already age-encrypted (this host cannot decrypt them); restic encrypts the
 # repository again with its own password. The storage key can add files but not delete them
 # (and the bucket has Object Lock), so a thief on this host can add junk but cannot erase
-# or rewrite history. That is also why restic runs with --no-lock: taking its lock file
-# would need a delete to release it. The monthly prune (runbook) runs from another machine
-# with a different key, with the backup timer stopped.
+# or rewrite history. The read-only steps run with --no-lock; `restic backup` always takes
+# restic's own lock (it ignores --no-lock), and with this key removing that lock only hides
+# the small file (the provider keeps the old version until the retention ends). While a
+# backup holds it, a prune refuses to start. The monthly prune (runbook) runs from another
+# machine with a different key, with the backup timer stopped.
 #
 # A failure here never touches the local sets or the database's record of the last good
 # dump (backup.sh did both before this ran). It prints one line to stderr and exits non-zero,
@@ -156,7 +158,7 @@ fi
 # --- send and check -----------------------------------------------------------------------
 STEP=backup
 RC=0
-restic backup /backups --json --no-lock --no-cache --host soc --tag soc-backup \
+restic backup /backups --json --no-cache --host soc --tag soc-backup \
   --exclude '.lock' --exclude '.tmp.*' > "$TMP/backup.json" 2>/dev/null || RC=$?
 (( RC == 0 )) || fail "restic_backup_failed_exit_$RC"
 SNAP="$(grep -o '"snapshot_id":"[0-9a-f]\{8,64\}"' "$TMP/backup.json" | tail -n1 | cut -d'"' -f4 || true)"

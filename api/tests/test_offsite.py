@@ -172,9 +172,11 @@ def test_restic_is_asked_for_exactly_what_the_design_says(tmp_path: Path, stubs:
     cat, backup, snap = restic_calls(log)
     # the folder is read through the read-only mount, never the host's path
     assert backup.split()[:2] == ["backup", "/backups"]
-    # a lock file would need a delete to release it, which the storage key does not have
-    for c in (cat, backup, snap):
+    # the read-only steps take no restic lock. `restic backup` always takes one (it ignores
+    # --no-lock), so the flag is not passed there: it would only claim what does not happen
+    for c in (cat, snap):
         assert "--no-lock" in c.split()
+    assert "--no-lock" not in backup.split()
     # the lock file and half-written sets are not sent
     assert "--exclude .lock" in backup and "--exclude .tmp.*" in backup
     assert "--tag soc-backup" in backup
