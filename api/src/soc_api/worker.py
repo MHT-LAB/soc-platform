@@ -357,6 +357,25 @@ STALE_TEXT = {
 }
 
 
+def stale_reasons(
+    counts: dict[str, Any],
+    sources: int,
+    quiet: float | None,
+    backup_age: float,
+    limits: Limits,
+) -> dict[str, bool]:
+    """Which STALE conditions hold right now. The worker pushes on these; the console's
+    banner shows the same ones, so both read the thresholds from here."""
+    after = limits.stale_after_s
+    return {
+        "pages_pending": (counts["oldest_pending_page_s"] or 0) > after,
+        "page_failed": (counts["failed_last_24h"] or 0) > 0,
+        "caser_behind": (counts["oldest_unassigned_alert_s"] or 0) > after,
+        "reconcile_quiet": sources > 0 and (quiet or 0) > limits.reconcile_stale_s,
+        "backup_old": backup_age > limits.backup_stale_s,
+    }
+
+
 def backup_line(age_s: float, size: int | None) -> str:
     """The backup part of the weekly OK text: size and age of the last good dump."""
     if size is None:
@@ -579,14 +598,7 @@ class Worker:
         c = self.db.heartbeat_counts(now)
         sources, quiet = self.db.reconcile_health()
         backup_age, _ = self.db.backup_health()
-        after = self.limits.stale_after_s
-        firing = {
-            "pages_pending": (c["oldest_pending_page_s"] or 0) > after,
-            "page_failed": (c["failed_last_24h"] or 0) > 0,
-            "caser_behind": (c["oldest_unassigned_alert_s"] or 0) > after,
-            "reconcile_quiet": sources > 0 and (quiet or 0) > self.limits.reconcile_stale_s,
-            "backup_old": backup_age > self.limits.backup_stale_s,
-        }
+        firing = stale_reasons(c, sources, quiet, backup_age, self.limits)
         for reason, is_firing in firing.items():
             if not is_firing:
                 continue

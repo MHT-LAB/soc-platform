@@ -83,6 +83,18 @@ class CaseDb:
         except psycopg.Error as exc:
             raise CasesUnavailable from exc
 
+    def console_health(self) -> dict[str, Any]:
+        try:
+            with psycopg.connect(**self._params) as conn, conn.cursor() as cur:
+                cur.execute("SELECT * FROM console_health()")
+                names = [d.name for d in cur.description or []]
+                row = cur.fetchone()
+        except psycopg.Error as exc:
+            raise CasesUnavailable from exc
+        if row is None:
+            raise CasesUnavailable
+        return dict(zip(names, row, strict=True))
+
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         doc = self._one("SELECT get_case(%s)", (case_id,))
         return doc if isinstance(doc, dict) else None
