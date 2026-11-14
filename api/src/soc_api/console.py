@@ -27,7 +27,7 @@ from soc_api.cases import (
     fmt_time,
     parse_case_id,
 )
-from soc_api.config import Settings, get_settings
+from soc_api.config import DEFAULT_ROLE, Settings, get_settings
 from soc_api.text import link_path, visible
 
 HERE = Path(__file__).parent
@@ -50,10 +50,14 @@ CONSOLE_CSP = (
 CASES_CSP = CONSOLE_CSP.replace("form-action 'none'", "form-action 'self'")
 MAX_FORM_BYTES = 8192
 
+# admin is the same as analyst until there are settings to guard.
+ACTING_ROLES = ("admin", "analyst")
+
 router = APIRouter()
 
 
 def tailnet_user(
+    request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     tailscale_user_login: Annotated[str | None, Header()] = None,
 ) -> str:
@@ -69,10 +73,26 @@ def tailnet_user(
                 "personal (untagged) device"
             ),
         )
-    allow = settings.console_allowlist
-    if allow and login not in allow:
+    roles = settings.console_roles
+    if roles and login not in roles:
         raise HTTPException(status_code=403, detail="not on the console allowlist")
+    # With no allow-list (dev only) everyone is an analyst, as before roles existed.
+    request.state.role = roles.get(login, DEFAULT_ROLE)
     return login
+
+
+# Route-level `dependencies` run in order and before the parameters, so every action route
+# lists analyst_user ahead of load_banner (which reads the database).
+def analyst_user(
+    request: Request,
+    user: Annotated[str, Depends(tailnet_user)],
+) -> str:
+    """The identity for a route that changes something. A viewer is refused here, before the
+    route reads the form, checks a token or opens the database: the form token proves the
+    page was ours, not that this person may act."""
+    if request.state.role not in ACTING_ROLES:
+        raise HTTPException(status_code=403, detail="your role is read-only")
+    return user
 
 
 async def load_banner(
@@ -272,12 +292,23 @@ async def render_case(
     if doc is None:
         raise HTTPException(status_code=404, detail="Not Found")
     secret = settings.console_secret.get_secret_value()
-    tokens = {a: csrf.make_token(secret, user, case_id, a) for a in csrf.ACTIONS} if secret else {}
+    can_act = request.state.role in ACTING_ROLES
+    tokens = (
+        {a: csrf.make_token(secret, user, case_id, a) for a in csrf.ACTIONS}
+        if secret and can_act
+        else {}
+    )
     return with_csp(
         templates.TemplateResponse(
             request,
             "case.html",
-            {"user": user, "doc": doc, "tokens": tokens, "message": message},
+            {
+                "user": user,
+                "doc": doc,
+                "tokens": tokens,
+                "can_act": can_act,
+                "message": message,
+            },
             status_code=code,
         )
     )
@@ -344,11 +375,14 @@ def finished(cid: str, result: str) -> Response | None:
     return None
 
 
-@router.post("/console/case/{case_id}/ack", dependencies=[Depends(load_banner)])
+@router.post(
+    "/console/case/{case_id}/ack",
+    dependencies=[Depends(analyst_user), Depends(load_banner)],
+)
 async def ack_case(
     case_id: str,
     request: Request,
-    user: Annotated[str, Depends(tailnet_user)],
+    user: Annotated[str, Depends(analyst_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
     cid, _ = await checked_post(request, user, settings, case_id, "ack")
@@ -368,11 +402,14 @@ async def ack_case(
     )
 
 
-@router.post("/console/case/{case_id}/close", dependencies=[Depends(load_banner)])
+@router.post(
+    "/console/case/{case_id}/close",
+    dependencies=[Depends(analyst_user), Depends(load_banner)],
+)
 async def close_case(
     case_id: str,
     request: Request,
-    user: Annotated[str, Depends(tailnet_user)],
+    user: Annotated[str, Depends(analyst_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
     cid, form = await checked_post(request, user, settings, case_id, "close")
@@ -396,7 +433,7 @@ async def close_case(
 async def ack_from_phone(
     case_id: str,
     request: Request,
-    user: Annotated[str, Depends(tailnet_user)],
+    user: Annotated[str, Depends(analyst_user)],
     settings: Annotated[Settings, Depends(get_settings)],
     e: Annotated[int, Query(ge=0)] = 0,
     t: Annotated[str, Query(max_length=64)] = "",

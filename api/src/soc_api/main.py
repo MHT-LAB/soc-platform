@@ -83,6 +83,8 @@ def create_console_app(settings: Settings | None = None) -> FastAPI:
     # without one rather than defaulting to open.
     if settings.env == "prod" and not settings.console_allowlist:
         raise ValueError("SOC_CONSOLE_USERS must list at least one login when SOC_ENV=prod")
+    # A malformed entry or an unknown role is refused the same way (raises ValueError).
+    settings.console_roles  # noqa: B018
     app = _base_app(settings, "SOC Console")
     app.include_router(console.router)
     return app

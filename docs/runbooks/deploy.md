@@ -112,10 +112,19 @@ curl -m 3 http://<CT 110 address>:8081/healthz ; curl -m 3 http://<CT 110 addres
 curl -fsS http://127.0.0.1:8081/healthz
 ```
 
+Console roles: each `SOC_CONSOLE_USERS` entry is `login` or `login:role`, comma separated, for
+example `SOC_CONSOLE_USERS=alex@example.com,helper@example.com:viewer`. Roles are `admin`,
+`analyst` and `viewer`. A login with no role is an `analyst` (it can acknowledge and close, as
+before roles existed), so this changes nothing until a role is written. `admin` is the
+same as `analyst` for now. A `viewer` can open every page and cannot acknowledge, close or post
+anything: the buttons are not shown and the server answers 403 before it reads the form or opens the
+database. An unknown role, a missing login, a space where the colon should be or the same login with two
+roles stops the console at start (as an empty list does); fix `console.env` and run `deploy.sh`.
+
 Host files (mode 600) read by the console service (the public app gets none):
 
 | File | Contents |
 |---|---|
-| `/srv/soc/env/console.env` | **Required.** `SOC_CONSOLE_USERS=login@example.com`, the logins allowed into the console. The console refuses to start in prod without it, and `deploy.sh` stops before changing anything if it is missing. |
+| `/srv/soc/env/console.env` | **Required.** `SOC_CONSOLE_USERS=login@example.com`, the logins allowed into the console. Add a role with a colon: `login@example.com:viewer` (see the roles paragraph below). A login without a role is an analyst. The console refuses to start in prod without it, or with a malformed entry or an unknown role, and `deploy.sh` stops before changing anything if it is missing. |
 | `/srv/soc/env/lc.env` (optional) | `SOC_LC_OID=…` and `SOC_LC_API_KEY=…` (read-only key) for the sensor fleet panel |
 | `/srv/soc/env/ingest.env` (the `api` service only, mode 600) | `SOC_INGEST_SECRETS={"<source>": ["<current>", "<next>"]}` as one line of JSON (each secret 16+ characters; a source with no entry is a 404 on the internet). Make each source name unguessable, for example `lc-` plus 16 random lowercase letters and digits: a configured source answers 401/413/415 where an unknown one answers 404, and its per-source rate limit counts unauthenticated requests too, so the name is what keeps a stranger from finding it and filling that bucket and `SOC_INGEST_DATABASE_URL=postgresql+psycopg://soc_ingest:…@<host>/<db>`. The role can only call `ingest_alert()`. Rotate by adding the new secret as `next`, changing the webhook output to it, then dropping the old one. Without this file every `/ingest/` path is a 404; with secrets but no database, deliveries get a 503 (nothing is stored, never a false 200). The edge rule for `/ingest/` is live (private deploy repo). |
