@@ -382,6 +382,14 @@ case and one action. The forms are plain urlencoded posts of at most 8 KiB; ther
 any console page and the case pages' Content-Security-Policy allows forms to post to the console
 itself and nothing else.
 
+**Roles.** `SOC_CONSOLE_USERS` entries are `login` (an analyst) or `login:role` with role `admin`,
+`analyst` or `viewer` (the deploy runbook has the syntax). A viewer reads everything and
+gets 403 from every route that changes something (Acknowledge, Close and the phone Acknowledge),
+checked before the form token and before the database, so a genuine token does not help. Who acted
+is the `actor` of the `case_event` row, always the verified tailnet login in lower case. The phone
+link names only the case and an expiry, not a person, so a phone Acknowledge records the tailnet
+login that sent it (the console refuses the request without one).
+
 **Alert text is hostile text.** Everything an alert or a note contains is HTML-escaped, and
 control, zero-width and bidirectional-override characters are shown as `⟦U+XXXX⟧` instead of
 being dropped or obeyed. The raw payload is only ever text in a `<pre>` (cut at 20000

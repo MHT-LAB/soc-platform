@@ -11,6 +11,35 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+ROLES = ("admin", "analyst", "viewer")
+DEFAULT_ROLE = "analyst"
+
+
+def parse_console_users(raw: str) -> dict[str, str]:
+    """`login` or `login:role` entries, comma separated, as login -> role.
+
+    A login without a role is an analyst (what every allowed login could do before roles
+    existed). Anything else that is not exactly `login` or `login:<known role>` raises, so a
+    typo in a role can never quietly grant or remove rights; the console then refuses to
+    start. The message never repeats the entry."""
+    users: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        login, sep, role = entry.partition(":")
+        login = login.strip().lower()
+        role = role.strip().lower() if sep else DEFAULT_ROLE
+        if not login or any(c.isspace() or c == ":" for c in login) or role not in ROLES:
+            raise ValueError(
+                "SOC_CONSOLE_USERS entries must be login or login:role, "
+                f"role one of {', '.join(ROLES)}"
+            )
+        if users.get(login, role) != role:
+            raise ValueError("SOC_CONSOLE_USERS lists a login twice with different roles")
+        users[login] = role
+    return users
+
 
 class Settings(BaseSettings):
     # hide_input_in_errors: a failed validation must not echo the settings it was
@@ -27,8 +56,9 @@ class Settings(BaseSettings):
 
     # Console access. Requests must arrive through `tailscale serve`, which
     # adds the caller's verified tailnet login. A comma-separated list of the
-    # logins allowed in. Read by the console service only; the console app
-    # refuses to build in prod without it, and only dev may leave it empty.
+    # logins allowed in, each `login` (analyst) or `login:role` with role admin, analyst or
+    # viewer. Read by the console service only; the console app refuses to build in prod
+    # without it, and only dev may leave it empty.
     console_users: str = ""
 
     # cloudflared readiness endpoint, published on the host's loopback only. The
@@ -136,8 +166,12 @@ class Settings(BaseSettings):
         return value
 
     @property
+    def console_roles(self) -> dict[str, str]:
+        return parse_console_users(self.console_users)
+
+    @property
     def console_allowlist(self) -> set[str]:
-        return {u.strip().lower() for u in self.console_users.split(",") if u.strip()}
+        return set(self.console_roles)
 
 
 @lru_cache
