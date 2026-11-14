@@ -1,3 +1,4 @@
+{% set on = nav_on | default("cases") %}
 <header class="top">
   <div class="brand">
     <svg class="shield" width="28" height="28" viewBox="0 0 30 30" role="img" aria-label="SOC Console">
@@ -7,13 +8,26 @@
     <div><strong>SOC Console</strong><span>{{ sub or "cases" }}</span></div>
   </div>
   <nav aria-label="Views">
-    <a{% if nav_on == "ops" %} class="on"{% endif %} href="/console">Operations</a>
-    <a{% if nav_on != "ops" %} class="on"{% endif %} href="/console/cases">Cases</a>
-    <span class="soon">Fleet</span>
-    <span class="soon">Sources</span>
+    <a{% if on == "overview" %} class="on"{% endif %} href="/console/overview{{ keep | default('') }}">Operations</a>
+    <a{% if on == "cases" %} class="on"{% endif %} href="/console/cases">Cases</a>
+    <a{% if on == "fleet" %} class="on"{% endif %} href="/console/fleet{{ keep | default('') }}">Fleet</a>
+    <a{% if on == "sources" %} class="on"{% endif %} href="/console/sources{{ keep | default('') }}">Sources</a>
+    <a{% if on == "rules" %} class="on"{% endif %} href="/console/rules{{ keep | default('') }}">Rules</a>
+    <a{% if on == "system" %} class="on"{% endif %} href="/console">System</a>
   </nav>
   <div class="right">
+    {% if request.state.degraded is defined %}
+    {% if request.state.degraded %}
+    <span class="pill status down">Degraded · {{ request.state.degraded | length }}</span>
+    {% elif request.state.health_known %}
+    <span class="pill status up">All systems nominal</span>
+    {% else %}
+    <span class="pill status unknown">Health unknown</span>
+    {% endif %}
+    {% endif %}
     <span class="pill tailnet" title="Verified by Tailscale: {{ user | vis }}">{{ request.state.display_name | vis }}{% if request.state.role == "viewer" %} · read-only{% endif %}</span>
-    {% if now %}<span class="clock">{{ now }}</span>{% endif %}
+    {% if clock %}<span class="clock" id="utc-clock" data-epoch="{{ clock.epoch }}">{{ clock.date }} {{ clock.time }}</span>
+    {% elif now %}<span class="clock">{{ now }}</span>{% endif %}
   </div>
 </header>
+{% if scripted %}<script src="/console/overview.js" defer></script>{% endif %}

@@ -559,6 +559,51 @@ Failure codes in the log and in `posture_run.error`: `jwt_*`, `http_401/403/404/
 `too_many_pages`, `too_many_items`, `rejected` (the database refused the document), `db_error`,
 `internal`.
 
+## Ops Overview (`/console/overview`, `/fleet`, `/sources`, `/rules`)
+
+Four read-only pages on the console (tailnet only, any role incl. `viewer`), all fed by one
+function, `ops_overview(period_days, client_slug)` (migration `0012`, EXECUTE for `soc_console`
+only). Filters are links: period 1, 7 or 30 days (`?period=`) and a client slug or `all`
+(`?client=`); anything else is a 400. `/console` keeps the old host-status page, now the "System"
+tab. The pages carry no form and no inline script or style; their CSP is the console's plus
+`script-src 'self'`, for one file, `/console/overview.js`, which only ticks the UTC clock. Charts
+are server-rendered SVG (no chart library).
+
+Where each panel's numbers come from (never invented; "none yet" when the data is not there):
+
+| Panel | Source |
+|---|---|
+| Title line | `alert` received, `notification` pages sent, `soc_case` opened, in the period |
+| Signal flow | newest alert, `notification` created-to-sent 95th percentile (kind `page`), failed pages, the catch-up cursors, sensors; Triage (Sprint 5) and Respond (Sprint 9) are drawn as not built |
+| Tiles | open cases by severity, sent pages on cases still `open`, latest acknowledgement, `sensor_state`; model spend is "Sprint 5" |
+| Mean time to acknowledge / close | first page sent to first `acked` event; case opened to closed; always 7 and 30 days |
+| Case queue | latest 10 open or acknowledged cases; lane is the case's own `lane` if set, else `paged` when a page was queued, else `quiet`; verdict is "not analyzed" until one exists |
+| Detection volume | `alert.received_at`, hourly (1 and 7 days) or daily (30), stacked by source **type**, never by slug; dashed lines are deploy marks |
+| Case funnel | cases opened in the period by lane and status |
+| ATT&CK tactics | `alert.mitre_hint` written `Tactic / T1234.567`; empty until a source sends one |
+| Pipeline health | the same numbers as the banner, colored with the pager's own limits (`Limits`); a grey dot is "not in use" |
+| Fleet / Sources / Rules | `sensor_state` (the whole organization, not per client), sources by type with catch-up age, top 25 rules by alert count plus the `rule_inventory` |
+
+The overview reads the pager's health, not a worker heartbeat: nothing stores a liveness
+timestamp for the pager, so "Pager and case builder" goes red on the pager's own conditions (a
+page waiting, a failed page, alerts not becoming cases).
+
+### Deploy marks
+
+`deploy.sh` records each successful deploy with `deploy_mark('<commit>')`, run as the database
+superuser over the database container's socket (the way `backup.sh` records a dump); no service
+role can call it. The mark is written after the health and digest checks pass. A failed mark is
+logged ("could not record the deploy mark") and never fails the deploy. Marks appear on the
+timeline as dashed lines labelled with the first seven characters of the commit, and are pruned
+after 400 days. To mark one by hand: `deploy/soc-compose.sh exec -T db psql -U postgres -d soc -c
+"SELECT deploy_mark('<40 hex characters>')"`.
+
+### Demo data
+
+`SOC_MIGRATE_URL=<owner url> python -m soc_api.seed --activity fixtures/acme-demo/seed.json`
+loads the demo tenant plus three weeks of synthetic alerts, cases, pages, acknowledgements,
+sensors (one offline), a posture run and two deploy marks. It refuses to run twice.
+
 ## Backups
 
 The database is exported every six hours, encrypted, and the export stays on the host for the

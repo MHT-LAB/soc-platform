@@ -1,0 +1,4 @@
+{% macro hbar(pct, cls) -%}
+<svg class="hbar" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true"><rect class="track" width="100" height="8" rx="2"></rect><rect class="{{ cls }}" width="{{ pct }}" height="8" rx="2"></rect></svg>
+{%- endmacro %}
+{% macro dot(state) -%}<span class="sdot {{ state }}" title="{{ {'up': 'healthy', 'warn': 'needs a look', 'down': 'failing', 'idle': 'not in use'}[state] }}"></span>{%- endmacro %}

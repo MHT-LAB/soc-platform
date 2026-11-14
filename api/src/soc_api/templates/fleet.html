@@ -1,0 +1,30 @@
+{% extends "ov_base.html" %}
+{% import "_ov_macros.html" as m %}
+{% set sub = "fleet" %}
+{% block title %}Fleet{% endblock %}
+{% block h1 %}Fleet{% endblock %}
+{% block lede %}Endpoint sensors as the posture collector last saw them. This is the whole organization: sensors are not split by client.{% endblock %}
+{% block body %}
+  <section class="card">
+    <div class="card-head"><h2>Sensors</h2><span class="meta">{{ rows | length }} total · {{ offline }} offline · refreshed by the collector every 5 minutes</span></div>
+    {% if rows %}
+    <div class="scroll"><table>
+      <thead><tr><th>Sensor</th><th>Platform</th><th>Version</th><th>Status</th><th class="r">Last seen</th><th class="r">Data age</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td class="mono">{{ r.hostname | vis(64) }}</td>
+          <td>{{ r.platform | vis(40) }}</td>
+          <td class="mono dim">{{ r.version | vis(40) }}</td>
+          <td>{{ m.dot(r.state) }} <span class="chip {{ r.state }}">{{ r.label }}</span></td>
+          <td class="r mono {{ 'down' if r.state == 'down' else 'dim' }}">{{ r.last_seen }}</td>
+          <td class="r mono dim">{{ r.updated }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><strong>No sensor data</strong><p>The posture collector has not reported yet, or is not set up on this host.</p></div>
+    {% endif %}
+  </section>
+{% endblock %}

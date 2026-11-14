@@ -1,0 +1,8 @@
+<div class="filters" aria-label="Filters">
+  <div class="fgroup"><span class="flabel">Client</span>
+    <span class="chips">{% for c in filters.clients %}<a class="chip-link{% if c.on %} on{% endif %}" href="/{{ c.url }}">{{ c.label | vis }}</a>{% endfor %}</span>
+  </div>
+  <div class="fgroup"><span class="flabel">Period</span>
+    <span class="chips">{% for p in filters.periods %}<a class="chip-link{% if p.on %} on{% endif %}" href="/{{ p.url }}">{{ p.label }}</a>{% endfor %}</span>
+  </div>
+</div>
