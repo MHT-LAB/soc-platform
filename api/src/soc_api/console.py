@@ -27,7 +27,7 @@ from soc_api.cases import (
     fmt_time,
     parse_case_id,
 )
-from soc_api.config import DEFAULT_ROLE, Settings, get_settings
+from soc_api.config import DEFAULT_ROLE, Settings, display_name, get_settings
 from soc_api.text import link_path, visible
 
 HERE = Path(__file__).parent
@@ -38,6 +38,17 @@ templates = Jinja2Templates(directory=HERE / "templates")  # autoescape on for .
 templates.env.filters["utc"] = fmt_time
 templates.env.filters["vis"] = visible
 templates.env.filters["link_path"] = link_path
+
+SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def severity_class(value: object) -> str:
+    """The CSS class for a severity. The database only holds these five; anything else is
+    drawn as info rather than becoming a class name."""
+    return value if isinstance(value, str) and value in SEVERITIES else "info"
+
+
+templates.env.filters["sev"] = severity_class
 
 # The console page runs no script and loads nothing from other origins.
 CONSOLE_CSP = (
@@ -78,6 +89,8 @@ def tailnet_user(
         raise HTTPException(status_code=403, detail="not on the console allowlist")
     # With no allow-list (dev only) everyone is an analyst, as before roles existed.
     request.state.role = roles.get(login, DEFAULT_ROLE)
+    # Shown in the header only; identity, roles and the audit trail all use `login`.
+    request.state.display_name = display_name(login, settings.display_names)
     return login
 
 

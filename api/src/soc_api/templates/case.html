@@ -21,7 +21,7 @@
 
   <section class="strip" aria-label="Summary">
     <div class="tile"><span class="label">Status</span><strong><span class="badge {{ c.status }}">{{ c.status }}</span></strong></div>
-    <div class="tile"><span class="label">Severity</span><strong>{{ c.severity }}</strong></div>
+    <div class="tile"><span class="label">Severity</span><strong class="sev {{ c.severity | sev }}">{{ c.severity }}</strong></div>
     <div class="tile"><span class="label">Opened</span><strong class="mono small">{{ c.opened_at | utc }}</strong></div>
     <div class="tile"><span class="label">Alerts</span><strong>{{ c.alert_count }}</strong>{% if c.alert_count > doc.alerts | length %}<span class="note">newest {{ doc.alerts | length }} shown</span>{% endif %}</div>
   </section>
@@ -63,7 +63,7 @@
         <span class="mono">{{ a.received_at | utc }}</span>
         <span>{{ (a.rule or "") | vis(200) }}</span>
         <span class="mono">{{ (a.host or "") | vis(64) }}</span>
-        <span>{{ a.severity }}</span>
+        <span class="sev {{ a.severity | sev }}">{{ a.severity }}</span>
         {% set path = a.link | link_path %}
         {% if path is not none %}<a href="https://app.limacharlie.io/{{ path }}" rel="noreferrer noopener">detection</a>{% elif a.link %}<span class="dim mono">{{ a.link | vis(200) }}</span>{% endif %}
       </div>
@@ -78,7 +78,7 @@
 
   <section class="card">
     <div class="card-head"><h2>History</h2></div>
-    <table>
+    <table class="stack history">
       <thead><tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Detail</th></tr></thead>
       <tbody>
       {% for e in doc.events %}
