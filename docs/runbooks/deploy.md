@@ -121,6 +121,12 @@ anything: the buttons are not shown and the server answers 403 before it reads t
 database. An unknown role, a missing login, a space where the colon should be or the same login with two
 roles stops the console at start (as an empty list does); fix `console.env` and run `deploy.sh`.
 
+Display names: `SOC_CONSOLE_DISPLAY_NAMES=login@example.com=Alex R.,helper@example.com=Sam`
+(optional, in `console.env`) sets the name shown in the page header. Without an entry the header
+shows the part of the login before the `@`. It is for display only: the allow-list, the roles and the
+audit trail use the tailnet login, and a malformed entry is ignored. Names are cut at 64 characters
+and cannot contain a comma.
+
 Host files (mode 600) read by the console service (the public app gets none):
 
 | File | Contents |

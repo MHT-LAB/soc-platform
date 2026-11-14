@@ -41,6 +41,25 @@ def parse_console_users(raw: str) -> dict[str, str]:
     return users
 
 
+def parse_display_names(raw: str) -> dict[str, str]:
+    """`login=Name,login2=Name2` as login -> name. For showing a person's name in the page
+    header and nothing else: it never decides who someone is, what they may do or what the
+    audit trail says. An entry without a name is ignored, so a typo here cannot stop the
+    console from starting."""
+    names: dict[str, str] = {}
+    for entry in raw.split(","):
+        login, sep, name = entry.partition("=")
+        login, name = login.strip().lower(), name.strip()
+        if sep and login and name:
+            names[login] = name[:64]
+    return names
+
+
+def display_name(login: str, names: dict[str, str]) -> str:
+    """The configured name, else the part of the login before the @."""
+    return names.get(login.lower()) or login.split("@", 1)[0] or login
+
+
 class Settings(BaseSettings):
     # hide_input_in_errors: a failed validation must not echo the settings it was
     # given, which would put the EDR key in the container logs.
@@ -60,6 +79,8 @@ class Settings(BaseSettings):
     # viewer. Read by the console service only; the console app refuses to build in prod
     # without it, and only dev may leave it empty.
     console_users: str = ""
+    # `login=Name,login2=Name2`: names shown in the page header. Display only.
+    console_display_names: str = ""
 
     # cloudflared readiness endpoint, published on the host's loopback only. The
     # console service runs on the host network, so it reaches it there.
@@ -168,6 +189,10 @@ class Settings(BaseSettings):
     @property
     def console_roles(self) -> dict[str, str]:
         return parse_console_users(self.console_users)
+
+    @property
+    def display_names(self) -> dict[str, str]:
+        return parse_display_names(self.console_display_names)
 
     @property
     def console_allowlist(self) -> set[str]:

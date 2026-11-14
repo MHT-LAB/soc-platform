@@ -9,26 +9,8 @@
 <link rel="stylesheet" href="/console/console.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand">
-    <svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true">
-      <circle cx="15" cy="15" r="13" class="ring1"></circle>
-      <circle cx="15" cy="15" r="8" class="ring2"></circle>
-      <circle cx="15" cy="15" r="3.2" class="core"></circle>
-    </svg>
-    <div><strong>SOC Console</strong><span>operations · v0</span></div>
-  </div>
-  <nav aria-label="Views">
-    <a class="on" href="/console">Operations</a>
-    <a href="/console/cases">Cases</a>
-    <span class="soon">Fleet</span>
-    <span class="soon">Sources</span>
-  </nav>
-  <div class="right">
-    <span class="pill tailnet" title="Verified by Tailscale">tailnet · {{ user }}</span>
-    <span class="clock">{{ now }}</span>
-  </div>
-</header>
+{% set nav_on = "ops" %}{% set sub = "operations" %}
+{% include "_header.html" %}
 {% include "_banner.html" %}
 
 <main>
@@ -94,7 +76,7 @@
       {% if fleet.partial %}
       <div class="empty"><strong>Partial fleet</strong><p>The sensor list hit the page limit, so some sensors may be missing below.</p></div>
       {% endif %}
-      <table>
+      <div class="scroll"><table>
         <thead><tr><th>Sensor</th><th>Platform</th><th>Status</th><th class="r">Last seen (UTC)</th></tr></thead>
         <tbody>
         {% for s in fleet.sensors %}
@@ -106,7 +88,7 @@
           </tr>
         {% endfor %}
         </tbody>
-      </table>
+      </table></div>
       {% endif %}
     </section>
 

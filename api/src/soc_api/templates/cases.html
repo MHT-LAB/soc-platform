@@ -24,7 +24,7 @@
       </span>
     </div>
     {% if rows %}
-    <table>
+    <table class="stack cases">
       <thead><tr><th>Opened (UTC)</th><th>Client</th><th>Rule</th><th>Host</th><th>Severity</th><th>Status</th><th class="r">Alerts</th><th>Last alert</th></tr></thead>
       <tbody>
       {% for r in rows %}
@@ -33,7 +33,7 @@
           <td>{{ r.client_slug | vis }}</td>
           <td>{{ (r.rule or "") | vis(200) }}</td>
           <td class="mono">{{ (r.host or "") | vis(64) }}</td>
-          <td>{{ r.severity }}</td>
+          <td><span class="sev {{ r.severity | sev }}">{{ r.severity }}</span></td>
           <td><span class="badge {{ r.status }}">{{ r.status }}</span>{% if r.acked_by %} <span class="dim">by {{ r.acked_by | vis }}</span>{% endif %}</td>
           <td class="r">{{ r.alert_count }}</td>
           <td class="mono">{{ r.last_alert_at | utc }}</td>

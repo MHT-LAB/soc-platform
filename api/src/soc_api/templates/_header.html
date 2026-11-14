@@ -1,19 +1,19 @@
 <header class="top">
   <div class="brand">
-    <svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true">
-      <circle cx="15" cy="15" r="13" class="ring1"></circle>
-      <circle cx="15" cy="15" r="8" class="ring2"></circle>
-      <circle cx="15" cy="15" r="3.2" class="core"></circle>
+    <svg class="shield" width="28" height="28" viewBox="0 0 30 30" role="img" aria-label="SOC Console">
+      <path class="shield-body" d="M15 2.5 26 6.5v8c0 6.4-4.8 11-11 13.5C8.8 25.5 4 20.9 4 14.5v-8z"></path>
+      <path class="shield-check" d="m10.2 14.8 3.2 3.2 6.4-6.6"></path>
     </svg>
-    <div><strong>SOC Console</strong><span>cases</span></div>
+    <div><strong>SOC Console</strong><span>{{ sub or "cases" }}</span></div>
   </div>
   <nav aria-label="Views">
-    <a href="/console">Operations</a>
-    <a class="on" href="/console/cases">Cases</a>
+    <a{% if nav_on == "ops" %} class="on"{% endif %} href="/console">Operations</a>
+    <a{% if nav_on != "ops" %} class="on"{% endif %} href="/console/cases">Cases</a>
     <span class="soon">Fleet</span>
     <span class="soon">Sources</span>
   </nav>
   <div class="right">
-    <span class="pill tailnet" title="Verified by Tailscale">tailnet · {{ user | vis }}</span>
+    <span class="pill tailnet" title="Verified by Tailscale: {{ user | vis }}">{{ request.state.display_name | vis }}{% if request.state.role == "viewer" %} · read-only{% endif %}</span>
+    {% if now %}<span class="clock">{{ now }}</span>{% endif %}
   </div>
 </header>
