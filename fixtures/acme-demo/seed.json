@@ -11,5 +11,44 @@
     {"sensor_id": "demo-sensor-0001", "hostname": "acme-ws-01", "platform": "windows", "site": "Acme HQ"},
     {"sensor_id": "demo-sensor-0002", "hostname": "acme-srv-01", "platform": "linux", "site": "Acme HQ"}
   ],
-  "source": {"slug": "acme-lc", "type": "edr-webhook", "external_id": "00000000-0000-0000-0000-00000000acme"}
+  "source": {"slug": "acme-lc", "type": "edr-webhook", "external_id": "00000000-0000-0000-0000-00000000acme"},
+  "activity": {
+    "seed": 7,
+    "days": 21,
+    "cases": 260,
+    "analyst": "alex@example.com",
+    "hosts": [
+      "ws-demo-01", "ws-demo-02", "ws-demo-03", "ws-demo-04", "ws-demo-05", "ws-demo-06",
+      "ws-demo-07", "ws-demo-08", "ws-demo-09", "ws-demo-10", "srv-demo-01", "srv-demo-02"
+    ],
+    "offline_host": "ws-demo-07",
+    "isolated_host": "ws-demo-09",
+    "sources": [
+      {"slug": "acme-ids-7f3a", "type": "network-ids", "external_id": "00000000-0000-0000-0000-00000000acme", "catchup": true},
+      {"slug": "acme-vendor-9c21", "type": "vendor-feed", "external_id": "00000000-0000-0000-0000-00000000acme", "catchup": false}
+    ],
+    "rules": [
+      {"rule": "demo.Shell.ReverseShellPattern", "severity": "high", "source": "acme-lc", "mitre": "Execution / T1059.004", "weight": 2, "lane": "paged"},
+      {"rule": "demo.Service.NewSystemService", "severity": "medium", "source": "acme-lc", "mitre": "Persistence / T1543.002", "weight": 3, "lane": "paged"},
+      {"rule": "demo.Recon.WhoamiBurst", "severity": "low", "source": "acme-lc", "mitre": "Discovery / T1082", "weight": 9, "lane": "quiet"},
+      {"rule": "demo.Honeypot.SmbTouched", "severity": "medium", "source": "acme-ids-7f3a", "mitre": "Discovery / T1046", "weight": 3, "lane": "paged"},
+      {"rule": "demo.Net.InboundScan", "severity": "low", "source": "acme-ids-7f3a", "mitre": "Reconnaissance / T1595", "weight": 10, "lane": "quiet"},
+      {"rule": "demo.Auth.PasswordSprayPattern", "severity": "high", "source": "acme-lc", "mitre": "Credential Access / T1110", "weight": 2, "lane": "paged"},
+      {"rule": "demo.Defense.LogCleared", "severity": "medium", "source": "acme-lc", "mitre": "Defense Evasion / T1070", "weight": 2, "lane": "paged"},
+      {"rule": "demo.Priv.SudoAnomaly", "severity": "low", "source": "acme-lc", "mitre": "Privilege Escalation / T1548.003", "weight": 4, "lane": "quiet"},
+      {"rule": "demo.Net.BeaconInterval", "severity": "medium", "source": "acme-ids-7f3a", "mitre": "Command and Control / T1071", "weight": 1, "lane": "paged"},
+      {"rule": "demo.Ransom.ShadowCopyDeleted", "severity": "critical", "source": "acme-lc", "mitre": "Impact / T1490", "weight": 1, "lane": "paged"},
+      {"rule": "demo.Info.PackageInstalled", "severity": "info", "source": "acme-lc", "mitre": null, "weight": 6, "lane": "quiet"},
+      {"rule": "demo.Vendor.UnwantedAppRemoved", "severity": "info", "source": "acme-vendor-9c21", "mitre": null, "weight": 3, "lane": "vendor"}
+    ],
+    "inventory_only": [
+      "demo.Net.DnsTunnelHeuristic", "demo.Auth.ImpossibleTravel", "demo.Persist.CronJobAdded",
+      "demo.Exec.EncodedPowershell"
+    ],
+    "disabled_rules": ["demo.Info.PackageInstalled", "demo.Persist.CronJobAdded"],
+    "deploys": [
+      {"hours_ago": 96, "sha": "3f9c1e47a02b5d68c1e0f4a7b92d3c5e8a1f6b04"},
+      {"hours_ago": 26, "sha": "b81d2c9e04f7a35615de08c3f2a94b7e60d1c5a8"}
+    ]
+  }
 }

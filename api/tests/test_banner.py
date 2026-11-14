@@ -297,7 +297,7 @@ def test_the_login_reads_no_table_and_the_writer_sees_only_the_health_columns(
         for column in columns:
             assert can(table, column, "SELECT") and not can(table, column, "UPDATE"), column
     assert not can("backup_state", "last_bytes", "SELECT")
-    assert not can("reconcile_cursor", "last_error", "SELECT")
+    assert can("reconcile_cursor", "last_error", "SELECT")  # 0012, for the Sources page
     assert not can("reconcile_cursor", "window_end", "SELECT")
 
 
