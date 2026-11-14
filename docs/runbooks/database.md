@@ -564,7 +564,11 @@ made the set, or the migration step after the load cannot recognise the database
    mode: `init-secrets.sh --restore` (five values in the environment), `init-backup.sh --restore`
    (`SOC_BACKUP_AGE_PUB`), then `init-worker.sh`, `init-console-db.sh`, `init-reconcile.sh` and
    `init-reconcile-lc.sh` with `--restore` as each header describes. The data directory must be
-   empty (`init-secrets.sh --restore` creates it).
+   empty (`init-secrets.sh --restore` creates it). Also by hand, not needed for the restore itself:
+   `env/console.env` (the allow-list), `env/policy.env` (from the deploy repo, not secret) and, for
+   the console's sensor fleet panel, `env/lc.env` (mode 600, `SOC_LC_OID` and `SOC_LC_API_KEY`, the
+   read-only key; see the deploy runbook). The restore drill on 2026-11-14 rebuilt everything else
+   from the secrets manager alone.
 3. Put the set where the script can read it: the three files `soc-<time>.dump.age`,
    `soc-<time>.globals.sql.age` and `soc-<time>.sha256` together. They are in `/srv/soc/backups`, or
    inside the container's archive on the NAS. Either copy all three into `/srv/soc/backups`, or give
