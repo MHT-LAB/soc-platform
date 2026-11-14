@@ -17,9 +17,9 @@ def test_the_database_network_is_internal() -> None:
     assert COMPOSE["networks"]["db"] == {"internal": True}
 
 
-def test_only_api_db_migrate_worker_and_reconcile_are_on_the_database_network() -> None:
+def test_only_the_known_services_are_on_the_database_network() -> None:
     on_db = {n for n, s in SERVICES.items() if "db" in s.get("networks", [])}
-    assert on_db == {"api", "db", "migrate", "worker", "reconcile"}
+    assert on_db == {"api", "db", "migrate", "worker", "reconcile", "posture"}
     # The tunnel (overlay) keeps the default network only.
     assert "networks" not in OVERLAY["services"]["tunnel"]
     # db and migrate are not on the default network the tunnel shares.
@@ -108,7 +108,7 @@ def test_the_worker_is_on_the_database_and_egress_networks_and_never_on_default(
     assert WORKER["networks"] == ["db", "egress"]  # `default` is the tunnel's network
     assert COMPOSE["networks"]["egress"] == {}  # outbound for pushes: not internal
     on_egress = {n for n, s in SERVICES.items() if "egress" in s.get("networks", [])}
-    assert on_egress == {"worker", "reconcile", "offsite"}
+    assert on_egress == {"worker", "reconcile", "posture", "offsite"}
     assert "networks" not in OVERLAY["services"]["tunnel"]
 
 
@@ -152,6 +152,7 @@ def test_the_worker_secrets_go_to_the_worker_and_the_login_password_to_migrate_o
         "worker-owner.env": False,
         "console-owner.env": False,
         "reconcile-owner.env": False,
+        "posture-owner.env": False,
     }
     for name in ("api", "console", "db", "tunnel"):
         names = env_files(name) if name in SERVICES else {}
@@ -281,3 +282,73 @@ def test_the_catch_up_worker_never_gets_anyone_elses_secrets() -> None:
     # ...and nobody else gets its vendor key
     for name in ("api", "console", "worker", "db", "migrate"):
         assert "reconcile-lc.env" not in set(env_files(name)), name
+
+
+# ---- the posture collector ----
+
+POSTURE = SERVICES["posture"]
+
+
+def test_the_posture_collector_is_on_the_database_and_egress_networks_and_never_on_default() -> (
+    None
+):
+    assert POSTURE["networks"] == ["db", "egress"]
+    assert "ports" not in POSTURE and "expose" not in POSTURE
+    assert POSTURE.get("network_mode") is None
+
+
+def test_the_posture_collector_is_hardened_exactly_like_the_catch_up_worker() -> None:
+    for key in ("read_only", "cap_drop", "security_opt", "tmpfs", "mem_limit", "pids_limit"):
+        assert POSTURE[key] == RECONCILE[key], key
+    assert POSTURE["read_only"] is True and POSTURE["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in POSTURE["security_opt"]
+    assert "user" not in POSTURE or POSTURE["user"] != "0"
+
+
+def test_the_posture_collector_is_optional_and_does_not_hold_up_a_deploy() -> None:
+    assert POSTURE["profiles"] == ["posture"]
+    assert "depends_on" not in POSTURE
+    assert POSTURE["image"] == SERVICES["api"]["image"]
+    assert POSTURE["command"] == ["python", "-m", "soc_api.posture"]
+
+
+def test_the_posture_health_check_watches_its_file_with_room_for_the_longest_interval() -> None:
+    from soc_api.config import Settings
+
+    test = " ".join(POSTURE["healthcheck"]["test"])
+    assert "/tmp/posture-health" in test  # noqa: S108
+    assert Settings().posture_health_file == "/tmp/posture-health"  # noqa: S108
+    limit = int(test.split("< ")[1].split(" ")[0])
+    longest = Settings.model_fields["posture_interval_seconds"].metadata[-1].le
+    assert limit > 1.4 * longest
+
+
+def test_the_posture_files_go_to_the_collector_and_the_login_password_to_migrate() -> None:
+    assert env_files("posture") == {
+        "posture-db.env": True,
+        "posture-lc.env": True,
+        "policy.env": False,
+    }
+    for name, expected in (
+        ("posture-db.env", {"posture"}),
+        ("posture-lc.env", {"posture"}),
+        ("posture-owner.env", {"migrate"}),
+    ):
+        assert {n for n in SERVICES if name in env_files(n)} == expected, name
+        assert name not in " ".join(
+            e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
+        )
+
+
+def test_the_posture_collector_never_gets_anyone_elses_secrets_and_nobody_gets_its_key() -> None:
+    names = set(env_files("posture"))
+    assert not names & {
+        "db.env", "db-owner.env", "ingest.env", "console.env", "console-db.env", "lc.env",
+        "worker.env", "worker-owner.env", "pager-ack.env", "reconcile-db.env",
+        "reconcile-lc.env",
+    }  # fmt: skip
+    env = POSTURE.get("environment", {})
+    assert not {k for k in env if k.startswith(("SOC_MIGRATE", "SOC_INGEST", "SOC_WORKER"))}
+    for name in ("api", "console", "worker", "db", "migrate", "reconcile"):
+        assert "posture-lc.env" not in set(env_files(name)), name
+        assert "posture-db.env" not in set(env_files(name)), name

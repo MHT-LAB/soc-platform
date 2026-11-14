@@ -1278,3 +1278,94 @@ def test_the_weekly_ok_says_how_big_and_how_old_the_last_backup_is(
     worker = make_worker(fx, ntfy_server)
     msg = worker.ok_message(datetime.now(UTC) - timedelta(days=7))
     assert msg.endswith("; backup: 5.2 MB, 3 h ago")
+
+
+# ---- the posture collector (O3) ----
+
+
+def posture_run(fx: Fixture, minutes_ago: float, ok: bool = True) -> None:
+    fx.run(
+        "INSERT INTO posture_run (at, ok, error) VALUES "
+        "(now() - make_interval(secs => %s::float8 * 60), %s, %s)",
+        (minutes_ago, ok, None if ok else "http_503"),
+    )
+
+
+def posture_pushes(fake: FakeNtfy) -> list[dict[str, Any]]:
+    return [p for p in stale_pushes(fake) if p["message"] == w.STALE_TEXT["posture_quiet"]]
+
+
+def test_a_host_that_never_ran_the_collector_is_never_flagged(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    for _ in range(3):
+        worker.tick()
+        clock.advance(hours=7)
+    assert posture_pushes(ntfy_server) == []
+
+
+def test_a_collector_quiet_for_over_half_an_hour_raises_stale(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    posture_run(fx, 31)
+    make_worker(fx, ntfy_server).tick()
+    [push] = posture_pushes(ntfy_server)
+    assert push["priority"] == 5 and "30 minutes" in push["message"]
+
+
+def test_a_collector_that_ran_recently_is_fine(fx: Fixture, ntfy_server: FakeNtfy) -> None:
+    posture_run(fx, 29)
+    make_worker(fx, ntfy_server).tick()
+    assert posture_pushes(ntfy_server) == []
+
+
+def test_recent_failures_do_not_hide_an_old_last_success(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    posture_run(fx, 120)
+    posture_run(fx, 1, ok=False)
+    make_worker(fx, ntfy_server).tick()
+    assert len(posture_pushes(ntfy_server)) == 1
+
+
+def test_a_collector_that_only_ever_failed_goes_stale_after_its_first_attempt_ages(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    posture_run(fx, 5, ok=False)
+    make_worker(fx, ntfy_server).tick()
+    assert posture_pushes(ntfy_server) == []
+    posture_run(fx, 90, ok=False)
+    make_worker(fx, ntfy_server).tick()
+    assert len(posture_pushes(ntfy_server)) == 1
+
+
+def test_the_posture_limit_can_be_changed_and_recovery_stops_the_push(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    posture_run(fx, 3)
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock, limits=w.Limits(posture_stale_s=120))
+    worker.tick()
+    assert len(posture_pushes(ntfy_server)) == 1
+    posture_run(fx, 0)
+    clock.advance(hours=7)
+    worker.tick()
+    assert len(posture_pushes(ntfy_server)) == 1
+
+
+def test_stale_reasons_include_posture_quiet_only_past_the_limit() -> None:
+    counts = {
+        "oldest_pending_page_s": None,
+        "failed_last_24h": 0,
+        "oldest_unassigned_alert_s": None,
+    }
+    lim = w.Limits()
+    assert lim.posture_stale_s == 1800.0
+    cases = [(0, None, False), (0, 99999.0, False), (1, 1800.0, False)]
+    cases += [(1, 1800.1, True), (3, None, False)]
+    for runs_, quiet, firing in cases:
+        got = w.stale_reasons(counts, 0, None, 0.0, lim, runs_, quiet)
+        assert got["posture_quiet"] is firing, (runs_, quiet)
+    assert w.stale_reasons(counts, 0, None, 0.0, lim)["posture_quiet"] is False  # old call shape

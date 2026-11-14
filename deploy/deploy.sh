@@ -38,6 +38,8 @@
 #    login, and `up` starts it. A worker file without a database is refused.
 # 3d. The same for the catch-up worker, once both env/reconcile-db.env and
 #    env/reconcile-lc.env exist (the first alone only gives its database role a login).
+# 3e. The same for the posture collector, once both env/posture-db.env and
+#    env/posture-lc.env exist.
 # 4. Start the stack (public api and host-network console), wait for both to be
 #    healthy, and confirm both containers use exactly the verified digest. On any
 #    failure, roll back to the previous one.
@@ -153,6 +155,20 @@ elif [[ -e "$RECONCILE_LC_ENV" ]]; then
   die "$RECONCILE_LC_ENV needs a non-empty $RECONCILE_DB_ENV (init-reconcile.sh) and must not be empty itself"
 elif [[ -e "$RECONCILE_DB_ENV" && ! -s "$RECONCILE_DB_ENV" ]]; then
   die "$RECONCILE_DB_ENV is empty; remove it, or restore it with init-reconcile.sh --restore"
+fi
+
+# The posture collector follows the same rules: its database file (init-posture.sh) alone only
+# gives its role a login; with its vendor-API file (init-posture-lc.sh) the service starts.
+POSTURE_DB_ENV="$STATE/env/posture-db.env"
+POSTURE_LC_ENV="$STATE/env/posture-lc.env"
+if [[ -s "$POSTURE_DB_ENV" && -s "$POSTURE_LC_ENV" ]]; then
+  [[ "$DB" == 1 ]] \
+    || die "$POSTURE_LC_ENV exists but this host has no database (env/db.env and env/db-owner.env)"
+  export COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}posture"
+elif [[ -e "$POSTURE_LC_ENV" ]]; then
+  die "$POSTURE_LC_ENV needs a non-empty $POSTURE_DB_ENV (init-posture.sh) and must not be empty itself"
+elif [[ -e "$POSTURE_DB_ENV" && ! -s "$POSTURE_DB_ENV" ]]; then
+  die "$POSTURE_DB_ENV is empty; remove it, or restore it with init-posture.sh --restore"
 fi
 
 # The Stage A edge is a locally managed tunnel. Without its config and

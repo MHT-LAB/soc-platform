@@ -38,7 +38,7 @@ compose() { docker compose -p "$P" -f "$HERE/../deploy/compose.yml" "$@"; }
 # Run a command as root in a throwaway container with the work directory mounted.
 as_root() { docker run --rm --user 0 -v "$WORK:/w" --entrypoint "$1" "$IMAGE" "${@:2}"; }
 cleanup() {
-  docker rm -f "$P-fakentfy" "$P-fakelc" > /dev/null 2>&1 || true
+  docker rm -f "$P-fakentfy" "$P-fakelc" "$P-fakeposture" > /dev/null 2>&1 || true
   COMPOSE_PROFILES=db,worker compose down -v --remove-orphans > /dev/null 2>&1 || true
   as_root rm -rf /w/pgdata > /dev/null 2>&1 || true
   rm -rf "$WORK"
@@ -566,6 +566,112 @@ docker exec "$RID" python -c "import os; os.stat('/tmp/reconcile-health')" > /de
 [[ "$(docker inspect "$RID" --format '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{len .HostConfig.PortBindings}}')" == "true [ALL] 0" ]] \
   && pass "reconcile service: read-only, no capabilities, nothing published" || fail "reconcile service: not hardened as declared"
 compose stop reconcile > /dev/null
+
+# --- the posture collector -----------------------------------------------------------
+# A fake vendor API (token, sensors with and without the online filter, rule hives with
+# bodies, org errors with messages) on the database network. The real `posture` service
+# definition reads it and stores one snapshot; a sensor then goes offline and the next
+# run shows it.
+PF="$P-fakeposture"
+cat > "$WORK/fakeposture.py" << 'PY'
+import http.server, json, os, urllib.parse
+
+OID = "00000000-0000-4000-8000-0000000000aa"
+SENSORS = [
+    {"sid": "aaaaaaaa-0000-4000-8000-000000000001", "hostname": "ws-demo-01", "plat": 0x20000000,
+     "alive": "2025-01-02 03:04:05", "is_isolated": False},
+    {"sid": "aaaaaaaa-0000-4000-8000-000000000002", "hostname": "ws-demo-02", "plat": 0x10000000,
+     "alive": "2025-01-02 03:04:05", "is_isolated": False},
+]
+HIVES = {"dr-general": {"Stack Rule": {"data": {"detect": "BODY"}, "usr_mtd": {"enabled": True}}},
+         "dr-managed": {}, "dr-service": {}}
+
+class H(http.server.BaseHTTPRequestHandler):
+    def reply(self, code, doc=None):
+        body = json.dumps(doc).encode() if doc is not None else b""
+        self.send_response(code); self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.reply(200, {"jwt": "aaa.bbb.ccc"})
+    def do_GET(self):
+        if self.headers.get("Authorization") != "Bearer aaa.bbb.ccc":
+            return self.reply(401)
+        parts = urllib.parse.urlsplit(self.path)
+        q = dict(urllib.parse.parse_qsl(parts.query))
+        if parts.path == f"/v1/sensors/{OID}":
+            offline = os.path.exists("/tmp/offline")  # the test takes the second sensor off
+            rows = SENSORS
+            if q.get("is_online_only") == "true":
+                rows = SENSORS[:1] if offline else SENSORS
+            return self.reply(200, {"sensors": rows})
+        if parts.path == f"/v1/errors/{OID}":
+            return self.reply(200, {"errors": [{"component": "stack.component", "error": "MESSAGE", "ts": 5}]})
+        for hive, rules in HIVES.items():
+            if parts.path == f"/v1/hive/{hive}/{OID}":
+                return self.reply(200, rules)
+        self.reply(404)
+    def log_message(self, *a): pass
+
+http.server.ThreadingHTTPServer(("0.0.0.0", 8091), H).serve_forever()
+PY
+docker run -d --name "$PF" --network "${P}_db" --network-alias fakeposture -v "$WORK/fakeposture.py:/fakeposture.py:ro" \
+  --entrypoint python "$IMAGE" /fakeposture.py > /dev/null
+for _ in $(seq 1 30); do
+  docker exec "$PF" python -c "import socket; socket.create_connection(('127.0.0.1', 8091), 2)" > /dev/null 2>&1 && break
+  sleep 1
+done
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" "$HERE/../deploy/init-posture.sh" > "$WORK/init-posture.out" 2>&1 \
+  && pass "init-posture.sh created the posture collector's secret files" \
+  || { cat "$WORK/init-posture.out"; fail "init-posture.sh failed"; exit 1; }
+rm -f "$WORK/init-posture.out"
+export COMPOSE_PROFILES=db,worker
+compose run --rm migrate && pass "migration job gave soc_posture its login" || { fail "migrate (posture login) failed"; exit 1; }
+PKEY="$(rand 20)"
+SOC_INIT_TEST=1 SOC_STATE_DIR="$WORK" SOC_LC_POSTURE_KEY="$PKEY" SOC_LC_OID="$LC_OID" \
+  "$HERE/../deploy/init-posture-lc.sh" --restore > "$WORK/init-plc.out" 2>&1 \
+  && pass "init-posture-lc.sh wrote the vendor-API file" \
+  || { cat "$WORK/init-plc.out"; fail "init-posture-lc.sh failed"; exit 1; }
+rm -f "$WORK/init-plc.out"
+cat >> "$WORK/env/policy.env" << 'ENV'
+SOC_POSTURE_API_URL=http://fakeposture:8091
+SOC_POSTURE_JWT_URL=http://fakeposture:8091/jwt
+ENV
+export COMPOSE_PROFILES=db,worker,posture
+pos() { SOC_ENV=dev compose run --rm posture python -m soc_api.posture "$@" 2>&1; }
+
+OUT="$(pos check)"
+[[ "$OUT" == *"check ok: auth=ok sensors=2 online=2"* && "$OUT" == *"general=1 managed=0 service=0"* && "$OUT" != *"$PKEY"* && "$OUT" != *ws-demo* ]] \
+  && pass "posture check: auth works, counts only, no host or rule names" || fail "posture check: $OUT"
+OUT="$(pos once)"
+[[ "$OUT" == *"posture outcome=ok sensors=2 online=2 rules=1 errors=1 skipped=0"* && "$OUT" != *"$PKEY"* && "$OUT" != *ws-demo* ]] \
+  && pass "posture: one run stored a snapshot (counts in the log, no key, no host names)" || fail "posture once: $OUT"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT (SELECT count(*) FROM sensor_state), (SELECT count(*) FROM rule_inventory), (SELECT online || '/' || offline FROM sensor_count ORDER BY at DESC LIMIT 1)")" == "2|1|2/0" ]] \
+  && pass "posture: sensors, rules and the count point are stored" || fail "posture: the stored snapshot is not as expected"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT count(*) FROM rule_inventory WHERE name LIKE '%BODY%'")" == 0 ]] \
+  && pass "posture: no rule body is stored" || fail "posture: a rule body was stored"
+docker exec "$PF" python -c "open('/tmp/offline', 'w').close()"
+pos once > /dev/null
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT online || '/' || offline FROM sensor_count ORDER BY at DESC LIMIT 1")" == "1/1" ]] \
+  && pass "posture: a sensor going offline shows in the next run" || fail "posture: the offline sensor was not seen"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT runs FROM posture_health()")" == 2 ]] \
+  && pass "posture: the pager's health view sees the runs" || fail "posture: no runs in posture_health()"
+[[ "$(compose exec -T db psql -U postgres -d soc -Atc "SELECT posture_runs FROM console_health()")" == 2 ]] \
+  && pass "posture: the console's health view sees the runs" || fail "posture: console_health() does not see the runs"
+
+SOC_ENV=dev compose up -d posture > /dev/null
+PID="$(compose ps -q posture)"
+for _ in $(seq 1 40); do
+  docker exec "$PID" python -c "import os; os.stat('/tmp/posture-health')" > /dev/null 2>&1 && break
+  sleep 1
+done
+docker exec "$PID" python -c "import os; os.stat('/tmp/posture-health')" > /dev/null 2>&1 \
+  && pass "posture service: running, and its health file is written" || fail "posture service: no health file"
+[[ "$(docker inspect "$PID" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}')" == "${P}_db ${P}_egress " ]] \
+  && pass "posture service: on the database and egress networks only" || fail "posture service: unexpected networks"
+[[ "$(docker inspect "$PID" --format '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{len .HostConfig.PortBindings}}')" == "true [ALL] 0" ]] \
+  && pass "posture service: read-only, no capabilities, nothing published" || fail "posture service: not hardened as declared"
+compose stop posture > /dev/null
 
 # The database has no way out: an outbound connection from its own container fails.
 docker exec "$DBID" timeout 5 bash -c 'exec 3<> /dev/tcp/1.1.1.1/443' > /dev/null 2>&1 \

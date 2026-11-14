@@ -71,6 +71,8 @@ CONSOLE_ROLE = "soc_console"
 CONSOLE_CONNECTION_LIMIT = 5
 RECONCILE_ROLE = "soc_reconcile"
 RECONCILE_CONNECTION_LIMIT = 3
+POSTURE_ROLE = "soc_posture"
+POSTURE_CONNECTION_LIMIT = 3
 MIN_PASSWORD_LENGTH = 32
 
 
@@ -120,6 +122,10 @@ def set_reconcile_login(url: str, password: str) -> None:
     _set_login(url, RECONCILE_ROLE, RECONCILE_CONNECTION_LIMIT, password)
 
 
+def set_posture_login(url: str, password: str) -> None:
+    _set_login(url, POSTURE_ROLE, POSTURE_CONNECTION_LIMIT, password)
+
+
 def main(argv: list[str]) -> int:
     url = os.environ.get("SOC_MIGRATE_URL")
     if not url or argv not in (["upgrade"], ["downgrade"], ["logins"], ["deploy"]):
@@ -148,6 +154,9 @@ def main(argv: list[str]) -> int:
             reconcile_password = os.environ.get("SOC_RECONCILE_DB_PASSWORD", "")
             if reconcile_password:
                 set_reconcile_login(url, reconcile_password)
+            posture_password = os.environ.get("SOC_POSTURE_DB_PASSWORD", "")
+            if posture_password:
+                set_posture_login(url, posture_password)
         except ValueError as exc:
             print(exc)
             return 2

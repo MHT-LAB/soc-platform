@@ -242,6 +242,50 @@ services:
       retries: 3
       start_period: 120s
 
+  # The posture collector: every five minutes reads the sensor fleet, the rule inventory and
+  # the organization's error count from the detection source's API with a read-only key
+  # (`soc-posture`) and stores a snapshot for the console's Ops Overview
+  # (python -m soc_api.posture). Its own profile: deploy.sh turns it on only when both
+  # env/posture-db.env (deploy/init-posture.sh) and env/posture-lc.env
+  # (deploy/init-posture-lc.sh) exist. Hardened exactly like `reconcile`: on the database
+  # network and on `egress`, never on `default`, publishes nothing, no depends_on, holds only
+  # its own two files (plus the optional, non-secret policy.env). Healthy = a pass ran in the last 15 minutes (a failing run still counts:
+  # the pager's STALE check watches success).
+  posture:
+    profiles: [posture]
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    restart: unless-stopped
+    command: ["python", "-m", "soc_api.posture"]
+    environment:
+      SOC_ENV: ${SOC_ENV:-prod}
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/posture-db.env
+        required: true
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/posture-lc.env
+        required: true
+      # Optional, not secret: SOC_POSTURE_INTERVAL_SECONDS and the like.
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/policy.env
+        required: false
+    networks:
+      - db
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/posture-health') < 900 else 1)"]
+      interval: 60s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
+
   # One-off: `soc-compose.sh run --rm offsite <restic command>` (deploy/offsite.sh does it)
   # sends the encrypted backup sets in $SOC_STATE_DIR/backups to the off-site restic
   # repository. Its own profile and `restart: no`, so `up -d` never starts it. It is on
@@ -298,6 +342,9 @@ services:
       # SOC_RECONCILE_DB_PASSWORD (init-reconcile.sh): gives soc_reconcile its login.
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/reconcile-owner.env
         required: false
+      # SOC_POSTURE_DB_PASSWORD (init-posture.sh): gives soc_posture its login.
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/posture-owner.env
+        required: false
     volumes:
       - ${SOC_STATE_DIR:-/srv/soc}/seed:/seed:ro
     depends_on:
@@ -322,6 +369,7 @@ networks:
   dbhost:
     driver_opts:
       com.docker.network.bridge.enable_ip_masquerade: "false"
-  # Outbound only: the worker's pushes, the catch-up worker's API calls and the off-site
-  # copy. None of them is the tunnel's network, and only the first two are database clients.
+  # Outbound only: the worker's pushes, the catch-up worker's and posture collector's API
+  # calls and the off-site copy. None of them is the tunnel's network, and only the first
+  # three are database clients.
   egress: {}

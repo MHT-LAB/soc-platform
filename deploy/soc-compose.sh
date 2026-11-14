@@ -34,4 +34,9 @@ if [[ -n "${COMPOSE_PROFILES:-}" && -s "$STATE/env/reconcile-db.env" && -s "$STA
   export COMPOSE_PROFILES="$COMPOSE_PROFILES,reconcile"
 fi
 
+# ...and the posture collector's.
+if [[ -n "${COMPOSE_PROFILES:-}" && -s "$STATE/env/posture-db.env" && -s "$STATE/env/posture-lc.env" ]]; then
+  export COMPOSE_PROFILES="$COMPOSE_PROFILES,posture"
+fi
+
 exec docker compose -p soc -f "$HERE/compose.yml" -f "$HERE/$OVERLAY" --env-file "$IMAGE_ENV" "$@"

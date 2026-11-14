@@ -317,3 +317,93 @@ def test_a_profile_set_in_the_shell_cannot_turn_the_catch_up_worker_on(tmp_path:
     r = host.deploy(COMPOSE_PROFILES="db,reconcile")
     assert r.returncode == 0, r.stdout
     assert all("[profiles=db]" in c for c in host.calls())
+
+
+# ---- the posture collector is an optional profile, on only when both its files exist ----
+
+
+def posture_files(host: "DbHost", *, db: bool = True, lc: bool = True) -> None:
+    if db:
+        (host.state / "env" / "posture-db.env").write_text("SOC_POSTURE_DATABASE_URL=x\n")
+    if lc:
+        (host.state / "env" / "posture-lc.env").write_text("SOC_POSTURE_LC_KEY=x\n")
+
+
+def test_both_posture_files_turn_the_posture_profile_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    posture_files(host)
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    calls = host.calls()
+    assert calls and all("[profiles=db,posture]" in c for c in calls)
+    assert index(calls, " run --rm migrate") < index(calls, " up -d --remove-orphans")
+
+
+def test_the_pager_catch_up_and_posture_profiles_can_all_be_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    (host.state / "env" / "worker.env").write_text("SOC_NTFY_TOPIC=x\n")
+    reconcile_files(host)
+    posture_files(host)
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db,worker,reconcile,posture]" in c for c in host.calls())
+
+
+def test_the_posture_database_file_alone_leaves_the_collector_off(tmp_path: Path) -> None:
+    """After init-posture.sh and before the vendor key: the deploy gives the role its login."""
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    posture_files(host, lc=False)
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db]" in c for c in host.calls())
+
+
+def test_without_posture_files_it_stays_off(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db]" in c for c in host.calls())
+
+
+def test_the_posture_key_file_without_the_database_file_is_refused(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    posture_files(host, db=False)
+    r = host.deploy()
+    assert r.returncode == 1
+    assert "init-posture.sh" in r.stdout
+    assert host.calls() == [] and not host.image_env.exists()
+
+
+@pytest.mark.parametrize("empty", ["posture-db.env", "posture-lc.env"])
+def test_an_empty_posture_file_is_refused(tmp_path: Path, empty: str) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    posture_files(host)
+    (host.state / "env" / empty).write_text("")
+    r = host.deploy()
+    assert r.returncode == 1
+    assert host.calls() == []
+
+
+def test_posture_files_without_a_database_are_refused_before_anything_changes(
+    tmp_path: Path,
+) -> None:
+    host = DbHost(tmp_path, db_env=False, owner_env=False)
+    posture_files(host)
+    r = host.deploy()
+    assert r.returncode == 1
+    assert "has no database" in r.stdout
+    assert host.calls() == [] and not host.image_env.exists()
+
+
+def test_a_profile_set_in_the_shell_cannot_turn_the_posture_collector_on(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy(COMPOSE_PROFILES="db,posture")
+    assert r.returncode == 0, r.stdout
+    assert all("[profiles=db]" in c for c in host.calls())

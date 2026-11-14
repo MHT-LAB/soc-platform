@@ -118,6 +118,10 @@ def test_migrations_apply_and_create_every_table(db: TestDb) -> None:
         "worker_state",
         "reconcile_cursor",
         "backup_state",
+        "posture_run",
+        "sensor_state",
+        "sensor_count",
+        "rule_inventory",
     }
 
 
@@ -465,6 +469,8 @@ SERVICE_ROLES = (
     "soc_console_writer",
     "soc_reconcile",
     "soc_reconcile_writer",
+    "soc_posture",
+    "soc_posture_writer",
 )
 
 
@@ -513,7 +519,7 @@ def test_migrations_run_as_a_non_superuser_owner() -> None:
 
 @pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS", "CREATEROLE", "CREATEDB"])
 @pytest.mark.parametrize(
-    "role", ["soc_app", "soc_ingest", "soc_worker", "soc_console", "soc_reconcile"]
+    "role", ["soc_app", "soc_ingest", "soc_worker", "soc_console", "soc_reconcile", "soc_posture"]
 )
 def test_a_privileged_existing_role_stops_the_migration(
     db: TestDb, role: str, attribute: str
@@ -534,7 +540,13 @@ def test_a_privileged_existing_role_stops_the_migration(
 
 @pytest.mark.parametrize(
     "writer",
-    ["soc_ingest_writer", "soc_worker_writer", "soc_console_writer", "soc_reconcile_writer"],
+    [
+        "soc_ingest_writer",
+        "soc_worker_writer",
+        "soc_console_writer",
+        "soc_reconcile_writer",
+        "soc_posture_writer",
+    ],
 )
 def test_a_writer_role_that_can_log_in_stops_the_migration(db: TestDb, writer: str) -> None:
     params = _admin_params()
