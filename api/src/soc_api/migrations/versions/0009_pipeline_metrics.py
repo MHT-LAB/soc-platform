@@ -9,13 +9,12 @@ by one function in the same shape as the other console functions:
 
   pipeline_metrics()  SECURITY DEFINER, owned by soc_console_writer, EXECUTE for soc_console
                       only. Returns rows (metric, label, value): a fixed list of metric
-                      names, and a label that is either empty, a source slug, a page kind
-                      from a fixed list, or a histogram bound from a fixed list. No client
+                      names, and a label that is either empty, a page kind from a fixed
+                      list, or a histogram bound from a fixed list. No client
                       names, hostnames, alert text or ids ever appear.
 
-  alerts_ingested     per source slug (a slug is our own configuration, and a webhook for a
-                      source we do not have is refused, so the set cannot be widened from
-                      outside); sources with no alert yet report 0
+  alerts_ingested     all alerts stored, one total. Not per source: a source slug is the
+                      secret part of the public webhook path, so it never goes on a metric
   alerts_grouped      alerts that joined a case that already existed (the "de-duplicated"
                       count: a second delivery of the same event id is refused by the
                       database and not recorded, so that kind of duplicate cannot be counted
@@ -29,8 +28,8 @@ by one function in the same shape as the other console functions:
                       acknowledgement: cumulative buckets (label = upper bound in seconds),
                       a sum and a count, over all time so rate() works
 
-The console writer gets column-only read access to source (id, slug) behind a policy, for
-the per-source count. Additive; downgrade removes the function, the policy and the grant.
+No new table access: the console writer already reads alert, case_event and notification.
+Additive; downgrade removes the function.
 """
 
 from alembic import op
@@ -43,11 +42,6 @@ BUCKETS = (60, 300, 900, 3600, 14400)
 
 
 def upgrade() -> None:
-    op.execute("GRANT SELECT (id, slug) ON source TO soc_console_writer")
-    op.execute(
-        "CREATE POLICY console_select ON source FOR SELECT TO soc_console_writer USING (true)"
-    )
-
     op.execute(
         f"""
         CREATE FUNCTION pipeline_metrics()
@@ -68,9 +62,8 @@ def upgrade() -> None:
             kinds(kind) AS (VALUES ('page'), ('repage1'), ('repage2')),
             bounds(le) AS (VALUES {", ".join(f"({b})" for b in BUCKETS)}),
             clean AS (SELECT greatest(secs, 0) AS secs FROM acked)
-            SELECT 'alerts_ingested', s.slug,
-                   (SELECT count(*) FROM alert a WHERE a.source_id = s.id)::double precision
-            FROM source s
+            SELECT 'alerts_ingested', '',
+                   (SELECT count(*) FROM alert)::double precision
             UNION ALL SELECT 'alerts_grouped', '',
                    (SELECT count(*) FROM case_event WHERE kind = 'alert_attached')::double precision
             UNION ALL SELECT 'alerts_late', '',
@@ -105,5 +98,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP FUNCTION pipeline_metrics()")
-    op.execute("DROP POLICY console_select ON source")
-    op.execute("REVOKE SELECT (id, slug) ON source FROM soc_console_writer")

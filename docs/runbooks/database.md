@@ -13,7 +13,7 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
 | `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call nine functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`, `due_page_count`, `queue_repages` and `reconcile_health` (two numbers about the catch-up worker: how many sources have a cursor and the longest any has gone without a good run; no names, no errors). Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
 | `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call five functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case` and `close_case` (a note is required) and `pipeline_metrics` (migration `0009`, counters for `/metrics`). Staff view across clients; per-client roles come with sign-in. |
-| `soc_console_writer` | nobody (never logs in) | Owns those five functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; `SELECT (id, slug)` on `source`; each behind an RLS policy for this role. |
+| `soc_console_writer` | nobody (never logs in) | Owns those five functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; each behind an RLS policy for this role. |
 | `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, `SELECT (last_success, started_at)` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
 | `soc_reconcile` | the catch-up worker (migration `0006`; its login comes with the worker) | **No table privileges.** It can call `ingest_alert()` (the same insert as the webhook, so a detection fetched later is attributed and de-duplicated the same way) and three cursor functions: `reconcile_cursor_get`, `reconcile_cursor_advance` (only forward, never past the present) and `reconcile_cursor_fail` (a short, cleaned failure code; never moves the cursor). |
 | `soc_reconcile_writer` | nobody (never logs in) | Owns the three cursor functions. Table access: `SELECT (id, slug, enabled)` on `source` and `SELECT`/`INSERT`/`UPDATE` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
@@ -303,12 +303,12 @@ counted from the database, not inside a process: they add up and survive a resta
 `pipeline_metrics()` (migration `0009`, callable by `soc_console` only), returns them and the console
 turns them into Prometheus text at `/metrics`. The page is on the console app only (the public
 app answers 404), behind the same tailnet identity and allow-list as every console page. It holds no
-client names, host names, alert text or secrets: the only label values are our own source slugs, the
+client names, host names, alert text or secrets: the only label values are the
 push kinds `page`, `repage1`, `repage2` and the fixed histogram bounds.
 
 | Series | Meaning |
 |---|---|
-| `soc_alerts_ingested_total{source}` | Alerts stored, per source. `sum(...)` for the total. |
+| `soc_alerts_ingested_total` | Alerts stored, all sources together. Not split per source on purpose: a source's name is the secret part of its webhook address. |
 | `soc_alerts_grouped_total` | Alerts that joined a case that already existed (the grouping de-duplication). A second delivery of the same event id is refused by the database and not recorded, so that kind cannot be counted from rows. |
 | `soc_alerts_late_total` | Alerts stored more than 5 minutes after their detection time: the same rule as the `LATE:` push title, so in practice the catch-up worker's finds. |
 | `soc_pages_sent_total{kind}` | Pushes sent. A re-send (`repage1`, `repage2`) is counted apart from the first push (`page`). |

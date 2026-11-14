@@ -62,7 +62,7 @@ def test_an_empty_database_still_gives_valid_text() -> None:
 
 def test_rows_become_the_named_series() -> None:
     rows = [
-        ("alerts_ingested", "edr-main", 7.0),
+        ("alerts_ingested", "", 7.0),
         ("alerts_grouped", "", 3.0),
         ("pages_sent", "page", 2.0),
         ("pages_sent", "repage1", 1.0),
@@ -72,7 +72,7 @@ def test_rows_become_the_named_series() -> None:
         ("ack_latency_count", "", 2.0),
     ]
     samples = parse(metrics.render(rows))
-    assert samples['soc_alerts_ingested_total{source="edr-main"}'] == 7
+    assert samples["soc_alerts_ingested_total"] == 7
     assert samples["soc_alerts_grouped_total"] == 3
     assert samples['soc_pages_sent_total{kind="repage1"}'] == 1
     assert samples['soc_ack_latency_seconds_bucket{le="300"}'] == 2
@@ -82,13 +82,13 @@ def test_rows_become_the_named_series() -> None:
 
 @pytest.mark.parametrize(
     "label",
-    ['x"} 1\nsoc_evil 1\n#', "Acme Corp", "host-1.example.com", "a" * 33, "", "UPPER", "a b"],
+    ['x"} 1\nsoc_evil 1\n#', "Acme Corp", "host-1.example.com", "lc-abcdefgh12345678", "UPPER"],
 )
-def test_a_label_that_is_not_a_source_slug_is_dropped(label: str) -> None:
+def test_alerts_ingested_never_carries_a_label(label: str) -> None:
     text = metrics.render([("alerts_ingested", label, 5.0)])
     assert "Acme" not in text and "evil" not in text and "host-1" not in text
+    assert "lc-abcdefgh" not in text and 'source="' not in text
     parse(text)
-    assert 'source="' not in text
 
 
 def test_unknown_kinds_unknown_metrics_and_odd_bounds_are_dropped() -> None:
@@ -194,7 +194,7 @@ def rows(fx: Fixture) -> list[tuple[str, str, float]]:
         return [(m, label, v) for m, label, v in c.execute("SELECT * FROM pipeline_metrics()")]
 
 
-def page(fx: Fixture) -> dict[str, float]:
+def page_text(fx: Fixture) -> str:
     settings = Settings(
         env="prod",
         console_users=LOGIN,
@@ -205,14 +205,18 @@ def page(fx: Fixture) -> dict[str, float]:
     r = TestClient(create_console_app(settings)).get("/metrics", headers=HEADERS)
     assert r.status_code == 200
     assert r.headers["content-type"] == metrics.CONTENT_TYPE
-    return parse(r.text)
+    return r.text
+
+
+def page(fx: Fixture) -> dict[str, float]:
+    return parse(page_text(fx))
 
 
 def test_the_numbers_on_a_seeded_database(fx: Fixture) -> None:
     seeded(fx)
     s = page(fx)
-    assert s['soc_alerts_ingested_total{source="src-a"}'] == 4
-    assert s['soc_alerts_ingested_total{source="src-b"}'] == 2
+    assert s["soc_alerts_ingested_total"] == 6
+    assert not any("source=" in k for k in s)
     assert s["soc_alerts_grouped_total"] == 2
     assert s["soc_alerts_late_total"] == 1
     assert s['soc_pages_sent_total{kind="page"}'] == 2
@@ -229,10 +233,11 @@ def test_the_numbers_on_a_seeded_database(fx: Fixture) -> None:
     assert s['soc_ack_latency_seconds_bucket{le="+Inf"}'] == 2
 
 
-def test_a_source_with_no_alerts_reports_zero_and_a_new_database_is_all_zero(fx: Fixture) -> None:
-    s = page(fx)
-    assert s['soc_alerts_ingested_total{source="src-a"}'] == 0
-    assert s['soc_alerts_ingested_total{source="src-b"}'] == 0
+def test_a_new_database_is_all_zero_and_no_source_slug_appears(fx: Fixture) -> None:
+    text = page_text(fx)
+    assert "src-a" not in text and "src-b" not in text
+    s = parse(text)
+    assert s["soc_alerts_ingested_total"] == 0
     assert s["soc_cases_acknowledged_total"] == 0 and s["soc_ack_latency_seconds_count"] == 0
 
 
@@ -283,7 +288,7 @@ def test_it_is_a_definer_owned_by_the_writer_with_a_pinned_search_path(fx: Fixtu
     assert row[1] and any(x.startswith("search_path=pg_catalog") for x in row[1])
 
 
-def test_the_login_still_reads_no_table_and_the_writer_sees_two_source_columns(
+def test_the_login_still_reads_no_table_and_the_writer_gets_nothing_on_source(
     fx: Fixture,
 ) -> None:
     with fx.db.connect("soc_console") as c:
@@ -299,8 +304,7 @@ def test_the_login_still_reads_no_table_and_the_writer_sees_two_source_columns(
             )[0]
         )
 
-    assert can("id", "SELECT") and can("slug", "SELECT")
-    for column in ("client_id", "type", "external_id", "secret_ref", "enabled"):
+    for column in ("id", "slug", "client_id", "type", "external_id", "secret_ref", "enabled"):
         assert not can(column, "SELECT"), column
     for column in ("id", "slug", "secret_ref", "enabled"):
         assert not can(column, "UPDATE") and not can(column, "INSERT"), column
@@ -311,12 +315,5 @@ def test_downgrading_removes_it_and_upgrading_brings_it_back(db: TestDb, fx: Fix
     soc_db.downgrade(url, "0008")
     with db.connect() as c:
         assert c.execute("SELECT to_regprocedure('pipeline_metrics()')").fetchone() == (None,)
-        assert c.execute(
-            "SELECT count(*) FROM pg_policies WHERE tablename = 'source' "
-            "AND policyname = 'console_select'"
-        ).fetchone() == (0,)
-        assert c.execute(
-            "SELECT has_column_privilege('soc_console_writer', 'source', 'slug', 'SELECT')"
-        ).fetchone() == (False,)
     soc_db.upgrade(url)
     assert ("alerts_grouped", "", 0.0) in rows(fx)

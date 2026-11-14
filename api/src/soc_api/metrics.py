@@ -3,8 +3,9 @@
 The numbers come from the database (pipeline_metrics(), migration 0009), because the API,
 the pager worker and the catch-up worker are separate containers and in-process counters
 would not add up. This module only turns those rows into text. A label value is accepted
-only if it has the shape of one of our own source slugs, a page kind from a fixed list or a
-histogram bound; anything else is dropped, so nothing a sender wrote can reach the output.
+only if it is a page kind from a fixed list or a histogram bound; anything else is dropped, so
+nothing a sender wrote can reach the output. Source slugs are never labels: a slug is the secret
+part of the public webhook path.
 """
 
 import re
@@ -14,8 +15,8 @@ from collections.abc import Iterable
 COUNTERS = {
     "alerts_ingested": (
         "soc_alerts_ingested_total",
-        "Alerts stored, per source.",
-        "source",
+        "Alerts stored (all sources; a source's name is never a label).",
+        None,
     ),
     "alerts_grouped": (
         "soc_alerts_grouped_total",
@@ -31,7 +32,6 @@ COUNTERS = {
     "pages_failed": ("soc_pages_failed_total", "Pushes that failed.", None),
     "cases_acked": ("soc_cases_acknowledged_total", "Cases acknowledged by a person.", None),
 }
-SOURCE = re.compile(r"^[a-z0-9-]{1,32}$")
 KINDS = {"page", "repage1", "repage2"}
 BOUND = re.compile(r"^[0-9]{1,6}$")
 HISTOGRAM = "soc_ack_latency_seconds"
@@ -54,9 +54,7 @@ def render(rows: Iterable[tuple[str, str, float]]) -> str:
             if label_name is None:
                 if label == "":
                     out.append(f"{name} {number(value)}")
-            elif (label_name == "source" and SOURCE.match(label)) or (
-                label_name == "kind" and label in KINDS
-            ):
+            elif label_name == "kind" and label in KINDS:
                 out.append(f'{name}{{{label_name}="{label}"}} {number(value)}')
     out += [
         f"# HELP {HISTOGRAM} Seconds from the first push for a case to its acknowledgement.",
