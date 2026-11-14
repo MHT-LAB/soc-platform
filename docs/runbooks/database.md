@@ -500,10 +500,16 @@ repeated. It prints one line: `restore outcome=ok set=... alerts=N cases=N revis
 `restore outcome=failed step=... reason=...`. It never prints database error text, which can
 quote rows.
 
-**Before you start:** `env/image.env` must exist (`deploy.sh` writes it), because the script runs
-the stack through `deploy/soc-compose.sh`. On a host that has never been deployed there is no
-`image.env` yet; how to get one without also starting the tunnel and the worker is still to be
-settled in the restore drill (note 26, B1e).
+**Before you start:** `env/image.env` must exist, because the script runs the stack through
+`deploy/soc-compose.sh`. A host that is already deployed has one. On a host that has never been
+deployed (a lost host being rebuilt, or the restore drill), make it with
+`deploy/deploy.sh --prepare <tag>` after step 2: the same signature, SBOM and source checks as a
+deploy, then it writes `image.env` and pulls the images, and starts nothing (no database, no
+tunnel, no worker; the tunnel files are not needed). It refuses while any `soc` container is
+running, and when `image.env` already names a different image, so it cannot change a deployed
+host's image behind its migrations. Use the tag of the newest signed release (`deploy.log` on the
+old host, or the release runs on GitHub): the image must be at least as new as the release that
+made the set, or the migration step after the load cannot recognise the database's version.
 
 **Steps (all on the Stage A host, as root; label each by where you are):**
 

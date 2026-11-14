@@ -2,6 +2,17 @@
 # Deploy a signed soc-api image.
 #
 #   deploy.sh <tag>        e.g. deploy.sh edge   or   deploy.sh sha-60983cc
+#   deploy.sh --prepare <tag>
+#
+# --prepare is for a host that has never been deployed (a lost host being rebuilt, or the
+# restore drill): it runs the same checks (steps 1-2c, the console allowlist, the database
+# and worker files), then writes env/image.env and pulls the images, and STARTS NOTHING: no
+# database, no migration, no tunnel, no worker. restore.sh needs image.env, and a plain
+# deploy would start the tunnel and the pager on a host that holds no data yet. It refuses
+# while any container of the soc project is running, and when image.env already names a
+# different image, so it can never change the image of a deployed host behind its migrations.
+# The tunnel files are not required (the tunnel is not started). After the restore, run a
+# normal `deploy.sh <tag>`.
 #
 # 1. Verify the image signature with cosign. The signing certificate must come
 #    from this repository's release workflow, on main or a version tag, run by a
@@ -53,7 +64,13 @@ export PATH="${SOC_TEST_BIN:+$SOC_TEST_BIN:}/usr/local/sbin:/usr/local/bin:/usr/
 # operator's terminal turn the allowlist off and the API docs on.
 export SOC_ENV=prod
 
-TAG="${1:?usage: deploy.sh <tag>}"
+PREPARE=0
+if [[ "${1:-}" == --prepare ]]; then
+  PREPARE=1
+  shift
+fi
+TAG="${1:?usage: deploy.sh [--prepare] <tag>}"
+[[ "$TAG" != -* ]] || { echo "FAILED: unknown option $TAG" >&2; exit 1; }
 STATE="${SOC_STATE_DIR:-/srv/soc}"
 REPO="${SOC_REPO:-ghcr.io/mht-lab/soc-api}"
 SOURCE="${SOC_SOURCE:-MHT-LAB/soc-platform}"
@@ -142,7 +159,7 @@ fi
 # credentials the tunnel would crash-loop after the swap; stop here instead.
 # cloudflared requires a catch-all; this checks it exists (order is checked in
 # the deploy repo's CI with `cloudflared tunnel ingress rule`).
-if [[ "$OVERLAY" == compose.stage-a.yml ]]; then
+if [[ "$OVERLAY" == compose.stage-a.yml && "$PREPARE" == 0 ]]; then
   TUNNEL_DIR="$STATE/tunnel"
   [[ -s "$TUNNEL_DIR/config.yml" ]] \
     || die "$TUNNEL_DIR/config.yml is missing (install it from the deploy repo)"
@@ -152,6 +169,17 @@ if [[ "$OVERLAY" == compose.stage-a.yml ]]; then
   [[ -s "$TUNNEL_DIR/$CREDS" ]] || die "tunnel credentials $TUNNEL_DIR/$CREDS are missing"
   grep -qE '^[[:space:]]*-[[:space:]]*service:[[:space:]]*http_status:404[[:space:]]*$' "$TUNNEL_DIR/config.yml" \
     || die "$TUNNEL_DIR/config.yml must include the catch-all rule '- service: http_status:404'"
+fi
+
+# --prepare never runs beside a live stack (checked again below, after the image is known).
+soc_running() {
+  local ids
+  ids="$(docker ps -q --filter label=com.docker.compose.project=soc)" \
+    || die "could not list the running containers"
+  [[ -n "$ids" ]]
+}
+if [[ "$PREPARE" == 1 ]] && soc_running; then
+  die "--prepare is for a host whose stack is not running; containers of the soc project are running (deploy with deploy.sh <tag>)"
 fi
 
 # --- 1-2. verify signature and SBOM attestation ---------------------------------
@@ -198,6 +226,24 @@ log "source commit $REV is on main"
 PREVIOUS=""
 [[ -f "$IMAGE_ENV" ]] && PREVIOUS="$(grep -E '^SOC_API_IMAGE=' "$IMAGE_ENV" | cut -d= -f2- || true)"
 write_image() { umask 077; printf 'SOC_API_IMAGE=%s\nSOC_STATE_DIR=%s\n' "$1" "$STATE" > "$IMAGE_ENV"; }
+
+if [[ "$PREPARE" == 1 ]]; then
+  # Only a host with no image yet, or a re-run for the same image, may be prepared.
+  if [[ -n "$PREVIOUS" && "$PREVIOUS" != "$REPO@$DIGEST" ]]; then
+    die "$IMAGE_ENV already names another image; --prepare never changes a deployed host's image (deploy with deploy.sh <tag>)"
+  fi
+  [[ ! -f "$IMAGE_ENV" || -n "$PREVIOUS" ]] \
+    || die "$IMAGE_ENV exists but names no image; look at it, remove it, then run --prepare again"
+  soc_running && die "containers of the soc project started during the checks; nothing was changed"
+  write_image "$REPO@$DIGEST"
+  compose pull --quiet || {
+    [[ -n "$PREVIOUS" ]] || rm -f "$IMAGE_ENV"
+    die "pulling the images failed"
+  }
+  log "prepared $REPO@$DIGEST: image.env written, images pulled, nothing started (next: restore.sh, then deploy.sh $TAG)"
+  exit 0
+fi
+
 write_image "$REPO@$DIGEST"
 
 # --- 4. start, wait for health, confirm the running image is the verified one -------
