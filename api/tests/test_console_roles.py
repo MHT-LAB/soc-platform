@@ -99,6 +99,7 @@ def test_the_action_routes_are_the_ones_expected() -> None:
     assert found == {
         ("POST", "/console/case/{case_id}/ack"),
         ("POST", "/console/case/{case_id}/close"),
+        ("POST", "/console/case/{case_id}/close-as"),
         ("POST", "/console/case/{case_id}/ack-phone"),
     }
 

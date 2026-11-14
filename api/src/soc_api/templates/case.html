@@ -28,7 +28,7 @@
 
   {% if c.status == "closed" %}
   <section class="card">
-    <div class="card-head"><h2>Closed</h2><span class="meta">{{ c.closed_at | utc }}</span></div>
+    <div class="card-head"><h2>Closed{% if c.verdict | verdict %} · {{ c.verdict | verdict }}{% endif %}</h2><span class="meta">{{ c.closed_at | utc }}</span></div>
     <p>{{ (c.closing_note or "") | vis }}</p>
   </section>
   {% elif not can_act %}
@@ -50,6 +50,17 @@
         <button type="submit">Close</button>
       </form>
     </div>
+    <form class="quick" method="post" action="/console/case/{{ c.id }}/close-as">
+      <input type="hidden" name="token" value="{{ tokens['close-as'] }}">
+      <label for="quick-note">Close with a reason (the note is optional)</label>
+      <input id="quick-note" name="note" type="text" maxlength="2000" autocomplete="off">
+      <div class="quick-buttons">
+        <button type="submit" name="verdict" value="test">Our test</button>
+        <button type="submit" name="verdict" value="authorized_activity">Our admin work</button>
+        <button type="submit" name="verdict" value="false_positive">False positive</button>
+        <button type="submit" name="verdict" value="duplicate">Duplicate</button>
+      </div>
+    </form>
   </section>
   {% else %}
   <section class="card"><p class="dim">Acknowledge and Close are off: the console form secret is not set on this host.</p></section>
