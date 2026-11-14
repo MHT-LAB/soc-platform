@@ -12,8 +12,8 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_ingest` | the public ingest handler | **No table privileges.** It can only call `ingest_alert()`, which maps a delivery to a source, attributes it (unknown tenant -> the Unassigned client) and inserts idempotently on `(source, event_id)`. |
 | `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
 | `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call nine functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`, `due_page_count`, `queue_repages` and `reconcile_health` (two numbers about the catch-up worker: how many sources have a cursor and the longest any has gone without a good run; no names, no errors). Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
-| `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call four functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case` and `close_case` (a note is required). Staff view across clients; per-client roles come with sign-in. |
-| `soc_console_writer` | nobody (never logs in) | Owns those four functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; each behind an RLS policy for this role. |
+| `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call five functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case` and `close_case` (a note is required) and `pipeline_metrics` (migration `0009`, counters for `/metrics`). Staff view across clients; per-client roles come with sign-in. |
+| `soc_console_writer` | nobody (never logs in) | Owns those five functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; each behind an RLS policy for this role. |
 | `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, `SELECT (last_success, started_at)` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
 | `soc_reconcile` | the catch-up worker (migration `0006`; its login comes with the worker) | **No table privileges.** It can call `ingest_alert()` (the same insert as the webhook, so a detection fetched later is attributed and de-duplicated the same way) and three cursor functions: `reconcile_cursor_get`, `reconcile_cursor_advance` (only forward, never past the present) and `reconcile_cursor_fail` (a short, cleaned failure code; never moves the cursor). |
 | `soc_reconcile_writer` | nobody (never logs in) | Owns the three cursor functions. Table access: `SELECT (id, slug, enabled)` on `source` and `SELECT`/`INSERT`/`UPDATE` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
@@ -295,6 +295,38 @@ timestamps (one transaction's `now()` is constant), so a case history has one or
 `acknowledged`, `closed` or `all`; limit 1-500. A rollback to a release from before
 `0004` keeps working (it only writes `open`); `alembic downgrade` removes the functions,
 the checks and the wider grouping.
+
+## Pipeline metrics (`/metrics` on the console)
+
+The API, the pager worker and the catch-up worker are separate containers, so the counters are
+counted from the database, not inside a process: they add up and survive a restart. One function,
+`pipeline_metrics()` (migration `0009`, callable by `soc_console` only), returns them and the console
+turns them into Prometheus text at `/metrics`. The page is on the console app only (the public
+app answers 404), behind the same tailnet identity and allow-list as every console page. It holds no
+client names, host names, alert text or secrets: the only label values are the
+push kinds `page`, `repage1`, `repage2` and the fixed histogram bounds.
+
+| Series | Meaning |
+|---|---|
+| `soc_alerts_ingested_total` | Alerts stored, all sources together. Not split per source on purpose: a source's name is the secret part of its webhook address. |
+| `soc_alerts_grouped_total` | Alerts that joined a case that already existed (the grouping de-duplication). A second delivery of the same event id is refused by the database and not recorded, so that kind cannot be counted from rows. |
+| `soc_alerts_late_total` | Alerts stored more than 5 minutes after their detection time: the same rule as the `LATE:` push title, so in practice the catch-up worker's finds. |
+| `soc_pages_sent_total{kind}` | Pushes sent. A re-send (`repage1`, `repage2`) is counted apart from the first push (`page`). |
+| `soc_pages_failed_total` | Pushes that failed. |
+| `soc_cases_acknowledged_total` | Cases acknowledged by a person (console or phone). |
+| `soc_ack_latency_seconds` | Histogram, all time: seconds from the first push for a case to its acknowledgement; bounds 1, 5, 15 minutes, 1 and 4 hours. A case acknowledged before any push went out has no latency (it still counts as acknowledged). Use `rate()` or `increase()` for the last week. |
+
+All are counters over the whole life of the database, so they only go up (a purge of old alerts
+would lower them; nothing deletes alerts today).
+
+From the host (any local process can send the identity header, so use one on the allow-list):
+
+    # on the SOC host, as root; the console listens on loopback only
+    curl -fsS -H 'Tailscale-User-Login: <a login from SOC_CONSOLE_USERS>' http://127.0.0.1:8081/metrics
+
+A `503` means the console has no database login or cannot reach the database; the body says which in
+a fixed sentence and never more. Not included yet: JSON logs, the age of the last good backup and
+the catch-up worker's quiet time (the console login cannot read those; the STALE push still does).
 
 ## The console's case pages on the host
 
