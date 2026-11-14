@@ -166,6 +166,7 @@ def test_console_app_serves_only_console_and_healthz() -> None:
         "/healthz",
         "/console",
         "/console/console.css",
+        "/metrics",
         "/console/cases",
         "/console/case/{case_id}",
         "/console/case/{case_id}/ack",

@@ -75,6 +75,14 @@ class CaseDb:
         except psycopg.Error as exc:
             raise CasesUnavailable from exc
 
+    def pipeline_metrics(self) -> list[tuple[str, str, float]]:
+        try:
+            with psycopg.connect(**self._params) as conn:
+                rows = conn.execute("SELECT metric, label, value FROM pipeline_metrics()")
+                return [(str(m), str(label), float(v)) for m, label, v in rows.fetchall()]
+        except psycopg.Error as exc:
+            raise CasesUnavailable from exc
+
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         doc = self._one("SELECT get_case(%s)", (case_id,))
         return doc if isinstance(doc, dict) else None

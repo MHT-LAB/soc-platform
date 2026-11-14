@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from soc_api import csrf, status
+from soc_api import csrf, metrics, status
 from soc_api.cases import (
     STATUS_FILTERS,
     CaseDb,
@@ -142,6 +142,27 @@ async def console(
 async def console_css(_: Annotated[str, Depends(tailnet_user)]) -> HTMLResponse:
     css = (HERE / "static" / "console.css").read_text()
     return HTMLResponse(css, media_type="text/css")
+
+
+# ---- metrics ----
+
+
+@router.get("/metrics")
+async def metrics_page(
+    _: Annotated[str, Depends(tailnet_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Response:
+    """Pipeline counters for a scraper on the host. Same identity and allow-list as every
+    console page; it is on the console app only, never on the public one. No detail about a
+    failure is returned."""
+    db = case_db(settings)
+    if db is None:
+        return PlainTextResponse("metrics are not set up on this host", status_code=503)
+    try:
+        rows = await run_in_threadpool(db.pipeline_metrics)
+    except CasesUnavailable:
+        return PlainTextResponse("the database cannot be reached", status_code=503)
+    return PlainTextResponse(metrics.render(rows), media_type=metrics.CONTENT_TYPE)
 
 
 # ---- cases ----
