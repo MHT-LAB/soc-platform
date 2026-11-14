@@ -75,7 +75,14 @@ def db() -> Iterator[TestDb]:
     soc_db.upgrade(test_db.sqlalchemy_url())
     # Roles are cluster-wide; give them a login so tests connect as the real thing.
     with test_db.connect() as admin:
-        for role in ("soc_app", "soc_ingest", "soc_worker", "soc_console", "soc_reconcile"):
+        for role in (
+            "soc_app",
+            "soc_ingest",
+            "soc_worker",
+            "soc_console",
+            "soc_reconcile",
+            "soc_posture",
+        ):
             # Roles are cluster-wide, so a login test's connection cap (soc_api.db) from an
             # earlier run on the same server must not leak into this one.
             admin.execute(f"ALTER ROLE {role} LOGIN PASSWORD '{ROLE_PASSWORD}' CONNECTION LIMIT -1")

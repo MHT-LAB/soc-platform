@@ -28,6 +28,8 @@ HEALTHY: dict[str, Any] = {
     "reconcile_sources": 0,
     "reconcile_quiet_s": None,
     "backup_age_s": 60.0,
+    "posture_runs": 0,
+    "posture_quiet_s": None,
 }
 
 
@@ -49,6 +51,10 @@ def test_a_healthy_pipeline_gives_no_notices() -> None:
             "catch-up worker has not completed a run for 40 minutes",
         ),
         ({"backup_age_s": 14 * 3600.0}, "backup is 14 hours old"),
+        (
+            {"posture_runs": 4, "posture_quiet_s": 2700.0},
+            "posture collector has not completed a run for 45 minutes",
+        ),
     ],
 )
 def test_each_condition_is_named_with_its_age(change: dict[str, Any], words: str) -> None:
@@ -64,6 +70,8 @@ def test_each_condition_is_named_with_its_age(change: dict[str, Any], words: str
         {"reconcile_sources": 1, "reconcile_quiet_s": 1800.0},
         {"reconcile_sources": 0, "reconcile_quiet_s": 99999.0},
         {"backup_age_s": 13 * 3600.0},
+        {"posture_runs": 1, "posture_quiet_s": 1800.0},
+        {"posture_runs": 0, "posture_quiet_s": 99999.0},
     ],
 )
 def test_the_limits_are_the_pagers_and_a_value_at_the_limit_is_not_degraded(
@@ -172,6 +180,21 @@ def test_a_fresh_catch_up_worker_is_not_degraded(fx: Fixture) -> None:
         "SELECT id, now(), now() - interval '2 minutes', now() - interval '3 hours' "
         "FROM source WHERE slug = 'src-a'"
     )
+    assert "Pipeline degraded" not in shown(fx, "/console")
+
+
+def test_a_quiet_posture_collector_shows_the_banner(fx: Fixture) -> None:
+    fx.run("INSERT INTO posture_run (at, ok) VALUES (now() - interval '50 minutes', true)")
+    assert "posture collector has not completed a run for 50 minutes" in shown(fx, "/console")
+
+
+def test_a_fresh_posture_collector_is_not_degraded(fx: Fixture) -> None:
+    fx.run("INSERT INTO posture_run (at, ok) VALUES (now() - interval '2 minutes', true)")
+    assert "Pipeline degraded" not in shown(fx, "/console")
+
+
+def test_a_host_without_the_collector_is_not_degraded(fx: Fixture) -> None:
+    assert fx.one("SELECT count(*) FROM posture_run") == (0,)
     assert "Pipeline degraded" not in shown(fx, "/console")
 
 

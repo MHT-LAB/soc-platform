@@ -31,6 +31,7 @@ def age(seconds: float) -> str:
 def notices(health: dict[str, Any]) -> list[str]:
     """One sentence per condition that holds; an empty list when the pipeline is healthy."""
     quiet = health["reconcile_quiet_s"]
+    posture = health["posture_quiet_s"]
     firing = stale_reasons(
         {
             "oldest_pending_page_s": health["oldest_pending_page_s"],
@@ -41,6 +42,8 @@ def notices(health: dict[str, Any]) -> list[str]:
         None if quiet is None else float(quiet),
         float(health["backup_age_s"]),
         LIMITS,
+        int(health["posture_runs"]),
+        None if posture is None else float(posture),
     )
     out: list[str] = []
     if firing["pages_pending"]:
@@ -54,6 +57,8 @@ def notices(health: dict[str, Any]) -> list[str]:
         )
     if firing["reconcile_quiet"]:
         out.append(f"The catch-up worker has not completed a run for {age(float(quiet or 0))}.")
+    if firing["posture_quiet"]:
+        out.append(f"The posture collector has not completed a run for {age(float(posture or 0))}.")
     if firing["backup_old"]:
         out.append(f"The last good database backup is {age(float(health['backup_age_s']))} old.")
     return out

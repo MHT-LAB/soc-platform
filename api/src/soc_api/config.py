@@ -97,6 +97,18 @@ class Settings(BaseSettings):
     # Overridable for tests only in practice: plain http is refused outside SOC_ENV=dev.
     reconcile_api_url: str = "https://api.limacharlie.io"
     reconcile_jwt_url: str = "https://jwt.limacharlie.io"
+    # The posture collector (soc_api.posture). env/posture-db.env holds the URL of a role that
+    # can only call the posture functions (soc_posture); env/posture-lc.env holds the read-only
+    # `soc-posture` API key and the organization id.
+    posture_database_url: SecretStr = SecretStr("")
+    posture_lc_key: SecretStr = SecretStr("")
+    posture_lc_oid: str = ""
+    # Capped so the container's health check (15 minutes) always holds.
+    posture_interval_seconds: float = Field(default=300.0, ge=60.0, le=600.0)
+    posture_health_file: str = "/tmp/posture-health"  # noqa: S108 - the container's tmpfs
+    # Overridable for tests only in practice: plain http is refused outside SOC_ENV=dev.
+    posture_api_url: str = "https://api.limacharlie.io"
+    posture_jwt_url: str = "https://jwt.limacharlie.io"
     # How long after an urgent page was sent it is sent again if nobody acknowledged it.
     repage_first_seconds: int = Field(default=900, ge=1, le=86400)
     repage_second_seconds: int = Field(default=3600, ge=2, le=604800)

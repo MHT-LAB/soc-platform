@@ -26,6 +26,7 @@ WORKER_FUNCTIONS = [
     "due_page_count()",
     "queue_repages(interval, interval)",
     "reconcile_health()",
+    "posture_health()",
 ]
 
 

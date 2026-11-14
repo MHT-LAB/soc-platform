@@ -11,14 +11,16 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_app` | console, workers | Read and write rows of **one client**: the one in the session setting `app.client_id`. With it unset it sees nothing. No `DELETE`; `case_event` is append-only. |
 | `soc_ingest` | the public ingest handler | **No table privileges.** It can only call `ingest_alert()`, which maps a delivery to a source, attributes it (unknown tenant -> the Unassigned client) and inserts idempotently on `(source, event_id)`. |
 | `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
-| `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call nine functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`, `due_page_count`, `queue_repages` and `reconcile_health` (two numbers about the catch-up worker: how many sources have a cursor and the longest any has gone without a good run; no names, no errors). Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
+| `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call ten functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`, `due_page_count`, `queue_repages` and `reconcile_health` (two numbers about the catch-up worker: how many sources have a cursor and the longest any has gone without a good run; no names, no errors) and `posture_health` (the same two numbers for the posture collector). Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
 | `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call six functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case` and `close_case` (a note is required), `pipeline_metrics` (migration `0009`, counters for `/metrics`) and `console_health` (migration `0010`, plain numbers for the degraded banner). Staff view across clients; per-client roles come with sign-in. |
-| `soc_console_writer` | nobody (never logs in) | Owns those six functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; `SELECT (started_at, last_ok_at)` on `backup_state` and `SELECT (last_success, started_at)` on `reconcile_cursor`; each behind an RLS policy for this role. |
-| `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, `SELECT (last_success, started_at)` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
+| `soc_console_writer` | nobody (never logs in) | Owns those six functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; `SELECT (started_at, last_ok_at)` on `backup_state`, `SELECT (last_success, started_at)` on `reconcile_cursor` and `SELECT (at, ok)` on `posture_run`; each behind an RLS policy for this role. |
+| `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, `SELECT (last_success, started_at)` on `reconcile_cursor` and `SELECT (at, ok)` on `posture_run`, each behind an RLS policy for this role. No `DELETE`. |
 | `soc_reconcile` | the catch-up worker (migration `0006`; its login comes with the worker) | **No table privileges.** It can call `ingest_alert()` (the same insert as the webhook, so a detection fetched later is attributed and de-duplicated the same way) and three cursor functions: `reconcile_cursor_get`, `reconcile_cursor_advance` (only forward, never past the present) and `reconcile_cursor_fail` (a short, cleaned failure code; never moves the cursor). |
 | `soc_reconcile_writer` | nobody (never logs in) | Owns the three cursor functions. Table access: `SELECT (id, slug, enabled)` on `source` and `SELECT`/`INSERT`/`UPDATE` on `reconcile_cursor`, each behind an RLS policy for this role. No `DELETE`. |
+| `soc_posture` | the posture collector (migration `0011`; its login comes with the service) | **No table privileges.** It can call two functions: `posture_record` (validates one JSON snapshot in SQL, replaces the current sensor and rule state and appends one count point, in one transaction; an invalid document raises and writes nothing) and `posture_fail` (a short, cleaned failure code). |
+| `soc_posture_writer` | nobody (never logs in) | Owns those two functions. Table access, each behind an RLS policy for this role: `SELECT`/`INSERT`/`DELETE` on `posture_run` and `sensor_count`, `SELECT`/`INSERT`/`UPDATE`/`DELETE` on `sensor_state` and `rule_inventory`. Sees no source, alert or case. |
 
-All nine service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
+All eleven service roles are created `NOLOGIN` and are never superuser, `BYPASSRLS`,
 `CREATEROLE` or `CREATEDB`. Roles are cluster-wide, so they can already exist: if one has
 any of those (or a `*_writer` role can log in), the migration stops instead of reusing it. Deploy gives each a login and a password
 from the secrets manager; no credential is in this repo.
@@ -477,6 +479,78 @@ token reply was wrong), `http_401/403/429/4xx/5xx`, `timeout`, `network`, `redir
 `bad_json`, `bad_shape`, `bad_cursor`, `too_many_pages`, `too_many_items`, `unknown_source` (the
 configured slug is not an enabled source), `db_error`, `db_unavailable`, `internal`.
 
+## The posture collector on the host
+
+The Ops Overview needs to know what the detection source says about our own setup: which
+sensors exist and which are online, which detection rules exist and which are enabled, and
+whether the organization has errors. The `posture` service (`python -m soc_api.posture`,
+compose profile `posture`) reads exactly that every five minutes with a read-only key and keeps
+one snapshot in the database (migration `0011`).
+
+* **What it reads** (REST, read only): `GET sensors/{oid}` twice (everyone, and with the online
+  filter; the status page does the same), `GET hive/dr-general|dr-managed|dr-service/{oid}`
+  (the rule inventory) and `GET errors/{oid}`. Rule bodies and error messages arrive in the
+  replies but are dropped on the spot: only rule names, the enabled flag, the error count and
+  the newest error's component name are kept. Usage and quota are **not** read (the key has no
+  billing permission). Output listings are **never** requested: they return secrets (a test
+  pins the exact list of paths).
+* **What it stores.** `sensor_state` (one current row per sensor: host name, platform, version,
+  online, isolated, tags, last seen; sensors that disappear are removed), `sensor_count` (a point
+  per run: online, offline, isolated), `rule_inventory` (namespace, name, enabled),
+  `posture_run` (when, ok or a short failure code, the error count). Both series are pruned to 30
+  days on every write. A run is all or nothing: the whole document is validated in SQL
+  (`posture_record`) and an invalid or oversized one, a refused key or any vendor failure leaves
+  the last good snapshot untouched and records a failed run.
+* **STALE.** The pager's check raises `SOC STALE` (and the console banner shows a line) when the
+  collector has had no good run for 30 minutes (`Limits.posture_stale_s`). A host that never ran
+  the collector is never flagged: the check needs at least one `posture_run` row.
+* **Containment.** Same as the catch-up worker: `db` and `egress` networks, never `default`,
+  nothing published, read-only root, no capabilities, only its two files
+  (`env/posture-db.env`, `env/posture-lc.env`). https only, no redirects, timeouts, size and page
+  caps, the key never logged; one log line per run, counts only (no host names):
+  `posture outcome=ok sensors=N online=N rules=N errors=N skipped=N`.
+
+**The key (rule: workflow, console name, rotation, secrets-manager entry).**
+
+| | |
+|---|---|
+| Workflow | `posture` service on the host snapshots sensors, rules and org errors every 5 minutes for the Ops Overview |
+| Console name | `soc-posture` (LimaCharlie organization, API keys) |
+| Permissions | `sensor.list`, `sensor.get`, `dr.list`, `org.get`: read only. Never `output.list`, `*.set`, `*.del`, `billing.ctrl`, `sensor.task` |
+| Secrets manager | folder `/soc`: `SOC_LC_POSTURE_KEY` (the organization id reuses `SOC_LC_OID`) |
+| Rotation | 90 days (calendar event, Secrets Access register, tracker row on creation) |
+
+**Set it up (root on the host, once, after `init-secrets.sh`):**
+
+    deploy/init-posture.sh          # the database side; prints one value for the secrets manager
+    deploy/deploy.sh edge           # the migration job gives soc_posture its login
+    deploy/init-posture-lc.sh       # asks for the API key (hidden) and the organization id
+
+Create the key first, with exactly the permissions above. `init-posture-lc.sh` writes
+`env/posture-lc.env` (mode 600) and never prints the key; keep the key in the secrets manager
+(`SOC_LC_POSTURE_KEY`, `SOC_LC_OID`). `deploy.sh` and `soc-compose.sh` turn the profile on
+exactly when both `posture-db.env` and `posture-lc.env` exist (and the host has a database); the
+first alone only gives the role its login, the second without the first, or an empty file, is
+refused. Lost host: `init-posture.sh --restore` (`SOC_DB_POSTURE_PASSWORD`) and
+`init-posture-lc.sh --restore` (`SOC_LC_POSTURE_KEY`, `SOC_LC_OID`).
+
+**Checks (nothing here prints a key, a host name or a rule name):**
+
+    deploy/soc-compose.sh run --rm posture python -m soc_api.posture check
+        # read-only: auth works? sensor and online counts, which sensor fields the list carries,
+        # rule counts per namespace, org error count. If it fails with http_403, the key lacks a
+        # permission: stop and ask, do not widen it past the list above.
+    deploy/soc-compose.sh stop posture
+    deploy/soc-compose.sh run --rm posture python -m soc_api.posture once
+        # one run now; prints nothing on success (see the log line), exit code 0 or 1
+    deploy/soc-compose.sh start posture
+    deploy/soc-compose.sh logs --since 15m posture
+
+Failure codes in the log and in `posture_run.error`: `jwt_*`, `http_401/403/404/429/4xx/5xx`,
+`timeout`, `network`, `redirect`, `too_large`, `bad_json`, `bad_shape`, `bad_cursor`,
+`too_many_pages`, `too_many_items`, `rejected` (the database refused the document), `db_error`,
+`internal`.
+
 ## Backups
 
 The database is exported every six hours, encrypted, and the export stays on the host for the
@@ -562,13 +636,13 @@ made the set, or the migration step after the load cannot recognise the database
    `systemctl stop soc-backup.timer`
 2. A new host only: rebuild the secret files from the secrets manager, each with its `--restore`
    mode: `init-secrets.sh --restore` (five values in the environment), `init-backup.sh --restore`
-   (`SOC_BACKUP_AGE_PUB`), then `init-worker.sh`, `init-console-db.sh`, `init-reconcile.sh` and
-   `init-reconcile-lc.sh` with `--restore` as each header describes. The data directory must be
-   empty (`init-secrets.sh --restore` creates it). Also by hand, not needed for the restore itself:
-   `env/console.env` (the allow-list), `env/policy.env` (from the deploy repo, not secret) and, for
-   the console's sensor fleet panel, `env/lc.env` (mode 600, `SOC_LC_OID` and `SOC_LC_API_KEY`, the
-   read-only key; see the deploy runbook). The restore drill on 2026-11-14 rebuilt everything else
-   from the secrets manager alone.
+   (`SOC_BACKUP_AGE_PUB`), then `init-worker.sh`, `init-console-db.sh`, `init-reconcile.sh`,
+   `init-reconcile-lc.sh`, `init-posture.sh` and `init-posture-lc.sh` with `--restore` as each
+   header describes. The data directory must be empty (`init-secrets.sh --restore` creates it).
+   Also by hand, not needed for the restore itself: `env/console.env` (the allow-list),
+   `env/policy.env` (from the deploy repo, not secret) and, for the console's sensor fleet panel,
+   `env/lc.env` (mode 600, `SOC_LC_OID` and `SOC_LC_API_KEY`, the read-only key; see the deploy
+   runbook). The restore drill on 2026-11-14 rebuilt everything else from the secrets manager alone.
 3. Put the set where the script can read it: the three files `soc-<time>.dump.age`,
    `soc-<time>.globals.sql.age` and `soc-<time>.sha256` together. They are in `/srv/soc/backups`, or
    inside the container's archive on the NAS. Either copy all three into `/srv/soc/backups`, or give

@@ -294,6 +294,12 @@ class Db:
         quiet = rows[0][1]
         return int(rows[0][0]), None if quiet is None else float(quiet)
 
+    def posture_health(self) -> tuple[int, float | None]:
+        """(posture runs there have ever been, seconds since the last good one)."""
+        _, rows = self._run("SELECT runs, quiet_s FROM posture_health()")
+        quiet = rows[0][1]
+        return int(rows[0][0]), None if quiet is None else float(quiet)
+
     def backup_health(self) -> tuple[float, int | None]:
         """(seconds since the last good dump or since the migration, size of that dump or None)."""
         _, rows = self._run("SELECT age_s, bytes FROM backup_health()")
@@ -342,6 +348,7 @@ class Limits:
     repage_second_s: float = 3600.0
     stale_check_s: float = 300.0
     reconcile_stale_s: float = 1800.0  # the catch-up worker runs every few minutes
+    posture_stale_s: float = 1800.0  # the posture collector runs every five minutes
     backup_stale_s: float = 13 * 3600.0  # the dump runs every 6 h: two missed runs
     late_after_s: float = LATE_AFTER_S
     retry_notice_s: float = 60.0  # between tries of a notice that could not be sent
@@ -353,6 +360,7 @@ STALE_TEXT = {
     "caser_behind": "New alerts are not becoming cases (over 10 minutes behind).",
     "db_unreachable": "The pager cannot reach its database (over 10 minutes).",
     "reconcile_quiet": "The catch-up worker has not completed a run in over 30 minutes.",
+    "posture_quiet": "The posture collector has not completed a run in over 30 minutes.",
     "backup_old": "The last good database backup is over 13 hours old.",
 }
 
@@ -363,6 +371,8 @@ def stale_reasons(
     quiet: float | None,
     backup_age: float,
     limits: Limits,
+    posture_runs: int = 0,
+    posture_quiet: float | None = None,
 ) -> dict[str, bool]:
     """Which STALE conditions hold right now. The worker pushes on these; the console's
     banner shows the same ones, so both read the thresholds from here."""
@@ -372,6 +382,7 @@ def stale_reasons(
         "page_failed": (counts["failed_last_24h"] or 0) > 0,
         "caser_behind": (counts["oldest_unassigned_alert_s"] or 0) > after,
         "reconcile_quiet": sources > 0 and (quiet or 0) > limits.reconcile_stale_s,
+        "posture_quiet": posture_runs > 0 and (posture_quiet or 0) > limits.posture_stale_s,
         "backup_old": backup_age > limits.backup_stale_s,
     }
 
@@ -598,7 +609,10 @@ class Worker:
         c = self.db.heartbeat_counts(now)
         sources, quiet = self.db.reconcile_health()
         backup_age, _ = self.db.backup_health()
-        firing = stale_reasons(c, sources, quiet, backup_age, self.limits)
+        posture_runs, posture_quiet = self.db.posture_health()
+        firing = stale_reasons(
+            c, sources, quiet, backup_age, self.limits, posture_runs, posture_quiet
+        )
         for reason, is_firing in firing.items():
             if not is_firing:
                 continue
