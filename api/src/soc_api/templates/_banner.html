@@ -1,0 +1,6 @@
+{% if request.state.degraded %}
+<div class="degraded" role="alert">
+  <strong>Pipeline degraded</strong>
+  <ul>{% for line in request.state.degraded %}<li>{{ line }}</li>{% endfor %}</ul>
+</div>
+{% endif %}

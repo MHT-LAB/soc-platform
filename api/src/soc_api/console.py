@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from soc_api import csrf, metrics, status
+from soc_api import banner, csrf, metrics, status
 from soc_api.cases import (
     STATUS_FILTERS,
     CaseDb,
@@ -75,6 +75,26 @@ def tailnet_user(
     return login
 
 
+async def load_banner(
+    request: Request,
+    _: Annotated[str, Depends(tailnet_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> None:
+    """Work out the degraded banner for a page. Runs after the identity check (the
+    dependency is shared), so a refused request never reaches the database. No database
+    login for the console means cases are not set up here yet: no banner."""
+    request.state.degraded = []
+    db = case_db(settings)
+    if db is None:
+        return
+    try:
+        health = await run_in_threadpool(db.console_health)
+    except CasesUnavailable:
+        request.state.degraded = [banner.UNREADABLE]
+        return
+    request.state.degraded = banner.notices(health)
+
+
 # Pipeline stages as they exist today. "live" stages are probed; the rest show
 # the sprint that delivers them, so the page never pretends something works.
 def pipeline(tunnel: status.TunnelStatus, fleet: status.Fleet) -> list[dict[str, str]]:
@@ -111,7 +131,7 @@ SPRINTS = [
 ]
 
 
-@router.get("/console", response_class=HTMLResponse)
+@router.get("/console", response_class=HTMLResponse, dependencies=[Depends(load_banner)])
 async def console(
     request: Request,
     user: Annotated[str, Depends(tailnet_user)],
@@ -208,7 +228,7 @@ def unavailable(request: Request, user: str, configured: bool) -> Response:
     return notice(request, user, "Cases unavailable", text, 503)
 
 
-@router.get("/console/cases", response_class=HTMLResponse)
+@router.get("/console/cases", response_class=HTMLResponse, dependencies=[Depends(load_banner)])
 async def cases_page(
     request: Request,
     user: Annotated[str, Depends(tailnet_user)],
@@ -263,7 +283,9 @@ async def render_case(
     )
 
 
-@router.get("/console/case/{case_id}", response_class=HTMLResponse)
+@router.get(
+    "/console/case/{case_id}", response_class=HTMLResponse, dependencies=[Depends(load_banner)]
+)
 async def case_page(
     case_id: str,
     request: Request,
@@ -322,7 +344,7 @@ def finished(cid: str, result: str) -> Response | None:
     return None
 
 
-@router.post("/console/case/{case_id}/ack")
+@router.post("/console/case/{case_id}/ack", dependencies=[Depends(load_banner)])
 async def ack_case(
     case_id: str,
     request: Request,
@@ -346,7 +368,7 @@ async def ack_case(
     )
 
 
-@router.post("/console/case/{case_id}/close")
+@router.post("/console/case/{case_id}/close", dependencies=[Depends(load_banner)])
 async def close_case(
     case_id: str,
     request: Request,
