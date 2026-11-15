@@ -126,7 +126,8 @@ class Settings(BaseSettings):
 
     # The console's case pages. The URL is for soc_console (no table privileges; four
     # functions), host 127.0.0.1 because the console runs on the host network. The secret
-    # signs the one-use form tokens that stop another site from pressing Ack or Close.
+    # signs the form tokens that stop another site from pressing Ack or Close. A token is
+    # not single-use: it is valid for the UTC day it was made and the next one (see csrf.py).
     console_database_url: SecretStr = SecretStr("")
     console_secret: SecretStr = SecretStr("")
     # Signs the Acknowledge link on a phone notification. Held by the console and the worker
