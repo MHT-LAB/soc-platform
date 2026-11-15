@@ -9,14 +9,14 @@
 <link rel="stylesheet" href="/console/console.css">
 </head>
 <body>
-{% set nav_on = "ops" %}{% set sub = "operations" %}
+{% set nav_on = "system" %}{% set sub = "system" %}
 {% include "_header.html" %}
 {% include "_banner.html" %}
 
 <main>
   <div class="head">
-    <h1>Operations</h1>
-    <p>Live state of the pipeline. Stages that aren't built yet say so.</p>
+    <h1>System</h1>
+    <p>Build, tunnel and sensor status of this host. The Operations tab has the live pipeline.</p>
   </div>
 
   <section class="strip" aria-label="Summary">

@@ -320,6 +320,17 @@ compose up -d --remove-orphans
 if healthy && running_digest_ok "$REPO@$DIGEST"; then
   build="$(curl -fsS --max-time 2 http://127.0.0.1:8080/version || echo '{}')"
   log "deployed $REPO@$DIGEST build=$build"
+  # Mark the deploy for the console's Ops Overview timeline, as the database superuser over the
+  # database container's own socket (the way backup.sh records a dump). $REV passed the
+  # 40-hex check above, so it is safe in the statement. A failed mark never fails the deploy.
+  if [[ "$DB" == 1 ]]; then
+    if compose exec -T db psql -U postgres -d soc -v ON_ERROR_STOP=1 -qAt \
+      -c "SELECT deploy_mark('$REV')" > /dev/null 2>&1; then
+      log "deploy marked for the overview timeline"
+    else
+      log "could not record the deploy mark (the deploy itself succeeded)"
+    fi
+  fi
   compose ps
   exit 0
 fi

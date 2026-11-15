@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}Operations{% endblock %} · SOC Console</title>
+<link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+{% include "_header.html" %}
+{% include "_banner.html" %}
+<main>
+  <div class="head split">
+    <div>
+      <h1>{% block h1 %}{% endblock %}</h1>
+      <p>{% block lede %}{% endblock %}</p>
+    </div>
+    {% include "_filters.html" %}
+  </div>
+{% block body %}{% endblock %}
+  <footer>Tailnet only. Read-only. Times are UTC and the page refreshes every 30 seconds.</footer>
+</main>
+</body>
+</html>

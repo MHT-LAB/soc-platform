@@ -24,6 +24,11 @@ class CasesUnavailable(Exception):
     """The case database cannot be reached or refused the call."""
 
 
+class BadFilter(Exception):
+    """The overview function refused its period or client (the page validates first, so this
+    is a client that does not exist)."""
+
+
 def parse_case_id(raw: str) -> str | None:
     """A canonical lower-case UUID, or None. Nothing else ever reaches the database."""
     try:
@@ -94,6 +99,21 @@ class CaseDb:
         if row is None:
             raise CasesUnavailable
         return dict(zip(names, row, strict=True))
+
+    def ops_overview(self, days: int, client: str) -> dict[str, Any]:
+        """The one document behind the overview pages (migration 0012). A refusal by the
+        function itself (a period or client it does not know) is BadFilter; anything else is
+        CasesUnavailable, with no detail."""
+        try:
+            with psycopg.connect(**self._params) as conn:
+                row = conn.execute("SELECT ops_overview(%s, %s)", (days, client)).fetchone()
+        except psycopg.errors.RaiseException as exc:
+            raise BadFilter from exc
+        except psycopg.Error as exc:
+            raise CasesUnavailable from exc
+        if row is None or not isinstance(row[0], dict):
+            raise CasesUnavailable
+        return row[0]
 
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         doc = self._one("SELECT get_case(%s)", (case_id,))

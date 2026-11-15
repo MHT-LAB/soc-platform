@@ -1,0 +1,30 @@
+{% extends "ov_base.html" %}
+{% import "_ov_macros.html" as m %}
+{% set sub = "sources" %}
+{% block title %}Sources{% endblock %}
+{% block h1 %}Sources{% endblock %}
+{% block lede %}Where alerts come from. A source is named by its type; the address it posts to is a secret and is never shown.{% endblock %}
+{% block body %}
+  <section class="card">
+    <div class="card-head"><h2>Alert sources · {{ period_label | lower }}</h2><span class="meta">{{ rows | length }} sources</span></div>
+    {% if rows %}
+    <div class="scroll"><table>
+      <thead><tr><th>Source</th><th>Client</th><th>On</th><th class="r">Alerts</th><th class="r">Last alert</th><th>Catch-up</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>{{ m.dot(r.state) }} <span class="mono">{{ r.label | vis(60) }}</span></td>
+          <td>{{ r.client | vis(64) }}</td>
+          <td>{% if r.enabled %}<span class="chip up">enabled</span>{% else %}<span class="chip idle">off</span>{% endif %}</td>
+          <td class="r mono">{{ r.alerts }}</td>
+          <td class="r mono dim">{{ r.last_alert }}</td>
+          <td><span class="chip {{ r.catch_state }}">{{ r.catch_text | vis(60) }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><p>No source is configured{% if client != "all" %} for this client{% endif %}.</p></div>
+    {% endif %}
+  </section>
+{% endblock %}

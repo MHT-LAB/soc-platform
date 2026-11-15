@@ -11,7 +11,7 @@ Real logins and roles arrive with SSO in Sprint 3.
 """
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -20,8 +20,10 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from soc_api import banner, csrf, metrics, status
+from soc_api import overview as ov
 from soc_api.cases import (
     STATUS_FILTERS,
+    BadFilter,
     CaseDb,
     CasesUnavailable,
     fmt_time,
@@ -55,6 +57,10 @@ CONSOLE_CSP = (
     "default-src 'none'; style-src 'self'; img-src 'self' data:; "
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
+
+# The overview pages load one script from this origin (the UTC clock). Still no inline script,
+# no inline style, nothing from another origin, and no form.
+OVERVIEW_CSP = CONSOLE_CSP.replace("style-src 'self';", "style-src 'self'; script-src 'self';")
 
 # The case pages have forms, so they may post to themselves and nowhere else. Still no
 # script and nothing from another origin.
@@ -117,6 +123,7 @@ async def load_banner(
     dependency is shared), so a refused request never reaches the database. No database
     login for the console means cases are not set up here yet: no banner."""
     request.state.degraded = []
+    request.state.health_known = False
     db = case_db(settings)
     if db is None:
         return
@@ -124,8 +131,10 @@ async def load_banner(
         health = await run_in_threadpool(db.console_health)
     except CasesUnavailable:
         request.state.degraded = [banner.UNREADABLE]
+        request.state.health_known = True
         return
     request.state.degraded = banner.notices(health)
+    request.state.health_known = True
 
 
 # Pipeline stages as they exist today. "live" stages are probed; the rest show
@@ -189,6 +198,12 @@ async def console(
     )
     response.headers["Content-Security-Policy"] = CONSOLE_CSP
     return response
+
+
+@router.get("/console/overview.js")
+async def overview_js(_: Annotated[str, Depends(tailnet_user)]) -> Response:
+    """The one script the overview pages load: it ticks the UTC clock and does nothing else."""
+    return Response((HERE / "static" / "overview.js").read_text(), media_type="text/javascript")
 
 
 @router.get("/console/console.css")
@@ -485,3 +500,116 @@ async def ack_from_phone(
     }
     code, text = replies.get(result, (500, "Not done."))
     return PlainTextResponse(text, status_code=code)
+
+
+# ---- the Ops Overview pages ----
+# Read-only: no form, no action. Four views of the one document ops_overview() returns. The
+# period and client filters are links; both come from the query string and are checked here
+# (a fixed set, and the slug syntax) before the database is asked, and the database checks the
+# client exists.
+
+
+def overview_csp(response: Response) -> Response:
+    response.headers["Content-Security-Policy"] = OVERVIEW_CSP
+    return response
+
+
+def ov_context(page: str, data: dict[str, Any]) -> dict[str, Any]:
+    if page == "overview":
+        return {
+            "title_line": ov.title_line(data),
+            "flow": ov.flow(data),
+            "tiles": ov.status_tiles(data),
+            "response": ov.response(data),
+            "queue": ov.queue(data),
+            "timeline": ov.timeline(data),
+            "funnel": ov.funnel(data),
+            "tactics": ov.tactics(data),
+            "health": ov.health(data),
+        }
+    if page == "fleet":
+        rows = ov.fleet(data)
+        return {"rows": rows, "offline": sum(1 for r in rows if r["state"] == "down")}
+    if page == "sources":
+        return {"rows": ov.sources(data)}
+    return {"rows": ov.rules(data), "inventory": data["rule_inventory"]}
+
+
+async def render_overview(
+    request: Request,
+    user: str,
+    settings: Settings,
+    page: str,
+    period: str,
+    client: str,
+) -> Response:
+    try:
+        period_key, days, client = ov.parse_filters(period, client)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"unknown {exc}") from None
+    db = case_db(settings)
+    if db is None:
+        return unavailable(request, user, configured=False)
+    try:
+        data = await run_in_threadpool(db.ops_overview, days, client)
+    except BadFilter:
+        raise HTTPException(status_code=400, detail="unknown client") from None
+    except CasesUnavailable:
+        return unavailable(request, user, configured=True)
+    context: dict[str, Any] = {
+        "user": user,
+        "nav_on": page,
+        "keep": ov.keep_query(period_key, client),
+        "period_label": ov.PERIODS[period_key][1],
+        "client": client,
+        "filters": ov.filter_links(period_key, client, data["clients"], f"/console/{page}"),
+        "clock": ov.clock(data["generated_at"]),
+        "scripted": True,
+        "data": data,
+    }
+    context.update(ov_context(page, data))
+    return overview_csp(templates.TemplateResponse(request, f"{page}.html", context))
+
+
+@router.get("/console/overview", response_class=HTMLResponse, dependencies=[Depends(load_banner)])
+async def overview_page(
+    request: Request,
+    user: Annotated[str, Depends(tailnet_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    period: Annotated[str, Query(max_length=8)] = ov.DEFAULT_PERIOD,
+    client: Annotated[str, Query(max_length=64)] = "all",
+) -> Response:
+    return await render_overview(request, user, settings, "overview", period, client)
+
+
+@router.get("/console/fleet", response_class=HTMLResponse, dependencies=[Depends(load_banner)])
+async def fleet_page(
+    request: Request,
+    user: Annotated[str, Depends(tailnet_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    period: Annotated[str, Query(max_length=8)] = ov.DEFAULT_PERIOD,
+    client: Annotated[str, Query(max_length=64)] = "all",
+) -> Response:
+    return await render_overview(request, user, settings, "fleet", period, client)
+
+
+@router.get("/console/sources", response_class=HTMLResponse, dependencies=[Depends(load_banner)])
+async def sources_page(
+    request: Request,
+    user: Annotated[str, Depends(tailnet_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    period: Annotated[str, Query(max_length=8)] = ov.DEFAULT_PERIOD,
+    client: Annotated[str, Query(max_length=64)] = "all",
+) -> Response:
+    return await render_overview(request, user, settings, "sources", period, client)
+
+
+@router.get("/console/rules", response_class=HTMLResponse, dependencies=[Depends(load_banner)])
+async def rules_page(
+    request: Request,
+    user: Annotated[str, Depends(tailnet_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    period: Annotated[str, Query(max_length=8)] = ov.DEFAULT_PERIOD,
+    client: Annotated[str, Query(max_length=64)] = "all",
+) -> Response:
+    return await render_overview(request, user, settings, "rules", period, client)

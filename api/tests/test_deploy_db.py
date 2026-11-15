@@ -17,6 +17,7 @@ case "$1" in
     if [[ "$*" == *" ps -q "* ]]; then echo cid; fi
     if [[ "$*" == *" up -d db"* ]]; then exit "${FAKE_UP_DB_RC:-0}"; fi
     if [[ "$*" == *" run --rm migrate"* ]]; then exit "${FAKE_MIGRATE_RC:-0}"; fi
+    if [[ "$*" == *" exec "* ]]; then exit "${FAKE_EXEC_RC:-0}"; fi
     exit 0 ;;
   inspect)
     if [[ "$*" == *Health* ]]; then echo "${FAKE_DB_HEALTH:-healthy}"; else echo imgid; fi
@@ -407,3 +408,45 @@ def test_a_profile_set_in_the_shell_cannot_turn_the_posture_collector_on(tmp_pat
     r = host.deploy(COMPOSE_PROFILES="db,posture")
     assert r.returncode == 0, r.stdout
     assert all("[profiles=db]" in c for c in host.calls())
+
+
+# ---- the deploy mark (migration 0012) ----
+
+
+def test_a_good_deploy_is_marked_as_the_superuser_with_the_verified_commit(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    calls = host.calls()
+    mark = calls[index(calls, "deploy_mark(")]
+    assert f"SELECT deploy_mark('{host.main}')" in mark
+    assert " exec -T db psql -U postgres -d soc " in mark and "ON_ERROR_STOP=1" in mark
+    # after the swap and the health check, never before
+    assert index(calls, " up -d --remove-orphans") < index(calls, "deploy_mark(")
+    assert "deploy marked" in r.stdout
+
+
+def test_a_failed_mark_is_logged_and_does_not_fail_the_deploy(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    r = host.deploy(FAKE_EXEC_RC="1")
+    assert r.returncode == 0, r.stdout
+    assert "could not record the deploy mark" in r.stdout and "deploy marked" not in r.stdout
+    assert "deployed " in r.stdout
+
+
+def test_a_deploy_that_fails_its_health_check_is_not_marked(tmp_path: Path) -> None:
+    host = DbHost(tmp_path)
+    (host.state / "pgdata").mkdir()
+    host.with_previous_image()
+    r = host.deploy(FAKE_DIGEST="sha256:" + "f" * 64, FAKE_REPODIGEST=f"{IMAGE}@sha256:" + "e" * 64)
+    assert r.returncode == 1
+    assert not any("deploy_mark(" in c for c in host.calls())
+
+
+def test_a_host_without_a_database_has_nothing_to_mark(tmp_path: Path) -> None:
+    host = DbHost(tmp_path, db_env=False, owner_env=False)
+    r = host.deploy()
+    assert r.returncode == 0, r.stdout
+    assert not any("deploy_mark(" in c for c in host.calls())

@@ -1,0 +1,43 @@
+{% extends "ov_base.html" %}
+{% import "_ov_macros.html" as m %}
+{% set sub = "rules" %}
+{% block title %}Rules{% endblock %}
+{% block h1 %}Rules{% endblock %}
+{% block lede %}The noisiest detection rules in the period, which is where tuning starts.{% endblock %}
+{% block body %}
+  <section class="card">
+    <div class="card-head"><h2>Top noisy rules · {{ period_label | lower }}</h2><span class="meta">up to 25, by alert count</span></div>
+    {% if rows %}
+    <div class="scroll"><table>
+      <thead><tr><th>Rule</th><th>Worst severity</th><th class="r">Alerts</th><th></th><th class="r">Cases</th><th class="r">Last</th><th>In the rule inventory</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td class="mono">{{ r.rule | vis(200) }}</td>
+          <td><span class="sev {{ r.worst | sev }}">{{ r.worst }}</span></td>
+          <td class="r mono">{{ r.alerts }}</td>
+          <td class="barcell">{{ m.hbar(r.pct, "fill") }}</td>
+          <td class="r mono">{{ r.cases }}</td>
+          <td class="r mono dim">{{ r.last }}</td>
+          <td><span class="chip {{ 'up' if r.inventory == 'enabled' else 'idle' }}">{{ r.inventory }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><p>No alerts in this period.</p></div>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Rule inventory</h2><span class="meta">from the posture collector (names and on/off only)</span></div>
+    {% if inventory %}
+    <div class="scroll"><table>
+      <thead><tr><th>Namespace</th><th class="r">Enabled</th><th class="r">Disabled</th></tr></thead>
+      <tbody>{% for i in inventory %}<tr><td class="mono">{{ i.namespace | vis(32) }}</td><td class="r mono">{{ i.enabled }}</td><td class="r mono">{{ i.disabled }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><p>The posture collector has not reported any rules.</p></div>
+    {% endif %}
+  </section>
+{% endblock %}

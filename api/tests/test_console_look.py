@@ -147,6 +147,8 @@ def test_every_page_has_the_shield_and_no_inline_script_or_style(fx: Fixture) ->
 def test_the_templates_hold_no_inline_script_or_style_attribute() -> None:
     for tpl in TEMPLATES.glob("*.html"):
         text = tpl.read_text().lower()
+        # the one script is the overview pages' external clock file (see test_ops_overview_pages)
+        text = text.replace('<script src="/console/overview.js" defer></script>', "")
         assert "<script" not in text and "<style" not in text, tpl.name
         assert " style=" not in text, tpl.name
 

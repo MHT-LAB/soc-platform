@@ -288,7 +288,7 @@ def test_it_is_a_definer_owned_by_the_writer_with_a_pinned_search_path(fx: Fixtu
     assert row[1] and any(x.startswith("search_path=pg_catalog") for x in row[1])
 
 
-def test_the_login_still_reads_no_table_and_the_writer_gets_nothing_on_source(
+def test_the_login_still_reads_no_table_and_the_writer_cannot_read_a_source_slug(
     fx: Fixture,
 ) -> None:
     with fx.db.connect("soc_console") as c:
@@ -304,7 +304,11 @@ def test_the_login_still_reads_no_table_and_the_writer_gets_nothing_on_source(
             )[0]
         )
 
-    for column in ("id", "slug", "client_id", "type", "external_id", "secret_ref", "enabled"):
+    # 0012 lets the overview read four columns; the slug (the secret part of the webhook
+    # path), the external id and the secret reference stay out of reach
+    for column in ("id", "client_id", "type", "enabled"):
+        assert can(column, "SELECT"), column
+    for column in ("slug", "external_id", "secret_ref"):
         assert not can(column, "SELECT"), column
     for column in ("id", "slug", "secret_ref", "enabled"):
         assert not can(column, "UPDATE") and not can(column, "INSERT"), column

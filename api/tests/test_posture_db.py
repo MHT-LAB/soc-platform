@@ -177,15 +177,18 @@ def test_the_writers_hold_only_what_they_need(fx: Fixture) -> None:
     assert table_rights("soc_posture_writer", "sensor_count") == (True, True, False, True)
     assert table_rights("soc_posture_writer", "posture_run") == (True, True, False, True)
     # the worker's and the console's writers see two columns of the run table, nothing else
+    # (the console's writer also reads the org error count, the fleet and the rule inventory
+    # since 0012, for the Ops Overview, and nothing else: see test_ops_overview_db)
     for role in ("soc_worker_writer", "soc_console_writer"):
-        for table in ("sensor_state", "sensor_count", "rule_inventory"):
+        tables = ("sensor_state", "sensor_count", "rule_inventory")
+        for table in tables if role == "soc_worker_writer" else ("sensor_count",):
             assert table_rights(role, table) == (False,) * 4, (role, table)
         assert table_rights(role, "posture_run") == (False,) * 4  # table level: none
         for column, expected in (
             ("at", True),
             ("ok", True),
             ("error", False),
-            ("org_error_count", False),
+            ("org_error_count", role == "soc_console_writer"),
             ("org_error_component", False),
         ):
             assert fx.one(
