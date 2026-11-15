@@ -481,7 +481,9 @@ def test_a_client_error_stops_at_once_and_raises_a_stale_push(
     assert len(ntfy_server.requests) == count  # once per 6 hours, not every check
     clock.advance(hours=6)
     worker.tick()
-    assert len(ntfy_server.requests) == count + 1
+    # Count STALE pushes only: the clock starts at the real time, so six hours on can
+    # cross the weekly OK (Sunday evening Eastern), which is a separate, correct push.
+    assert ntfy_server.titles().count("SOC STALE") == 2
 
 
 def test_the_topic_is_never_logged_or_stored(
