@@ -37,7 +37,22 @@ the code, not only the files:
 - **Container image:** remains private.
 
 Enabled on the public repo: CodeQL (extended queries), secret scanning with
-push protection, validity checks and generic patterns, Dependabot alerts and
-security updates, private vulnerability reporting, and a `main` ruleset
-(pull request required, squash only, all seven checks required, signed
-commits, linear history, no force-push or deletion, no bypass).
+push protection, Dependabot alerts and security updates, private
+vulnerability reporting, and a `main` ruleset (pull request required, squash
+only, all seven checks required, signed commits, linear history, no
+force-push or deletion, no bypass). See the correction below for secret
+scanning.
+
+## Correction (2026-11-14)
+This record first said secret scanning was enabled with validity checks and
+generic (non-provider) patterns. That was wrong for this repository: it is
+owned by a personal account, and on that account type GitHub offers secret
+scanning for known provider patterns and push protection, both of which are
+on. Generic-pattern scanning and validity checks are not available here; they
+come with the paid Secret Protection product at organization level.
+
+The gap is covered in the repository itself: gitleaks runs in pre-commit and in
+CI on every push and pull request, and catches generic patterns that the
+provider-pattern scanner does not. A scheduled check in the private deploy
+repository compares the live repository settings with a committed copy, so a
+setting that drifts from what this record says is noticed.
