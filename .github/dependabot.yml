@@ -23,3 +23,18 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  # The digest-pinned images in the compose files (postgres, restic, cloudflared). The
+  # docker-compose ecosystem reads compose*.yml; if this ecosystem is ever unavailable,
+  # the docker one with the same directory is the fallback.
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule:
+      interval: weekly
+    groups:
+      compose-images:
+        patterns: ["*"]
+    # A Postgres major upgrade needs a dump and restore, so it moves by hand; digest and
+    # minor/patch refreshes only.
+    ignore:
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
