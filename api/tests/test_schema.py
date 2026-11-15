@@ -142,6 +142,40 @@ def test_downgrade_then_upgrade_again(db: TestDb) -> None:
     soc_db.upgrade(db.sqlalchemy_url())
 
 
+CASE_INDEXES = {
+    "alert_case_received": ("alert", ["case_id", "received_at"]),
+    "case_event_case_at": ("case_event", ["case_id", "at"]),
+}
+
+
+def case_indexes(db: TestDb) -> dict[str, tuple[str, list[str]]]:
+    """The two per-case indexes (0014) as {name: (table, [columns in order])}."""
+    with db.connect() as c:
+        rows = c.execute(
+            """
+            SELECT i.relname, t.relname,
+                   array_agg(a.attname ORDER BY k.ord)
+            FROM pg_index x
+            JOIN pg_class i ON i.oid = x.indexrelid
+            JOIN pg_class t ON t.oid = x.indrelid
+            CROSS JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+            WHERE i.relname = ANY(%s)
+            GROUP BY i.relname, t.relname
+            """,
+            (list(CASE_INDEXES),),
+        ).fetchall()
+    return {r[0]: (r[1], list(r[2])) for r in rows}
+
+
+def test_the_per_case_indexes_exist_and_downgrade_drops_them(db: TestDb) -> None:
+    assert case_indexes(db) == CASE_INDEXES
+    soc_db.downgrade(db.sqlalchemy_url(), "0013")
+    assert case_indexes(db) == {}
+    soc_db.upgrade(db.sqlalchemy_url())
+    assert case_indexes(db) == CASE_INDEXES
+
+
 def test_demo_seed_loads(db: TestDb) -> None:
     seed_demo(db.sqlalchemy_url(), SEED_FILE)
     with db.connect() as c:
