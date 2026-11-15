@@ -349,9 +349,14 @@ def build_router(settings: Settings, store: AlertStore | None = None) -> APIRout
         body = bytes(chunks)
 
         if not signature_matches(secrets[source], body, request.headers.get(SIGNATURE_HEADER)):
-            # A failed attempt costs double against both buckets.
+            # A failed attempt costs double against the per-IP bucket. It must not spend the
+            # source's real budget: give back what this request took and count it in a
+            # separate failure bucket instead.
             limiter.hit(f"ip:{ip}", settings.ingest_rate_per_ip)
-            limiter.hit(f"src:{source}", settings.ingest_rate_per_source)
+            limiter.refund(f"src:{source}")
+            if not limiter.hit(f"src-fail:{source}", settings.ingest_rate_fail_per_source):
+                outcome("rate_limited", 429, source, request_id, len(body))
+                return _reply(429, {"detail": "Too Many Requests"}, **{"Retry-After": "60"})
             outcome("bad_signature", 401, source, request_id, len(body))
             return _reply(401, {"detail": "Unauthorized"})
         # The per-IP bucket is for unauthenticated noise. A burst of real detections

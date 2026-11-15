@@ -96,7 +96,7 @@ optional, non-secret file:
 
 | File (mode 600) | Holds | Read by |
 |---|---|---|
-| `env/worker.env` | `SOC_NTFY_TOPIC` and the `soc_worker` URL | `worker` |
+| `env/worker.env` | `SOC_NTFY_TOPIC`, the `soc_worker` URL and, optionally, `SOC_WORKER_DEADMAN_URL` (the monitor's ping address; a secret) | `worker` |
 | `env/worker-owner.env` | `SOC_WORKER_DB_PASSWORD` (the migration job gives `soc_worker` its login) | `migrate` |
 | `env/policy.env` (optional) | `SOC_PAGE_POLICY={"<category>": <0-5>, ...}` (0 = case, no push); also `SOC_PAGE_CAP` (1-1000, default 10) and `SOC_PAGE_CAP_WINDOW_SECONDS` (60-86400, default 600); a value outside those bounds stops the worker at start instead of silencing it; `SOC_CONSOLE_BASE_URL` (the console's address, so a tap opens the case page); `SOC_REPAGE_FIRST_SECONDS` (default 900) and `SOC_REPAGE_SECOND_SECONDS` (default 3600) | `worker` |
 
@@ -257,6 +257,36 @@ prints once: the topic to subscribe the phone to (in the ntfy app, default serve
 terminal and its scrollback, then run `deploy.sh`: the migration job gives `soc_worker` its
 login and the worker starts. Lost host: `init-worker.sh --restore` rebuilds both files from
 `SOC_NTFY_TOPIC` and `SOC_DB_WORKER_PASSWORD` in the environment.
+
+**Dead-man's switch (optional).** Nothing else reports a worker that hangs or crash-loops:
+Docker restarts a container that exits but not one that is only `unhealthy`, and every STALE push
+comes from the worker itself. So the worker can call an outside heartbeat monitor. When
+`SOC_WORKER_DEADMAN_URL` is set in `env/worker.env`, the worker sends one `GET` to it after each
+good pass (a pass with no database error), at most once a minute, from a background thread with
+a five-second timeout and no redirects. A slow, down or unreachable monitor never delays or fails a pass,
+and a pass where the database is unreachable sends nothing: the silence is the signal. Set the
+monitor to email a monitored team mailbox (not a personal address) when pings stop for **10 minutes**.
+Use a monitor that lives outside this host's failure domain (a hosted heartbeat service, not
+something running on the same host or hypervisor), or a host outage silences the monitor with it.
+The URL is a secret (anyone holding it can fake a heartbeat): HTTPS only, never logged (a
+failure is a short code such as `deadman outcome=failed code=timeout`), never printed. **When it
+is unset, nothing is sent and nothing is monitored**: the weekly "SOC OK" push is then the only outside
+sign of life, up to seven days apart. A malformed value does not stop the pager: the worker logs
+`deadman outcome=invalid_url`, runs without it, and the monitor alerts because pings never arrive.
+Add it to a host that already has `worker.env` (the URL goes in the environment, never on the
+command line, which lands in shell history and the process list):
+
+    # On the host, as root, in a terminal. The URL comes from the monitor, not from chat.
+    read -r -s SOC_WORKER_DEADMAN_URL; export SOC_WORKER_DEADMAN_URL
+    deploy/init-worker.sh --add-deadman
+    deploy/soc-compose.sh up -d --force-recreate worker
+    unset SOC_WORKER_DEADMAN_URL
+
+It refuses if the file already has one (edit it by hand to change it). A new run of
+`init-worker.sh` and `--restore` also write it when the variable is set. Check: `soc-compose.sh logs
+--since 10m worker` shows `deadman outcome=configured` at start and no `deadman outcome=failed`
+lines, and the monitor shows a ping within the last minute. Add the URL to the secrets manager's
+`/soc` folder under the name `SOC_WORKER_DEADMAN_URL`.
 
 **Checks:**
 

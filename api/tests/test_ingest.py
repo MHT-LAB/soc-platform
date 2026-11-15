@@ -546,6 +546,37 @@ def test_failed_signatures_cost_double() -> None:
     assert bad == [401, 401, 429]  # a flat cost would allow four 401s
 
 
+def test_failed_signatures_do_not_spend_the_sources_real_budget() -> None:
+    client, store = make(ingest_rate_per_source=3, ingest_rate_per_ip=1000)
+    bad = {"lc-signature": "0" * 64}
+    for i in range(10):
+        ip = {"CF-Connecting-IP": f"203.0.113.{i}"}
+        assert post(client, delivery(), secret=None, headers={**bad, **ip}).status_code == 401
+    # The real budget (3 per window) is intact for the sender that holds the secret.
+    codes = [
+        post(client, delivery(detect_id=f"id-{i}"), headers={"CF-Connecting-IP": "198.51.100.7"})
+        for i in range(3)
+    ]
+    assert [c.status_code for c in codes] == [200, 200, 200]
+    assert len(store.calls) == 3
+
+
+def test_failed_signatures_have_their_own_bucket_per_source() -> None:
+    client, _ = make(ingest_rate_fail_per_source=2, ingest_rate_per_ip=1000)
+    bad = {"lc-signature": "0" * 64}
+    codes = [
+        post(
+            client, delivery(), secret=None, headers={**bad, "CF-Connecting-IP": f"203.0.113.{i}"}
+        ).status_code
+        for i in range(4)
+    ]
+    assert codes == [401, 401, 429, 429]
+    # Another source's failures, and valid deliveries, are not affected.
+    other = post(client, delivery(), source="lc-two", secret=None, headers=bad)
+    assert other.status_code == 401
+    assert post(client, delivery()).status_code == 200
+
+
 def test_a_flood_on_one_source_does_not_starve_another() -> None:
     client, _ = make(ingest_rate_per_source=3, ingest_rate_per_ip=1000)
     body = delivery()
@@ -614,10 +645,42 @@ def down_store() -> FakeStore:  # noqa: N802
     return s
 
 
+def _uvicorn_commands() -> list[tuple[str, list[str]]]:
+    """Every uvicorn command line in the Dockerfile and in all compose files, as argv lists."""
+    root = Path(__file__).resolve().parents[2]
+    found: list[tuple[str, list[str]]] = []
+    dockerfile = root / "api" / "Dockerfile"
+    for line in dockerfile.read_text().splitlines():
+        if line.startswith(("CMD", "ENTRYPOINT")) and "uvicorn" in line:
+            found.append((f"{dockerfile.name}: {line}", json.loads(line.split(None, 1)[1])))
+    for path in sorted((root / "deploy").glob("compose*.yml")):
+        lines = path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if line.strip().startswith("#") or "uvicorn" not in line:
+                continue
+            if line.strip() == "- uvicorn":  # block-list form: gather the list's items
+                indent = len(line) - len(line.lstrip())
+                argv = []
+                for item in lines[i:]:
+                    stripped = item.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if not stripped.startswith("- ") or len(item) - len(item.lstrip()) != indent:
+                        break
+                    argv.append(stripped[2:].strip("\"'"))
+            else:  # inline form: command: ["uvicorn", ...] or a shell string
+                argv = line.split(":", 1)[1].replace('"', " ").replace("[", " ").replace("]", " ")
+                argv = argv.replace(",", " ").split()
+            found.append((f"{path.name}:{i + 1}", argv))
+    return found
+
+
 def test_server_access_log_is_off_so_query_strings_never_reach_logs() -> None:
-    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
-    cmd = next(line for line in dockerfile.splitlines() if line.startswith("CMD"))
-    assert "--no-access-log" in cmd
+    commands = _uvicorn_commands()
+    # The Dockerfile's and the console's, at least; a rename must not make this vacuous.
+    assert len(commands) >= 2
+    for where, argv in commands:
+        assert "--no-access-log" in argv, f"{where} leaves the access log on"
 
 
 # ---- least privilege ----

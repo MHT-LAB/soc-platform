@@ -38,7 +38,9 @@ case "$1" in
   buildx) printf '%s\\n' "$FAKE_LABELS"; exit 0 ;;
   compose) if [[ "$*" == *" ps -q "* ]]; then echo cid; fi; exit 0 ;;
   inspect) echo imgid; exit 0 ;;
-  image) printf '%s\\n' "$FAKE_REPODIGEST"; exit 0 ;;
+  image)
+    if [[ "$*" == *Config.Labels* ]]; then echo "${FAKE_OLD_REV:-}"; exit 0; fi
+    printf '%s\\n' "$FAKE_REPODIGEST"; exit 0 ;;
 esac
 exit 0
 """
@@ -129,6 +131,7 @@ class Host:
             "HOME": str(self.tmp),
             "SOC_STATE_DIR": str(self.state),
             "SOC_TEST_BIN": str(self.bin),
+            "SOC_DEPLOY_ASSUME_YES": "1",
             "SOC_SOURCE_DIR": str(source or self.src),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",

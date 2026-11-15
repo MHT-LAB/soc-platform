@@ -224,3 +224,129 @@ def test_secret_values_only_ever_reach_shell_builtins() -> None:
         code = line.split("#", 1)[0]
         if any(f"${v}" in code or f"${{{v}}}" in code for v in ("TOPIC", "WORKER_PW")):
             assert code.lstrip().startswith(("printf", '"', "[[", "TOPIC=", "WORKER_PW=")), line
+
+
+# ---- the optional dead-man's switch URL ----
+
+PING = "https://hc.example.com/ping/0a1b2c3d-0000-4000-8000-0123456789ab"
+BAD_PINGS = [
+    "http://hc.example.com/ping/x",
+    "ftp://hc.example.com/ping/x",
+    "https://",
+    "https:///ping/x",
+    "https://user:pw" + "@hc.example.com/ping/x",
+    "https://hc.example.com/ping/with space",
+    "https://hc.example.com/ping/\ttab",
+    "hc.example.com/ping/x",
+    "https://hc.example.com/" + "x" * 600,
+]
+
+
+@not_root
+def test_a_new_run_writes_the_ping_url_when_it_is_in_the_environment(tmp_path: Path) -> None:
+    host(tmp_path)
+    r = run(tmp_path, SOC_WORKER_DEADMAN_URL=PING)
+    assert r.returncode == 0, r.stderr
+    worker = parse_env(tmp_path / "env/worker.env")
+    assert worker["SOC_WORKER_DEADMAN_URL"] == PING
+    assert stat.S_IMODE((tmp_path / "env/worker.env").stat().st_mode) == 0o600
+    assert PING not in r.stdout + r.stderr  # a secret: never printed
+    assert printed_block(r.stdout).keys() == set(NAMES)
+
+
+@not_root
+def test_without_the_variable_worker_env_has_no_ping_line(tmp_path: Path) -> None:
+    host(tmp_path)
+    run(tmp_path)
+    assert "DEADMAN" not in (tmp_path / "env/worker.env").read_text()
+
+
+@not_root
+def test_restore_reads_the_ping_url_from_the_environment_too(tmp_path: Path) -> None:
+    host(tmp_path)
+    block = printed_block(run(tmp_path, SOC_WORKER_DEADMAN_URL=PING).stdout)
+    original = (tmp_path / "env/worker.env").read_bytes()
+    for f in FILES:
+        (tmp_path / f).unlink()
+    r = run(tmp_path, "--restore", SOC_WORKER_DEADMAN_URL=PING, **block)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "env/worker.env").read_bytes() == original
+    assert PING not in r.stdout + r.stderr
+
+
+@not_root
+@pytest.mark.parametrize("bad", BAD_PINGS)
+def test_a_bad_ping_url_stops_everything_before_a_file_is_written(tmp_path: Path, bad: str) -> None:
+    host(tmp_path)
+    r = run(tmp_path, SOC_WORKER_DEADMAN_URL=bad)
+    assert r.returncode == 1 and "SOC_WORKER_DEADMAN_URL" in r.stderr
+    assert tree(tmp_path) == {"env", "env/db-owner.env"}
+    assert bad not in r.stdout + r.stderr
+
+
+@not_root
+def test_add_deadman_appends_to_an_existing_file_and_keeps_the_rest(tmp_path: Path) -> None:
+    host(tmp_path)
+    run(tmp_path)
+    before = (tmp_path / "env/worker.env").read_text()
+    r = run(tmp_path, "--add-deadman", SOC_WORKER_DEADMAN_URL=PING)
+    assert r.returncode == 0, r.stderr
+    after = (tmp_path / "env/worker.env").read_text()
+    assert after == before + f"SOC_WORKER_DEADMAN_URL={PING}\n"
+    assert stat.S_IMODE((tmp_path / "env/worker.env").stat().st_mode) == 0o600
+    assert PING not in r.stdout + r.stderr
+    assert tree(tmp_path) == {"env", "env/db-owner.env", *FILES}  # no temp file left
+
+
+@not_root
+def test_add_deadman_starts_a_new_line_after_a_last_line_without_a_newline(
+    tmp_path: Path,
+) -> None:
+    host(tmp_path)
+    (tmp_path / "env/worker.env").write_text("SOC_NTFY_TOPIC=" + "t" * 20)
+    assert run(tmp_path, "--add-deadman", SOC_WORKER_DEADMAN_URL=PING).returncode == 0
+    env = parse_env(tmp_path / "env/worker.env")
+    assert env == {"SOC_NTFY_TOPIC": "t" * 20, "SOC_WORKER_DEADMAN_URL": PING}
+
+
+@not_root
+def test_add_deadman_refuses_when_one_is_already_set(tmp_path: Path) -> None:
+    host(tmp_path)
+    run(tmp_path, SOC_WORKER_DEADMAN_URL=PING)
+    before = (tmp_path / "env/worker.env").read_bytes()
+    r = run(tmp_path, "--add-deadman", SOC_WORKER_DEADMAN_URL=PING + "2")
+    assert r.returncode == 1 and "already sets" in r.stderr
+    assert (tmp_path / "env/worker.env").read_bytes() == before
+
+
+@not_root
+def test_add_deadman_needs_the_file_and_the_variable(tmp_path: Path) -> None:
+    host(tmp_path)
+    r = run(tmp_path, "--add-deadman", SOC_WORKER_DEADMAN_URL=PING)
+    assert r.returncode == 1 and "missing" in r.stderr
+    run(tmp_path)
+    before = (tmp_path / "env/worker.env").read_bytes()
+    r = run(tmp_path, "--add-deadman")
+    assert r.returncode == 1 and "environment" in r.stderr
+    assert (tmp_path / "env/worker.env").read_bytes() == before
+
+
+@not_root
+@pytest.mark.parametrize("bad", BAD_PINGS)
+def test_add_deadman_rejects_a_bad_url_and_changes_nothing(tmp_path: Path, bad: str) -> None:
+    host(tmp_path)
+    run(tmp_path)
+    before = (tmp_path / "env/worker.env").read_bytes()
+    r = run(tmp_path, "--add-deadman", SOC_WORKER_DEADMAN_URL=bad)
+    assert r.returncode == 1
+    assert (tmp_path / "env/worker.env").read_bytes() == before
+    assert tree(tmp_path) == {"env", "env/db-owner.env", *FILES}
+
+
+@not_root
+def test_the_url_cannot_be_given_on_the_command_line(tmp_path: Path) -> None:
+    host(tmp_path)
+    run(tmp_path)
+    r = run(tmp_path, "--add-deadman", PING)
+    assert r.returncode == 1 and "usage" in r.stderr
+    assert "DEADMAN" not in (tmp_path / "env/worker.env").read_text()

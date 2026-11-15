@@ -5,9 +5,9 @@ name: ci
 
 on:
   pull_request:
-    # "edited" re-runs the gate when a PR title or body changes: on squash merge
-    # they become the commit message on main, so they must be scanned too.
-    types: [opened, synchronize, reopened, edited]
+    # No "edited" here: the scrub gate, the one job that reads the PR title and body, is
+    # its own workflow (scrub.yml) so editing a title does not re-run these jobs.
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   workflow_dispatch:
@@ -194,27 +194,3 @@ jobs:
           cat noallow.log
           if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then echo "image started without a console allowlist (rc=$rc)"; exit 1; fi
           grep -q SOC_CONSOLE_USERS noallow.log
-
-  scrub:
-    name: scrub gate
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # On PRs, check the branch's real commits, not the temporary merge
-          # commit GitHub synthesizes for testing.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: scrub gate self-test
-        run: scripts/test-scrub-check.sh
-      - run: scripts/scrub-check.sh
-        # Values go in through env, never inline in the script: PR text is
-        # attacker-controlled and must not be parsed as shell.
-        env:
-          SCRUB_DENYLIST: ${{ secrets.SCRUB_DENYLIST }}
-          SCRUB_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          SCRUB_DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && '1' || '' }}
-          SCRUB_PR: ${{ github.event_name == 'pull_request' && '1' || '' }}
-          SCRUB_PR_TITLE: ${{ github.event.pull_request.title }}
-          SCRUB_PR_BODY: ${{ github.event.pull_request.body }}

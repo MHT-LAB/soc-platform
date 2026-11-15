@@ -101,9 +101,13 @@ class Settings(BaseSettings):
     # Replay window on the signed gen_time (ms epoch inside the body).
     ingest_max_age_seconds: int = 3600
     ingest_max_future_seconds: int = 300
-    # Requests per minute, per client IP and per source. Failed auth costs double.
+    # Requests per minute, per client IP and per source. Failed auth costs double against
+    # the IP bucket and is counted for the source in its own bucket (below), never against
+    # the source's real budget, so someone who only knows a source name cannot hold real
+    # deliveries at 429.
     ingest_rate_per_ip: int = 60
     ingest_rate_per_source: int = 600
+    ingest_rate_fail_per_source: int = 30
 
     # The pager worker (its own service; worker.env holds the first two).
     # A role that can only call the worker functions (soc_worker).
@@ -115,6 +119,10 @@ class Settings(BaseSettings):
     page_policy: str = ""
     # Bounded so a typo cannot silence the pager (cap 0) or hammer the database (tick 0).
     worker_tick_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
+    # Optional dead-man's switch: an https URL (a secret: it is the monitor's ping address,
+    # from env/worker.env) that the worker calls after a good pass, at most once a minute.
+    # When the calls stop, the monitor sends the alert. Empty = nothing is sent.
+    worker_deadman_url: SecretStr = SecretStr("")
     # At most this many pushes per window; the rest wait (and one notice says so).
     page_cap: int = Field(default=10, ge=1, le=1000)
     page_cap_window_seconds: int = Field(default=600, ge=60, le=86400)
@@ -122,7 +130,8 @@ class Settings(BaseSettings):
 
     # The console's case pages. The URL is for soc_console (no table privileges; four
     # functions), host 127.0.0.1 because the console runs on the host network. The secret
-    # signs the one-use form tokens that stop another site from pressing Ack or Close.
+    # signs the form tokens that stop another site from pressing Ack or Close. A token is
+    # not single-use: it is valid for the UTC day it was made and the next one (see csrf.py).
     console_database_url: SecretStr = SecretStr("")
     console_secret: SecretStr = SecretStr("")
     # Signs the Acknowledge link on a phone notification. Held by the console and the worker

@@ -8,6 +8,8 @@
 #   init-worker.sh --restore
 #       rebuild the files from two values in the environment (from the secrets
 #       manager) after a lost host; prints nothing secret.
+#   SOC_WORKER_DEADMAN_URL=https://... init-worker.sh --add-deadman
+#       add the optional dead-man's switch to an existing env/worker.env (below).
 #
 # It writes, in $SOC_STATE_DIR (default /srv/soc), both mode 600:
 #   env/worker.env        SOC_NTFY_TOPIC, SOC_WORKER_DATABASE_URL     (worker)
@@ -19,7 +21,15 @@
 # soc_worker its login from worker-owner.env, and deploy.sh starts the worker once
 # worker.env exists.
 #
-# Environment: SOC_STATE_DIR. SOC_INIT_TEST=1 is for tests only: it skips the root
+# The dead-man's switch is optional. SOC_WORKER_DEADMAN_URL is the https ping address of an
+# outside heartbeat monitor (a secret); the worker calls it after each good pass, and the
+# monitor alerts when the calls stop. Put it in the ENVIRONMENT, never on the command line
+# (a command line lands in shell history and the process list). If it is set, a new run and
+# --restore write it into worker.env; on a host that already has worker.env, --add-deadman
+# appends it (and refuses if the file already has one). It is never printed. Without it,
+# nothing is sent and the worker runs as before.
+#
+# Environment: SOC_STATE_DIR, SOC_WORKER_DEADMAN_URL. SOC_INIT_TEST=1 is for tests only: it skips the root
 # check and is refused for root.
 set -euo pipefail
 
@@ -40,18 +50,54 @@ OWNER_ENV="$ENV_DIR/worker-owner.env"
 
 TOPIC_RE='^[A-Za-z0-9_-]{16,64}$'
 SECRET_RE='^[0-9a-f]{32,128}$'
+# https only, printable ASCII, no spaces, a host, no credentials, at most 512 characters
+# (the worker checks the same rules and ignores a URL that fails them).
+DEADMAN_RE='^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][!-~]*)?$'
+DEADMAN="${SOC_WORKER_DEADMAN_URL:-}"
 
 die() { echo "FAILED: $*" >&2; exit 1; }
 rand_hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
+check_deadman() {
+  [[ ${#DEADMAN} -le 512 && "$DEADMAN" =~ $DEADMAN_RE ]] \
+    || die "SOC_WORKER_DEADMAN_URL must be an https URL with a host (no credentials, no spaces)"
+  [[ "$DEADMAN" != *@* ]] || die "SOC_WORKER_DEADMAN_URL must not contain credentials"
+}
+
 MODE=new
 case "${1:-}" in
   --restore)
-    [[ $# -eq 1 ]] || die "usage: init-worker.sh [--restore]"
+    [[ $# -eq 1 ]] || die "usage: init-worker.sh [--restore | --add-deadman]"
     MODE=restore ;;
+  --add-deadman)
+    [[ $# -eq 1 ]] || die "usage: init-worker.sh [--restore | --add-deadman]"
+    MODE=add-deadman ;;
   "") ;;
-  *) die "usage: init-worker.sh [--restore]" ;;
+  *) die "usage: init-worker.sh [--restore | --add-deadman]" ;;
 esac
+
+if [[ "$MODE" == add-deadman ]]; then
+  [[ -n "$DEADMAN" ]] || die "set SOC_WORKER_DEADMAN_URL in the environment (not on the command line)"
+  check_deadman
+  [[ -s "$WORKER_ENV" ]] || die "$WORKER_ENV is missing: this adds to an existing file"
+  ! grep -q '^SOC_WORKER_DEADMAN_URL=' "$WORKER_ENV" \
+    || die "$WORKER_ENV already sets SOC_WORKER_DEADMAN_URL; edit the file by hand to change it"
+  umask 077
+  TMP_ENV="$(mktemp "$ENV_DIR/.worker.env.XXXXXX")"
+  trap 'rm -f "$TMP_ENV"' EXIT
+  cp "$WORKER_ENV" "$TMP_ENV"
+  # A file whose last line has no newline must not glue the new line onto it.
+  [[ -z "$(tail -c 1 "$TMP_ENV")" ]] || printf '\n' >> "$TMP_ENV"
+  printf 'SOC_WORKER_DEADMAN_URL=%s\n' "$DEADMAN" >> "$TMP_ENV"
+  chmod 600 "$TMP_ENV"
+  mv "$TMP_ENV" "$WORKER_ENV"
+  trap - EXIT
+  echo "added the dead-man's switch to $WORKER_ENV (mode 600; the URL is not shown)"
+  echo "It takes effect when the worker restarts: the next deploy.sh, or deploy/soc-compose.sh up -d --force-recreate worker"
+  exit 0
+fi
+
+[[ -z "$DEADMAN" ]] || check_deadman
 
 if [[ "$MODE" == restore ]]; then
   TOPIC="${SOC_NTFY_TOPIC:-}"
@@ -85,6 +131,9 @@ trap cleanup EXIT
 
 printf 'SOC_NTFY_TOPIC=%s\nSOC_WORKER_DATABASE_URL=postgresql+psycopg://soc_worker:%s@db:5432/soc\n' \
   "$TOPIC" "$WORKER_PW" > "$TMP/worker.env"
+if [[ -n "$DEADMAN" ]]; then
+  printf 'SOC_WORKER_DEADMAN_URL=%s\n' "$DEADMAN" >> "$TMP/worker.env"
+fi
 printf 'SOC_WORKER_DB_PASSWORD=%s\n' "$WORKER_PW" > "$TMP/worker-owner.env"
 
 install_file() { # name target

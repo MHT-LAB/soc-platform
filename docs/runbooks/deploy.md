@@ -8,6 +8,17 @@ the running container's image digest is exactly the verified one. Any failure
 rolls back to the previous digest. The build's commit (from `/version`) is
 recorded in the deploy log.
 
+**The typed yes.** After every check passes and before anything on the host changes,
+`deploy.sh` prints the commits between the running image's source commit and the new one
+(newest first, at most 50; a first deploy prints the last 10) and waits for you to type
+`yes` on the terminal. Anything else, including an empty line, stops with the host
+unchanged. Read the list: a green build on `main` proves the code was merged, not that you
+want it running here. A step back (the new image is older than the running one) is flagged
+as such. `deploy.sh --prepare` asks too, because it pulls a new image. The answer is read
+from `/dev/tty`, so run it from a real terminal session (not a pipe, `ssh host cmd` without
+`-t`, or a scheduled job: those stop with "no terminal to confirm on"). Nothing in the
+environment skips the question for root; the test-only switches are refused for root.
+
 ## Host layout (Stage A container)
 | Path | Contents | Mode |
 |---|---|---|
@@ -133,4 +144,4 @@ Host files (mode 600) read by the console service (the public app gets none):
 |---|---|
 | `/srv/soc/env/console.env` | **Required.** `SOC_CONSOLE_USERS=login@example.com`, the logins allowed into the console. Add a role with a colon: `login@example.com:viewer` (see the roles paragraph below). A login without a role is an analyst. The console refuses to start in prod without it, or with a malformed entry or an unknown role, and `deploy.sh` stops before changing anything if it is missing. |
 | `/srv/soc/env/lc.env` (optional) | `SOC_LC_OID=…` and `SOC_LC_API_KEY=…` (read-only key) for the sensor fleet panel |
-| `/srv/soc/env/ingest.env` (the `api` service only, mode 600) | `SOC_INGEST_SECRETS={"<source>": ["<current>", "<next>"]}` as one line of JSON (each secret 16+ characters; a source with no entry is a 404 on the internet). Make each source name unguessable, for example `lc-` plus 16 random lowercase letters and digits: a configured source answers 401/413/415 where an unknown one answers 404, and its per-source rate limit counts unauthenticated requests too, so the name is what keeps a stranger from finding it and filling that bucket and `SOC_INGEST_DATABASE_URL=postgresql+psycopg://soc_ingest:…@<host>/<db>`. The role can only call `ingest_alert()`. Rotate by adding the new secret as `next`, changing the webhook output to it, then dropping the old one. Without this file every `/ingest/` path is a 404; with secrets but no database, deliveries get a 503 (nothing is stored, never a false 200). The edge rule for `/ingest/` is live (private deploy repo). |
+| `/srv/soc/env/ingest.env` (the `api` service only, mode 600) | `SOC_INGEST_SECRETS={"<source>": ["<current>", "<next>"]}` as one line of JSON (each secret 16+ characters; a source with no entry is a 404 on the internet). Make each source name unguessable, for example `lc-` plus 16 random lowercase letters and digits: a configured source answers 401/413/415 where an unknown one answers 404. Failed signatures are counted in their own per-source bucket (30 a minute, then 429 on the bad ones) and do not spend the source's real delivery budget, so a stranger who learns the name still cannot hold real deliveries at 429; an unguessable name keeps them from finding it at all. And `SOC_INGEST_DATABASE_URL=postgresql+psycopg://soc_ingest:…@<host>/<db>`. The role can only call `ingest_alert()`. Rotate by adding the new secret as `next`, changing the webhook output to it, then dropping the old one. Without this file every `/ingest/` path is a 404; with secrets but no database, deliveries get a 503 (nothing is stored, never a false 200). The edge rule for `/ingest/` is live (private deploy repo). |

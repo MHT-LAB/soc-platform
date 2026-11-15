@@ -54,6 +54,19 @@ def test_console_renders_live_state(fake_probes: None) -> None:
     assert "operator@example.com" in r.text
 
 
+def test_shipped_stages_and_sprints_do_not_say_planned() -> None:
+    from soc_api.console import SPRINTS, pipeline
+
+    stages = {
+        s["name"]: s["state"] for s in pipeline(status.TunnelStatus("up", 4), status.Fleet(True))
+    }
+    assert [stages[n] for n in ("Ingest", "Cases", "Pager")] == ["live"] * 3
+    assert stages["LLM analyst"] == "planned"  # still to come
+    states = {n: state for n, _, state in SPRINTS}
+    assert [states[n] for n in ("S0", "S1", "S2")] == ["done"] * 3
+    assert states["S3"] == "active"
+
+
 def test_console_escapes_sensor_hostnames(fake_probes: None) -> None:
     r = client().get("/console", headers=TAILNET)
     assert "<script>alert(1)</script>" not in r.text

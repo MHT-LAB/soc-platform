@@ -26,6 +26,7 @@ import logging
 import re
 import signal
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -231,6 +232,99 @@ class Ntfy:
             return Delivery("retry", "unreachable")
 
 
+# ---- the dead-man's switch ----
+
+DEADMAN_TIMEOUT_SECONDS = 5.0
+DEADMAN_INTERVAL_SECONDS = 60.0
+# Printable ASCII, no spaces: nothing that could split a header or a log line.
+DEADMAN_URL_RE = re.compile(r"[\x21-\x7e]{1,512}")
+
+
+def check_deadman_url(url: str, *, allow_http: bool = False) -> None:
+    """Raise ValueError (naming the setting, never the value) unless `url` is an https
+    address with a host and no credentials. http is for local tests only."""
+    parts = urlsplit(url)
+    scheme_ok = parts.scheme == "https" or (parts.scheme == "http" and allow_http)
+    if (
+        not DEADMAN_URL_RE.fullmatch(url)
+        or not scheme_ok
+        or not parts.hostname
+        or parts.username
+        or parts.password
+    ):
+        raise ValueError("SOC_WORKER_DEADMAN_URL must be an https URL with a host")
+
+
+class Deadman:
+    """Tells an outside monitor that the worker is alive. The monitor alerts when the calls
+    stop, which covers a hung or crash-looping worker that nothing else would report.
+
+    `ping()` is called after each good pass. It sends at most one request a minute, from a
+    short-lived background thread with a short timeout, so a slow or dead monitor can never
+    hold up, fail or slow a pass. The URL is a secret: it is never logged, and a failure
+    is logged as a short code only. No redirect is followed."""
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        timeout: float = DEADMAN_TIMEOUT_SECONDS,
+        interval: float = DEADMAN_INTERVAL_SECONDS,
+        allow_http: bool = False,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        check_deadman_url(url, allow_http=allow_http)
+        self._url = url
+        self._timeout = timeout
+        self._interval = interval
+        self._clock = clock
+        self._last: float | None = None
+        self._thread: threading.Thread | None = None
+        self._failing = False
+
+    def ping(self) -> bool:
+        """Start a ping when one is due. True when one was started. Never raises."""
+        now = self._clock()
+        if self._last is not None and now - self._last < self._interval:
+            return False
+        if self._thread is not None and self._thread.is_alive():
+            return False
+        self._last = now
+        try:
+            self._thread = threading.Thread(target=self._send, name="deadman", daemon=True)
+            self._thread.start()
+        except RuntimeError:
+            log.warning("deadman outcome=failed code=no_thread")
+            return False
+        return True
+
+    def wait(self, timeout: float | None = None) -> None:
+        """Wait for a ping in flight (tests, and a clean exit)."""
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def _send(self) -> None:
+        request = urllib.request.Request(  # noqa: S310 - the opener only speaks HTTP(S)
+            self._url, method="GET"
+        )
+        try:
+            with _OPENER.open(request, timeout=self._timeout) as response:
+                delivery = classify(response.status)
+        except urllib.error.HTTPError as exc:
+            delivery = classify(exc.code)
+        except TimeoutError:
+            delivery = Delivery("retry", "timeout")
+        except (OSError, http.client.HTTPException, ValueError):
+            delivery = Delivery("retry", "unreachable")
+        if delivery.outcome == "sent":
+            if self._failing:
+                log.info("deadman outcome=recovered")
+            self._failing = False
+        else:
+            self._failing = True
+            log.warning("deadman outcome=failed code=%s", delivery.code)
+
+
 # ---- the database, through the worker functions only ----
 
 
@@ -411,7 +505,9 @@ class Worker:
         health_file: str | None = None,
         console_base_url: str = "",
         ack_key: str = "",
+        deadman: Deadman | None = None,
     ) -> None:
+        self.deadman = deadman
         self.console_base_url = console_base_url
         self.ack_key = ack_key
         self.db = db
@@ -446,6 +542,8 @@ class Worker:
                 Path(self.health_file).touch()
             except OSError:
                 log.error("health outcome=cannot_write")
+        if ok and self.deadman is not None:
+            self.deadman.ping()  # never blocks, never raises
         self._watch_database(ok)
         return ok
 
@@ -657,6 +755,23 @@ def build(settings: Settings) -> tuple[Db, Ntfy, dict[str, int]]:
     return Db(url), ntfy, parse_policy(settings.page_policy)
 
 
+def build_deadman(settings: Settings) -> Deadman | None:
+    """The optional dead-man's switch. Unset: nothing is sent. A malformed URL must not stop
+    the pager, so the worker runs without it and says so; the monitor then alerts that the
+    pings never arrive."""
+    url = settings.worker_deadman_url.get_secret_value()
+    if not url:
+        log.info("deadman outcome=not_configured")
+        return None
+    try:
+        deadman = Deadman(url, allow_http=settings.env == "dev")
+    except ValueError as exc:
+        log.error("deadman outcome=invalid_url detail=%s", exc)
+        return None
+    log.info("deadman outcome=configured")
+    return deadman
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m soc_api.worker")
     parser.add_argument("command", nargs="?", default="run", choices=["run", "ok-now"])
@@ -682,6 +797,7 @@ def main(argv: list[str]) -> int:
         health_file=settings.health_file,
         console_base_url=settings.console_base_url,
         ack_key=settings.ack_key.get_secret_value(),
+        deadman=build_deadman(settings),
     )
     if args.command == "ok-now":
         try:

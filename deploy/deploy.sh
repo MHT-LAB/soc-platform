@@ -25,6 +25,12 @@
 # 2c. Require the host's clone (which supplies this script and the compose files)
 #    to be clean and exactly at origin/main, so a stale or edited checkout can't
 #    run a new image with an old or modified compose layout.
+# 2d. Show the commits between the running image's source commit (the label on the image
+#    now in image.env) and the new one, at most 50, and require a typed `yes` read from the
+#    terminal (/dev/tty). A first deploy, or an image whose commit is not known here, shows
+#    the last 10 commits on main. Anything but `yes` leaves the host unchanged. `--prepare`
+#    asks too, because it pulls a new image. A merge to main plus a green build is not by
+#    itself permission to run the code on this host; this is the human gate.
 # 3. Pin the deployment to the verified digest (never the mutable tag), so the
 #    image can't be swapped between verification and pull.
 # 3b. When the host has a database (env/db.env and env/db-owner.env), start it,
@@ -51,6 +57,10 @@
 #   SOC_OVERLAY     edge overlay file    compose.stage-a.yml
 #   SOC_SOURCE_DIR  git clone to check   the repository this script lives in
 #   SOC_TEST_BIN    TESTS ONLY: directory searched first for cosign, docker, curl
+#   SOC_DEPLOY_ASSUME_YES  TESTS ONLY: answers the confirmation in 2d with yes
+#   SOC_TEST_TTY    TESTS ONLY: a file read in place of /dev/tty for the answer
+# The last three are refused for root, which is how the real deploy runs: nothing in the
+# environment can skip the confirmation or swap a tool on a host.
 set -euo pipefail
 
 # SOC_TEST_BIN lets the tests put fake cosign/docker first. It is refused for
@@ -58,6 +68,10 @@ set -euo pipefail
 # $EUID is a bash builtin, checked before PATH changes, so no fake "id" can lie.
 if [[ -n "${SOC_TEST_BIN:-}" && "$EUID" -eq 0 ]]; then
   echo "FAILED: SOC_TEST_BIN is for tests only and is refused for root" >&2
+  exit 1
+fi
+if [[ ( -n "${SOC_DEPLOY_ASSUME_YES:-}" || -n "${SOC_TEST_TTY:-}" ) && "$EUID" -eq 0 ]]; then
+  echo "FAILED: SOC_DEPLOY_ASSUME_YES and SOC_TEST_TTY are for tests only and are refused for root" >&2
   exit 1
 fi
 # Don't depend on how the shell was opened (pct enter gives a minimal PATH).
@@ -243,6 +257,63 @@ PREVIOUS=""
 [[ -f "$IMAGE_ENV" ]] && PREVIOUS="$(grep -E '^SOC_API_IMAGE=' "$IMAGE_ENV" | cut -d= -f2- || true)"
 write_image() { umask 077; printf 'SOC_API_IMAGE=%s\nSOC_STATE_DIR=%s\n' "$1" "$STATE" > "$IMAGE_ENV"; }
 
+# --- 2d. show what is about to run here, and ask ---------------------------------------
+# Every check above has passed and nothing on the host has changed. $REV is a 40-hex commit
+# that is on main; the old one comes from the label of the image that runs now, and counts
+# only if it is 40-hex and present in this clone. Commit subjects are printable-only and
+# cut short, so nothing in them can move the cursor or fill the screen.
+commit_list() { # <range-or-rev> <max>
+  git -C "$SRC_DIR" log -n "$2" --format='  %h %s' "$1" 2> /dev/null \
+    | LC_ALL=C tr -cd '[:print:]\n' | cut -c1-120
+}
+confirm_deploy() { # <verb>
+  local old="" count answer tty="${SOC_TEST_TTY:-/dev/tty}"
+  if [[ -n "$PREVIOUS" ]]; then
+    old="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$PREVIOUS" 2> /dev/null || true)"
+    [[ "$old" =~ ^[0-9a-f]{40}$ ]] || old=""
+    if [[ -n "$old" ]] && ! git -C "$SRC_DIR" cat-file -e "${old}^{commit}" 2> /dev/null; then old=""; fi
+  fi
+  echo
+  if [[ -z "$old" ]]; then
+    echo "No previous image with a known source commit on this host (a first deploy)."
+    echo "The last 10 commits on main, newest first (the image is built from ${REV:0:12}):"
+    commit_list "$REV" 10
+  elif [[ "$old" == "$REV" ]]; then
+    echo "The running image and the new one are built from the same commit (${REV:0:12})."
+  elif git -C "$SRC_DIR" merge-base --is-ancestor "$REV" "$old" 2> /dev/null; then
+    echo "WARNING: the new image (${REV:0:12}) is OLDER than the running one (${old:0:12})."
+    echo "Commits that would be taken out, newest first:"
+    commit_list "$REV..$old" 50
+  else
+    count="$(git -C "$SRC_DIR" rev-list --count "$old..$REV" 2> /dev/null || echo 0)"
+    echo "Commits since the running image (${old:0:12}) up to the new one (${REV:0:12}): $count"
+    commit_list "$old..$REV" 50
+    if [[ "$count" =~ ^[0-9]+$ ]] && (( count > 50 )); then
+      echo "  ... and $((count - 50)) more: git -C $SRC_DIR log --oneline ${old:0:12}..${REV:0:12}"
+    fi
+  fi
+  echo
+  if [[ -n "${SOC_DEPLOY_ASSUME_YES:-}" ]]; then
+    log "confirmation skipped (SOC_DEPLOY_ASSUME_YES; tests only)"
+    return 0
+  fi
+  # The answer comes from the terminal, never from stdin, so a pipe or a script cannot
+  # answer for the operator.
+  if ! { exec 3< "$tty"; } 2> /dev/null; then
+    die "no terminal to confirm on ($tty cannot be opened); nothing was changed"
+  fi
+  printf 'Type yes to %s %s: ' "$1" "$REPO@$DIGEST"
+  answer=""
+  IFS= read -r -u 3 answer || true
+  exec 3<&-
+  echo
+  if [[ "$answer" != yes ]]; then
+    log "declined at the confirmation; nothing was changed"
+    exit 1
+  fi
+  log "confirmed by the operator: $1 $REPO@$DIGEST"
+}
+
 if [[ "$PREPARE" == 1 ]]; then
   # Only a host with no image yet, or a re-run for the same image, may be prepared.
   if [[ -n "$PREVIOUS" && "$PREVIOUS" != "$REPO@$DIGEST" ]]; then
@@ -250,6 +321,7 @@ if [[ "$PREPARE" == 1 ]]; then
   fi
   [[ ! -f "$IMAGE_ENV" || -n "$PREVIOUS" ]] \
     || die "$IMAGE_ENV exists but names no image; look at it, remove it, then run --prepare again"
+  confirm_deploy prepare
   soc_running && die "containers of the soc project started during the checks; nothing was changed"
   write_image "$REPO@$DIGEST"
   compose pull --quiet || {
@@ -260,6 +332,7 @@ if [[ "$PREPARE" == 1 ]]; then
   exit 0
 fi
 
+confirm_deploy deploy
 write_image "$REPO@$DIGEST"
 
 # --- 4. start, wait for health, confirm the running image is the verified one -------
