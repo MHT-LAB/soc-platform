@@ -64,6 +64,7 @@ class FakeLc:
         self.api_statuses: deque[int] = deque()
         self.jwt_status = 200
         self.api_body: dict[str, bytes] = {}  # path suffix -> replacement body (once)
+        self.fail: dict[str, int] = {}  # path suffix -> status, every time
         self.token = TOKEN
         self.log: list[dict[str, Any]] = []
         outer = self
@@ -93,6 +94,9 @@ class FakeLc:
                     return self._send(outer.api_statuses.popleft())
                 if self.headers.get("Authorization") != f"Bearer {outer.token}":
                     return self._send(401)
+                for suffix, status in outer.fail.items():
+                    if parts.path.endswith(suffix):
+                        return self._send(status)
                 for suffix in list(outer.api_body):
                     if parts.path.endswith(suffix):
                         return self._send(200, outer.api_body.pop(suffix))
@@ -252,7 +256,9 @@ def test_a_good_run_stores_sensors_rules_and_errors_and_logs_counts_only(
     ]
     assert runs(fx) == [(True, None, 2, "newest.component")]
     [line] = [x.getMessage() for x in caplog.records if "posture outcome" in x.getMessage()]
-    assert line == "posture outcome=ok sensors=2 online=1 rules=3 errors=2 skipped=0"
+    assert line == (
+        "posture outcome=ok sensors=2 online=1 rules=3 errors=2 skipped=0 namespaces_unavailable=0"
+    )
     assert "host-1" not in caplog.text and "Rule One" not in caplog.text
 
 
@@ -405,10 +411,54 @@ def test_a_failure_after_a_good_run_keeps_the_last_snapshot_whole(fx: Fixture, l
 def test_a_rule_listing_that_fails_after_the_sensors_were_read_writes_nothing(
     fx: Fixture, lc: FakeLc
 ) -> None:
-    del lc.rules["dr-managed"]  # 404: sensors and general rules were already read
+    lc.fail[f"/hive/dr-managed/{OID}"] = 500  # sensors and general rules were already read
     assert collector(fx, lc).cycle() is False
-    assert runs(fx) == [(False, "http_404", None, None)]
+    assert runs(fx) == [(False, "http_5xx", None, None)]
     assert fx.one("SELECT count(*) FROM sensor_state") == (0,)
+
+
+@pytest.mark.parametrize("status", [400, 403, 404])
+def test_a_rules_namespace_the_org_does_not_have_is_skipped_not_a_failed_run(
+    fx: Fixture, lc: FakeLc, caplog: pytest.LogCaptureFixture, status: int
+) -> None:
+    lc.fail[f"/hive/dr-managed/{OID}"] = status
+    caplog.set_level(logging.INFO, logger="soc_api.posture")
+    assert collector(fx, lc).cycle() is True
+    assert fx.rows("SELECT namespace, name FROM rule_inventory ORDER BY 1, 2") == [
+        ("general", "Rule One"),
+        ("general", "Rule Two"),
+    ]
+    assert "namespaces_unavailable=1" in caplog.text
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_unreadable_org_errors_are_stored_as_unknown_never_as_zero(
+    fx: Fixture, lc: FakeLc, caplog: pytest.LogCaptureFixture, status: int
+) -> None:
+    lc.fail[f"/errors/{OID}"] = status
+    caplog.set_level(logging.INFO, logger="soc_api.posture")
+    assert collector(fx, lc).cycle() is True
+    assert runs(fx) == [(True, None, None, None)]
+    assert fx.one("SELECT count(*) FROM sensor_state") == (2,)
+    assert "errors=unavailable" in caplog.text
+
+
+def test_any_other_org_error_failure_still_fails_the_run(fx: Fixture, lc: FakeLc) -> None:
+    lc.fail[f"/errors/{OID}"] = 500
+    assert collector(fx, lc).cycle() is False
+    assert runs(fx) == [(False, "http_5xx", None, None)]
+    assert fx.one("SELECT count(*) FROM sensor_state") == (0,)
+
+
+def test_the_check_reports_unavailable_parts_and_succeeds(
+    lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lc.fail[f"/hive/dr-managed/{OID}"] = 400
+    lc.fail[f"/errors/{OID}"] = 401
+    assert p.check(p.Config(OID, KEY, "", lc.url, lc.url + "/jwt", True, 300.0, "")) == 0
+    out = capsys.readouterr().out
+    assert "managed=not-available" in out and "general=2" in out
+    assert "org errors: not readable" in out
 
 
 @pytest.mark.parametrize(

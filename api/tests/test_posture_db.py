@@ -513,3 +513,25 @@ def test_downgrading_restores_the_previous_console_health_and_removes_the_rest(
     assert "posture_runs" in definition(db, "console_health()")
     with fx.db.connect("soc_posture") as c:
         c.execute("SELECT posture_fail('after the round trip')")
+
+
+def test_an_unknown_error_count_is_stored_as_null_and_a_missing_one_is_still_refused(
+    fx: Fixture,
+) -> None:
+    record(fx, doc(org_errors={"count": None, "newest": None}))
+    assert runs(fx) == [(True, None, None, None)]
+    for bad in ({"newest": None}, {"count": "3", "newest": None}, {"count": -1, "newest": None}):
+        with pytest.raises(psycopg.errors.RaiseException):
+            record(fx, doc(org_errors=bad))
+
+
+def test_downgrading_0015_refuses_an_unknown_count_again(db: TestDb, fx: Fixture) -> None:
+    url = db.sqlalchemy_url()
+    soc_db.downgrade(url, "0014")
+    try:
+        with pytest.raises(psycopg.errors.RaiseException):
+            record(fx, doc(org_errors={"count": None, "newest": None}))
+        record(fx, doc())
+    finally:
+        soc_db.upgrade(url)
+    record(fx, doc(org_errors={"count": None, "newest": None}))
