@@ -54,6 +54,24 @@ def severity_class(value: object) -> str:
 
 
 templates.env.filters["sev"] = severity_class
+
+# The case history says what happened in words, not in the database's event names.
+EVENT_WORDS = {
+    "opened": "Case opened",
+    "alert_attached": "Another alert added",
+    "acked": "Acknowledged",
+    "closed": "Closed",
+    "severity_raised": "Severity raised",
+    "repushed": "Pushed again",
+}
+
+
+def event_label(kind: object) -> str:
+    """Plain words for a case event; an event this page does not know is shown as it is."""
+    return EVENT_WORDS.get(kind, str(kind)) if isinstance(kind, str) else ""
+
+
+templates.env.filters["event"] = event_label
 # Every page header shows the clock (UTC and local), rendered here when a page does not
 # pass its own (the overview pages pass theirs from the database's time).
 templates.env.globals["header_clock"] = lambda: ov.clock(None, get_settings().console_timezone)

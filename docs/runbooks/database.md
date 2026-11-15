@@ -11,7 +11,7 @@ Postgres 16, schema managed by Alembic (`api/src/soc_api/migrations`). Isolation
 | `soc_app` | console, workers | Read and write rows of **one client**: the one in the session setting `app.client_id`. With it unset it sees nothing. No `DELETE`; `case_event` is append-only. |
 | `soc_ingest` | the public ingest handler | **No table privileges.** It can only call `ingest_alert()`, which maps a delivery to a source, attributes it (unknown tenant -> the Unassigned client) and inserts idempotently on `(source, event_id)`. |
 | `soc_ingest_writer` | nobody (never logs in) | Owns `ingest_alert()`, so the function runs with only `SELECT` on `source` and `INSERT` on `alert`. An RLS policy allows an alert only for its source's client or Unassigned. |
-| `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call ten functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`, `due_page_count`, `queue_repages` and `reconcile_health` (two numbers about the catch-up worker: how many sources have a cursor and the longest any has gone without a good run; no names, no errors) and `posture_health` (the same two numbers for the posture collector). Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
+| `soc_worker` | the pager worker (migration `0002`) | **No table privileges.** It can only call ten functions: `assign_cases`, `claim_pages`, `finish_page`, `heartbeat_counts`, `worker_state_get`, `worker_state_set`, `due_page_count`, `queue_repages`, `held_summary` (migration `0017`: how many pages are held, from how many hosts, the highest case severity among them) and `reconcile_health` (two numbers about the catch-up worker: how many sources have a cursor and the longest any has gone without a good run; no names, no errors) and `posture_health` (the same two numbers for the posture collector). Cross-tenant by design, which is why it is not `soc_app`. It never reads a raw payload. |
 | `soc_console` | the console's case pages (migration `0004`) | **No table privileges.** It can only call seven functions: `list_cases` (the queue), `get_case` (one case, its alerts with the raw payload as **text**, cut at 20000 characters, and its events), `ack_case`, `close_case` (a note is required) and `close_case_with_verdict` (migration `0013`, quick close), `pipeline_metrics` (migration `0009`, counters for `/metrics`) and `console_health` (migration `0010`, plain numbers for the degraded banner). Staff view across clients; per-client roles come with sign-in. |
 | `soc_console_writer` | nobody (never logs in) | Owns those six functions. Table access: `SELECT` on `client`, `alert`, `soc_case`, `case_event`, `notification`; `UPDATE (status, closed_at, closing_note)` on `soc_case`; `INSERT` on `case_event`; `UPDATE (acked_at)` on `notification`; `SELECT (started_at, last_ok_at)` on `backup_state`, `SELECT (last_success, started_at)` on `reconcile_cursor` and `SELECT (at, ok)` on `posture_run`; each behind an RLS policy for this role. |
 | `soc_worker_writer` | nobody (never logs in) | Owns those functions. Table access: `SELECT` on `client` and `alert`, `UPDATE (case_id)` on `alert`, `SELECT`/`INSERT` on `soc_case`, `INSERT` on `case_event`, `SELECT`/`INSERT`/`UPDATE` on `notification` and `worker_state`, `SELECT (last_success, started_at)` on `reconcile_cursor` and `SELECT (at, ok)` on `posture_run`, each behind an RLS policy for this role. No `DELETE`. |
@@ -447,6 +447,24 @@ database password: new value in `console-db.env` and `console-owner.env`, then `
   queued (it is marked `skipped`). Each re-send is an ordinary row (`notification.kind` is
   `repage1` or `repage2`, at most one of each per case), so it follows the same retry, give-up,
   page-cap and counter rules as any page.
+- **Bounded cases (migration `0017`).** A case keeps collecting alerts for the same client, rule
+  and sensor (the sensor id; the host name only when an alert has none; an alert with neither
+  groups by client and rule alone, so org-level detections don't page once per alert; an alert
+  with no rule never joins anything) while each alert is within 60 minutes of the last one, with
+  three limits. An acknowledged case that gains an alert 60 minutes or more after the
+  acknowledgement (or after its last push of this kind) gets one more push, titled `NEW ALERTS: `
+  (`notification.kind` `reopen`), then the 60 minutes start again from that push. A case stops
+  collecting once the new alert is 24 hours or more after the case opened: the alert opens a new
+  case, which pages as any new case does. An alert of higher severity raises the case's severity and
+  pushes once, titled `RAISED: ` (kind `raised`), even if the case is acknowledged. A closed case is
+  never reused. The two times are the constants `REOPEN_AFTER` and `MAX_CASE_AGE` at the top of the
+  migration. Both kinds may repeat on a case; the case history shows them as "Severity raised" and
+  "Pushed again".
+- **Fair claim order and the held notice.** When more pages are due than the cap lets out, the first
+  page for each (client, rule, host) that was not pushed about in the cap window goes first, hosts
+  take turns, and inside a turn the order is priority, then age; further pages for a group just
+  pushed wait. The "pages held" push says how many are waiting, from how many hosts and the highest
+  severity (a number and one fixed word, never a name).
 - **Ack from the phone.** With `SOC_ACK_KEY` the push also has an "Ack" button: the ntfy app POSTs
   `/console/case/<id>/ack-phone?e=<expiry>&t=<token>` through `tailscale serve`, so the request
   carries your tailnet identity (the iPhone must be on Tailscale). The token is an HMAC over the

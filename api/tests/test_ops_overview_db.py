@@ -351,7 +351,10 @@ def test_the_demo_seed_fills_every_panel(db: TestDb) -> None:
     doc = overview(fx)
     t = doc["totals"]
     assert t["alerts_in"] > 100 and t["pages"] > 5 and t["cases"] > 20
-    assert doc["queue"] and {q["lane"] for q in doc["queue"]} >= {"paged", "quiet"}
+    # Which lanes appear among the newest open cases depends on the time of day the seed
+    # runs (its activity is spread over past hours); every lane is checked in the funnel.
+    lanes = {q["lane"] for q in doc["queue"]}
+    assert doc["queue"] and "paged" in lanes and lanes <= {"paged", "quiet", "vendor"}
     assert all(q["verdict"] is None for q in doc["queue"])
     assert len(doc["tactics"]) >= 6
     assert {f["lane"] for f in doc["funnel"]} == {"paged", "quiet", "vendor"}

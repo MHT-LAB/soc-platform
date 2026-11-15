@@ -57,6 +57,13 @@ EASTERN = ZoneInfo("America/New_York")
 # finish far inside that, or a slow send could be claimed and pushed a second time.
 NTFY_TIMEOUT_SECONDS = 10.0
 LATE_AFTER_S = 300.0  # an alert received this long after it was detected is "LATE"
+# What a push of each kind starts with. A first page ("page") has no prefix.
+KIND_PREFIX = {
+    "repage1": "REPEAT: ",
+    "repage2": "REPEAT: ",
+    "reopen": "NEW ALERTS: ",
+    "raised": "RAISED: ",
+}
 TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
 # Only plain HTTP(S): no file:// or ftp:// handler, no redirects, no proxy from the
@@ -81,9 +88,11 @@ def push_text(
     """(title, message, ntfy priority, click) for a claimed page.
 
     "LATE:" marks a first page whose alert reached us long after it was detected (the
-    catch-up path after an outage); a re-send says REPEAT instead."""
+    catch-up path after an outage); a re-send says REPEAT instead. A push for an
+    acknowledged case that gained alerts says NEW ALERTS, and one for a case whose severity
+    went up says RAISED. All three words come from this table, never from the database."""
     rule = re.sub(r"^general\.", "", page.get("rule") or "") or "alert"
-    again = "REPEAT: " if page.get("kind") in ("repage1", "repage2") else ""
+    again = KIND_PREFIX.get(page.get("kind") or "", "")
     lateness = page.get("late_s")
     is_late = (
         not again
@@ -367,8 +376,10 @@ class Db:
         )
         return int(rows[0][0]), int(rows[0][1]), int(rows[0][2])
 
-    def claim_pages(self, batch: int) -> list[dict[str, Any]]:
-        names, rows = self._run("SELECT * FROM claim_pages(%s)", (batch,))
+    def claim_pages(self, batch: int, window_s: float = 600.0) -> list[dict[str, Any]]:
+        names, rows = self._run(
+            "SELECT * FROM claim_pages(%s, make_interval(secs => %s))", (batch, window_s)
+        )
         return [dict(zip(names, row, strict=True)) for row in rows]
 
     def finish_page(self, page_id: Any, outcome: str, code: str) -> str:
@@ -400,9 +411,11 @@ class Db:
         size = rows[0][1]
         return float(rows[0][0]), None if size is None else int(size)
 
-    def due_page_count(self) -> int:
-        _, rows = self._run("SELECT due_page_count()")
-        return int(rows[0][0])
+    def held_summary(self) -> tuple[int, int, str | None]:
+        """(pages due, distinct hosts they are about, highest case severity among them)."""
+        _, rows = self._run("SELECT waiting, hosts, severity FROM held_summary()")
+        sev = rows[0][2]
+        return int(rows[0][0]), int(rows[0][1]), None if sev is None else str(sev)
 
     def heartbeat_counts(self, since: datetime) -> dict[str, Any]:
         names, rows = self._run("SELECT * FROM heartbeat_counts(%s)", (since,))
@@ -479,6 +492,21 @@ def stale_reasons(
         "posture_quiet": posture_runs > 0 and (posture_quiet or 0) > limits.posture_stale_s,
         "backup_old": backup_age > limits.backup_stale_s,
     }
+
+
+SEVERITY_WORDS = ("info", "low", "medium", "high", "critical")
+
+
+def held_text(waiting: int, hosts: int, severity: str | None, cap: int, minutes: int) -> str:
+    """The "pages held" push: counts the code computed and one word from a fixed list. No host,
+    rule or client text ever goes to the push server."""
+    parts = [f"{max(hosts, 1)} host{'s' if hosts > 1 else ''}"]
+    if severity in SEVERITY_WORDS:
+        parts.append(f"highest severity {severity}")
+    return (
+        f"{waiting} more pages are waiting ({', '.join(parts)}; limit {cap} per {minutes} min). "
+        "Check the detection email."
+    )
 
 
 def backup_line(age_s: float, size: int | None) -> str:
@@ -605,7 +633,9 @@ class Worker:
     def _sender(self) -> None:
         room = self._room(self.clock())
         if room > 0:
-            for page in self.db.claim_pages(min(self.limits.page_batch, room)):
+            for page in self.db.claim_pages(
+                min(self.limits.page_batch, room), self.limits.cap_window_s
+            ):
                 self._send_page(page)
         self._held_notice()
 
@@ -638,7 +668,7 @@ class Worker:
         now = self.clock()
         if self._room(now) > 0:
             return
-        waiting = self.db.due_page_count()
+        waiting, hosts, severity = self.db.held_summary()
         if waiting < 1:
             return
         if self._held_at and (now - self._held_at).total_seconds() < self.limits.cap_window_s:
@@ -647,9 +677,12 @@ class Worker:
             return
         delivery = self.ntfy.publish(
             title="SOC: pages held",
-            message=(
-                f"{waiting} more pages are waiting (limit {self.limits.page_cap} per "
-                f"{int(self.limits.cap_window_s // 60)} min). Check the detection email."
+            message=held_text(
+                waiting,
+                hosts,
+                severity,
+                self.limits.page_cap,
+                int(self.limits.cap_window_s // 60),
             ),
             priority=3,
         )

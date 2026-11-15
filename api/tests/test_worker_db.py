@@ -18,7 +18,8 @@ from test_schema import ALL_TABLES, UNASSIGNED
 LINK = "https://app.limacharlie.io/orgs/o/sensors/s/timeline?time=1"
 WORKER_FUNCTIONS = [
     "assign_cases(integer, jsonb)",
-    "claim_pages(integer)",
+    "claim_pages(integer, interval)",
+    "held_summary()",
     "finish_page(uuid, text, text)",
     "heartbeat_counts(timestamptz)",
     "worker_state_get(text)",
@@ -63,11 +64,14 @@ class Fixture:
         tenant: str | None = None,
         link: str | None = LINK,
         event: str | None = None,
+        sid: str | None = None,
     ) -> str:
         """Insert an alert the way ingest does, then back-date it by `age_min` minutes."""
         self._n += 1
         event = event or f"ev-{self._n}"
         raw: dict[str, Any] = {"cat": cat, "routing": {"hostname": host}}
+        if sid is not None:
+            raw["routing"]["sid"] = sid
         if link:
             raw["link"] = link
         with self.db.connect() as c:
@@ -186,10 +190,11 @@ def test_another_host_rule_or_client_is_another_case(fx: Fixture, other: dict[st
     )
 
 
-def test_missing_host_and_rule_still_group_with_each_other(fx: Fixture) -> None:
+def test_missing_host_and_rule_never_group_with_each_other(fx: Fixture) -> None:
+    """R4: two alerts with an empty key are not evidence of one thing."""
     fx.alert(host=None, rule=None, age_min=10)
     fx.alert(host=None, rule=None)
-    assert fx.assign() == (2, 1, 1)
+    assert fx.assign() == (2, 2, 2)
 
 
 def test_a_closed_case_is_not_reused(fx: Fixture) -> None:
@@ -714,8 +719,8 @@ def test_the_writer_role_owns_no_tables_and_holds_only_what_it_needs(fx: Fixture
     assert owned == (0,)
     assert grants.pop("client") == (True, False, False, False)
     assert grants.pop("alert") == (True, False, False, False)  # + UPDATE (case_id) only
-    assert grants.pop("soc_case") == (True, True, False, False)
-    assert grants.pop("case_event") == (False, True, False, False)
+    assert grants.pop("soc_case") == (True, True, False, False)  # + UPDATE (severity) only
+    assert grants.pop("case_event") == (False, True, False, False)  # + SELECT of four columns
     assert grants.pop("notification") == (True, True, True, False)
     assert grants.pop("worker_state") == (True, True, True, False)
     assert all(g == (False, False, False, False) for g in grants.values())

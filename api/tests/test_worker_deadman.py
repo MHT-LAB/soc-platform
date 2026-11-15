@@ -215,8 +215,8 @@ class StubDb:
         self._check()
         return []
 
-    def due_page_count(self) -> int:
-        return 0
+    def held_summary(self) -> tuple[int, int, str | None]:
+        return 0, 0, None
 
     def state_get(self, _: str) -> str | None:
         self._check()
