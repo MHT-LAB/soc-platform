@@ -132,6 +132,11 @@ anything: the buttons are not shown and the server answers 403 before it reads t
 database. An unknown role, a missing login, a space where the colon should be or the same login with two
 roles stops the console at start (as an empty list does); fix `console.env` and run `deploy.sh`.
 
+Clock: every page header shows UTC and the time in `SOC_CONSOLE_TIMEZONE` (optional, in
+`console.env`, an IANA name, default `America/New_York`); hovering the local time shows how to turn
+it into UTC (daylight saving included). Display only: every stored and listed time stays UTC. An
+unknown name refuses to start.
+
 Display names: `SOC_CONSOLE_DISPLAY_NAMES=login@example.com=Alex R.,helper@example.com=Sam`
 (optional, in `console.env`) sets the name shown in the page header. Without an entry the header
 shows the part of the login before the `@`. It is for display only: the allow-list, the roles and the

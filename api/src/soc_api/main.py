@@ -10,6 +10,7 @@ Two apps are built from this code and run as separate services:
 """
 
 from collections.abc import Awaitable, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, Request, Response
 
@@ -85,6 +86,10 @@ def create_console_app(settings: Settings | None = None) -> FastAPI:
         raise ValueError("SOC_CONSOLE_USERS must list at least one login when SOC_ENV=prod")
     # A malformed entry or an unknown role is refused the same way (raises ValueError).
     settings.console_roles  # noqa: B018
+    try:
+        ZoneInfo(settings.console_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("SOC_CONSOLE_TIMEZONE is not a known time zone name") from None
     app = _base_app(settings, "SOC Console")
     app.include_router(console.router)
     return app
