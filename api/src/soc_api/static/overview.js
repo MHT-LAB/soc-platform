@@ -14,6 +14,19 @@
     el.textContent = days[d.getUTCDay()] + ", " + months[d.getUTCMonth()] + " " + two(d.getUTCDate()) +
       " · UTC " + two(d.getUTCHours()) + ":" + two(d.getUTCMinutes()) + ":" + two(d.getUTCSeconds());
   }
+  var local = document.getElementById("local-clock");
+  var fmt = null;
+  try {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: local && local.getAttribute("data-tz"), hour: "numeric", minute: "2-digit",
+      timeZoneName: "short"
+    });
+  } catch (e) { fmt = null; }
+  function tickLocal() {
+    if (!local || !fmt) return;
+    local.textContent = fmt.format(new Date(start + (performance.now() - began))).replace(/\u202f/g, " ");
+  }
   tick();
-  setInterval(tick, 1000);
+  tickLocal();
+  setInterval(function () { tick(); tickLocal(); }, 1000);
 })();

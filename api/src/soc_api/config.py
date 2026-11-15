@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     console_users: str = ""
     # `login=Name,login2=Name2`: names shown in the page header. Display only.
     console_display_names: str = ""
+    # The time zone the page header shows beside UTC (an IANA name). Display only: every
+    # stored and listed time stays UTC. A name the system does not know refuses to start.
+    console_timezone: str = "America/New_York"
 
     # cloudflared readiness endpoint, published on the host's loopback only. The
     # console service runs on the host network, so it reaches it there.

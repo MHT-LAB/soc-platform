@@ -54,6 +54,9 @@ def severity_class(value: object) -> str:
 
 
 templates.env.filters["sev"] = severity_class
+# Every page header shows the clock (UTC and local), rendered here when a page does not
+# pass its own (the overview pages pass theirs from the database's time).
+templates.env.globals["header_clock"] = lambda: ov.clock(None, get_settings().console_timezone)
 
 # The console page runs no script and loads nothing from other origins.
 CONSOLE_CSP = (
@@ -604,7 +607,7 @@ async def render_overview(
         "period_label": ov.PERIODS[period_key][1],
         "client": client,
         "filters": ov.filter_links(period_key, client, data["clients"], f"/console/{page}"),
-        "clock": ov.clock(data["generated_at"]),
+        "clock": ov.clock(data["generated_at"], settings.console_timezone),
         "scripted": True,
         "data": data,
     }

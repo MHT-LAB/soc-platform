@@ -26,8 +26,9 @@
     {% endif %}
     {% endif %}
     <span class="pill tailnet" title="Verified by Tailscale: {{ user | vis }}">{{ request.state.display_name | vis }}{% if request.state.role == "viewer" %} · read-only{% endif %}</span>
-    {% if clock %}<span class="clock" id="utc-clock" data-epoch="{{ clock.epoch }}">{{ clock.date }} {{ clock.time }}</span>
-    {% elif now %}<span class="clock">{{ now }}</span>{% endif %}
+    {% set ck = clock or header_clock() %}
+    <span class="clock" id="utc-clock" data-epoch="{{ ck.epoch }}">{{ ck.date }} {{ ck.time }}</span>
+    <span class="clock local" id="local-clock" data-tz="{{ ck.tz }}" title="{{ ck.hint }}">{{ ck.local }}</span>
   </div>
 </header>
 {% if scripted %}<script src="/console/overview.js" defer></script>{% endif %}

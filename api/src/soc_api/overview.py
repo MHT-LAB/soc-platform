@@ -15,6 +15,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from soc_api.banner import LIMITS
 from soc_api.worker import stale_reasons
@@ -721,10 +722,31 @@ def rules(data: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def clock(epoch: float | None = None) -> dict[str, str]:
+def clock(epoch: float | None = None, tz_name: str = "America/New_York") -> dict[str, str]:
+    """The header clock: UTC, and the same moment in the configured local zone with a
+    one-line hint for turning local time into UTC (daylight saving included)."""
     now = datetime.fromtimestamp(epoch, UTC) if epoch else datetime.now(UTC)
+    local = now.astimezone(ZoneInfo(tz_name))
+    abbr = local.tzname() or tz_name
+    offset = local.utcoffset()
+    minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+    hours, rest = divmod(abs(minutes), 60)
+    amount = (
+        f"{hours}"
+        + (f":{rest:02d}" if rest else "")
+        + (" hour" if minutes in (60, -60) else " hours")
+    )
+    if minutes == 0:
+        hint = f"{abbr} is the same as UTC right now."
+    elif minutes < 0:
+        hint = f"{abbr} = UTC − {amount} right now. To get UTC, add {amount} to {abbr} time."
+    else:
+        hint = f"{abbr} = UTC + {amount} right now. To get UTC, subtract {amount} from {abbr} time."
     return {
         "epoch": str(int(now.timestamp())),
         "time": now.strftime("%H:%M:%S"),
         "date": now.strftime("%a, %b %d · UTC"),
+        "local": local.strftime("%-I:%M %p ") + abbr,
+        "tz": tz_name,
+        "hint": hint + " Every time on these pages is UTC.",
     }

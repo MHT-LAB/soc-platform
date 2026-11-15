@@ -59,6 +59,7 @@ nav .soon { color: var(--faint); }
 .pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; }
 .tailnet { color: var(--up); background: var(--up-soft); border: 1px solid var(--up-edge); }
 .clock { font-family: var(--mono); color: var(--soft); font-size: 13px; }
+.clock.local { color: var(--accent); cursor: help; border-bottom: 1px dotted var(--accent-edge); }
 
 main { max-width: 1240px; margin: 0 auto; padding: 22px max(16px, 3vw) 40px; display: grid; gap: 18px; }
 .head h1 { font-size: 26px; font-weight: 600; overflow-wrap: anywhere; }
