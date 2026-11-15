@@ -18,17 +18,41 @@
   <section class="card">
     <div class="card-head"><h2>Signal flow · {{ period_label | lower }}</h2><span class="meta">{{ flow.meta }}</span></div>
     <div class="scroll">
-      <svg class="flowsvg" viewBox="0 0 1120 220" role="img" aria-label="Signal flow: sources, ingest, page, triage, respond">
-        {% for l in flow.links %}<path class="flink{% if l.planned %} planned{% endif %}" d="{{ l.d }}"></path>{% endfor %}
-        {% for n in flow.nodes %}
-        <g class="fnode{% if n.planned %} planned{% endif %}">
-          <rect x="{{ n.x }}" y="20" width="{{ flow.width }}" height="180" rx="10"></rect>
-          <text class="ftitle" x="{{ n.x + 14 }}" y="44">{{ n.title }}</text>
-          <text class="fbig" x="{{ n.x + 14 }}" y="88">{{ n.big }}</text>
-          <text class="fnlabel" x="{{ n.x + 14 }}" y="108">{{ n.label }}</text>
-          {% for line in n.lines %}<text class="fsub" x="{{ n.x + 14 }}" y="{{ 138 + loop.index0 * 18 }}">{{ line }}</text>{% endfor %}
+      <svg class="flowsvg" viewBox="0 0 {{ flow.width }} {{ flow.height }}" role="img" aria-label="{{ flow.aria }}">
+        {% for f in flow.feeds %}<path class="ffeed {{ 'on' if f.on else 'off' }}" d="{{ f.d }}"></path>{% endfor %}
+        {% for b in flow.bands %}
+        <path class="fband {{ b.cls }}" d="{{ b.d }}"></path>
+        <path class="fmid {{ b.cls }} {{ b.speed }}{% if b.still %} still{% endif %}" d="{{ b.mid }}"></path>
+        {% endfor %}
+        <path class="fmid planned" d="{{ flow.incident.d }}"></path>
+        {% for b in flow.bars %}<rect class="{{ b.cls }}{% if b.zero %} zero{% endif %}" x="{{ b.x }}" y="{{ b.y }}" width="10" height="{{ b.h }}" rx="2"></rect>{% endfor %}
+        <rect class="inc" x="{{ flow.incident.x }}" y="{{ flow.incident.y }}" width="10" height="{{ flow.incident.h }}" rx="2"></rect>
+
+        <rect class="fpanel" x="{{ flow.panel.x }}" y="{{ flow.panel.y }}" width="{{ flow.panel.w }}" height="{{ flow.panel.h }}" rx="8"></rect>
+        <text class="ftitle" x="{{ flow.panel.x + 14 }}" y="{{ flow.panel.y + 22 }}">FLEET</text>
+        <text class="fcount {{ 'up' if flow.all_up else 'warn' }}" x="{{ flow.panel.x + flow.panel.w - 14 }}" y="{{ flow.panel.y + 22 }}" text-anchor="end">{{ flow.reporting }}</text>
+        {% for g in flow.groups %}
+        <g class="fgroup {{ g.kind }}">
+          <text class="fgname" x="{{ flow.panel.x + 14 }}" y="{{ g.y }}">{{ g.name }}</text>
+          <text class="fgcount{% if g.problem %} warn{% endif %}" x="{{ flow.panel.x + 14 }}" y="{{ g.y | int + 14 }}">{{ g.count }}</text>
+          {% for i in g.icons %}
+          <path class="ficon {{ 'on' if i.on else 'off' }}" transform="translate({{ i.x }} {{ i.y }})" d="{{ i.d }}"><title>{{ i.title }}{% if i.host %} · {{ i.host | vis(64) }}{% endif %}</title></path>
+          {% endfor %}
+          {% if g.more %}<text class="fmore" x="{{ g.more_x }}" y="{{ g.more_y }}">{{ g.more }}</text>{% endif %}
         </g>
         {% endfor %}
+        <g class="flegend">
+          <path class="ficon on" transform="translate(30 340) scale(.6)" d="M3 3h12v12H3z"></path><text x="43" y="350">endpoint</text>
+          <path class="ficon on" transform="translate(100 340) scale(.6)" d="M9 1l8 8-8 8-8-8z"></path><text x="113" y="350">network</text>
+          <path class="ficon on" transform="translate(166 340) scale(.6)" d="M9 2l8 14H1z"></path><text x="179" y="350">vendor feed</text>
+          <circle class="ldot on" cx="35" cy="368" r="4"></circle><text x="43" y="372">online</text>
+          <circle class="ldot off" cx="100" cy="368" r="4"></circle><text x="108" y="372">quiet or offline</text>
+        </g>
+
+        {% for l in flow.labels %}
+        <g class="flabel"><text class="num {{ l.cls }}" x="{{ l.x }}" y="{{ l.y | int + (28 if l.cls == 'lg' else 20) }}">{{ l.num }}</text><text class="ttl" x="{{ l.x }}" y="{{ l.y | int + (46 if l.cls == 'lg' else 36) }}">{{ l.title }}</text><text class="sub" x="{{ l.x }}" y="{{ l.y | int + (62 if l.cls == 'lg' else 51) }}">{{ l.sub }}</text></g>
+        {% endfor %}
+        <g class="flabel planned"><text class="ttl" x="{{ flow.incident_label.x }}" y="{{ flow.incident_label.y | int + 24 }}">{{ flow.incident_label.title }}</text><text class="sub" x="{{ flow.incident_label.x }}" y="{{ flow.incident_label.y | int + 40 }}">{{ flow.incident_label.sub }} · not built yet</text></g>
       </svg>
     </div>
   </section>

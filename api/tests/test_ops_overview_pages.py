@@ -216,11 +216,10 @@ def test_the_overview_shows_every_panel_with_real_figures(demo: TestClient) -> N
     ):
         assert heading in text, heading
     assert re.search(r"[\d,]+ alerts in, [\d,]+ pages to a human, [\d,]+ cases\.", text)
-    # the signal flow: real figures for the built nodes, placeholders for the others
-    for node in ("SOURCES", "INGEST", "PAGE", "TRIAGE", "RESPOND"):
-        assert f">{node}<" in text
-    assert "3 of 3" in text and "11 of 12 sensors reporting" in text
-    assert "Sprint 5" in text and "Sprint 9" in text and "not built yet" in text
+    # the signal flow: sensor groups, bands with real counts, incidents drawn as not built
+    for title in ("ALERTS IN", "CASES", "PAGED", "QUIET LANE", "INCIDENTS"):
+        assert f">{title}<" in text, title
+    assert "13 of 15 reporting" in text and "Sprint 5 / 9" in text and "not built yet" in text
     assert re.search(r"pager p95 \d\.\d s", text)
     # queue: lanes, severity classes, "not analyzed" and never a clean verdict
     assert 'class="lane paged"' in text and 'class="lane quiet"' in text
@@ -246,17 +245,18 @@ def test_the_timeline_is_stacked_by_source_type_in_svg(demo: TestClient) -> None
 
 def test_health_shows_the_sensor_amber_and_the_rest_green(demo: TestClient) -> None:
     text = get(demo, "/console/overview").text
-    assert "1 of 12 sensors offline" in text and 'class="sdot warn"' in text
+    assert "1 of 12 endpoints offline" in text and 'class="sdot warn"' in text
     assert 'class="sdot up"' in text and 'class="sdot down"' not in text
+    assert "1 of 3 quiet · longest quiet 3d" in text  # a quiet source is amber, not red
     assert "independent of the SOC service; not monitored here" in text
 
 
 def test_fleet_lists_every_sensor_with_the_offline_one_first(demo: TestClient) -> None:
     text = get(demo, "/console/fleet").text
-    assert text.count("<tr>") == 13  # header + 12
+    assert text.count("<tr>") == 16  # header + 12 endpoints + 3 sources
     assert text.index("ws-demo-07") < text.index("ws-demo-01")
     assert ">offline</span>" in text and ">isolated</span>" in text
-    assert "1 offline" in text
+    assert "1 offline · 1 quiet" in text
 
 
 def test_sources_shows_types_clients_and_catch_up(demo: TestClient) -> None:
@@ -297,7 +297,7 @@ def test_an_empty_database_says_so_everywhere(db: TestDb) -> None:
     assert "No alert in this period carries an ATT&amp;CK hint" in text
     assert "none yet" in text and "no sensor data yet" in text
     assert "Health unknown" not in text  # the console is connected, so health is known
-    assert "no page sent in this period" in text
+    assert "to a human · none sent yet" in text
     assert "No sensor data" in get(c, "/console/fleet").text
     assert "No source is configured" in get(c, "/console/sources").text
     assert "No alerts in this period." in get(c, "/console/rules").text
@@ -318,7 +318,7 @@ def test_a_sensor_going_offline_shows_on_the_next_load(demo: TestClient, db: Tes
     assert "11/12" in get(demo, "/console/overview").text
     sql(db, "UPDATE sensor_state SET online = false WHERE hostname = 'ws-demo-01'")
     text = get(demo, "/console/overview").text
-    assert "10/12" in text and "2 of 12 sensors offline" in text
+    assert "10/12" in text and "2 of 12 endpoints offline" in text
     sql(db, "UPDATE sensor_state SET online = true")
     assert "12/12" in get(demo, "/console/overview").text
 

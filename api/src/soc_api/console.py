@@ -573,7 +573,11 @@ def ov_context(page: str, data: dict[str, Any]) -> dict[str, Any]:
         }
     if page == "fleet":
         rows = ov.fleet(data)
-        return {"rows": rows, "offline": sum(1 for r in rows if r["state"] == "down")}
+        return {
+            "rows": rows,
+            "offline": sum(1 for r in rows if r["state"] == "down"),
+            "quiet": sum(1 for r in rows if r["label"].startswith("quiet")),
+        }
     if page == "sources":
         return {"rows": ov.sources(data)}
     return {"rows": ov.rules(data), "inventory": data["rule_inventory"]}

@@ -3,10 +3,10 @@
 {% set sub = "fleet" %}
 {% block title %}Fleet{% endblock %}
 {% block h1 %}Fleet{% endblock %}
-{% block lede %}Endpoint sensors as the posture collector last saw them. This is the whole organization: sensors are not split by client.{% endblock %}
+{% block lede %}Sensors and sources as the posture collector last saw them. An endpoint that stops reporting is red; a syslog or vendor source with no message lately is amber (quiet), because many of them speak rarely. This is the whole organization: sensors are not split by client.{% endblock %}
 {% block body %}
   <section class="card">
-    <div class="card-head"><h2>Sensors</h2><span class="meta">{{ rows | length }} total · {{ offline }} offline · refreshed by the collector every 5 minutes</span></div>
+    <div class="card-head"><h2>Sensors</h2><span class="meta">{{ rows | length }} total · {{ offline }} offline{% if quiet %} · {{ quiet }} quiet{% endif %} · refreshed by the collector every 5 minutes</span></div>
     {% if rows %}
     <div class="scroll"><table>
       <thead><tr><th>Sensor</th><th>Platform</th><th>Version</th><th>Status</th><th class="r">Last seen</th><th class="r">Data age</th></tr></thead>

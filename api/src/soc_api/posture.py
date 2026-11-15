@@ -452,7 +452,15 @@ def check(cfg: Config) -> int:
     except LcError as exc:
         print(f"check failed: {exc.code}")
         return 1
-    print(f"check ok: auth=ok sensors={len(sensors)} online={len(online)} skipped={skipped}")
+    kept_online = sum(1 for s in sensors if s["online"])
+    print(
+        f"check ok: auth=ok sensors={len(sensors)} online={kept_online} skipped={skipped} "
+        "(kept sensors; the platform's own extension sensors are dropped)"
+    )
+    print(
+        f"raw API rows: all={len(everyone)} online={len(online)} "
+        "(before the extension sensors are dropped)"
+    )
     fields = ("sid", "hostname", "plat", "alive", "version", "is_isolated", "tags")
     print(
         "sensor fields ("

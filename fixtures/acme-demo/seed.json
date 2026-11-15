@@ -21,6 +21,11 @@
       "ws-demo-01", "ws-demo-02", "ws-demo-03", "ws-demo-04", "ws-demo-05", "ws-demo-06",
       "ws-demo-07", "ws-demo-08", "ws-demo-09", "ws-demo-10", "srv-demo-01", "srv-demo-02"
     ],
+    "adapters": [
+      {"hostname": "gw-demo-01", "platform": "Syslog (CEF)", "quiet_hours": 0},
+      {"hostname": "gw-demo-02", "platform": "Syslog (text)", "quiet_hours": 72},
+      {"hostname": "mail-demo-feed", "platform": "Email adapter", "quiet_hours": 0}
+    ],
     "offline_host": "ws-demo-07",
     "isolated_host": "ws-demo-09",
     "sources": [

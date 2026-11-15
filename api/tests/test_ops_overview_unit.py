@@ -96,21 +96,15 @@ def test_filters_are_a_fixed_set_and_a_slug_syntax() -> None:
     )
 
 
-def test_the_title_line_and_flow_use_the_real_figures_and_name_the_unbuilt() -> None:
+def test_the_title_line_and_the_flow_meta_use_the_real_figures() -> None:
     d = doc()
     assert ov.title_line(d) == "1,512 alerts in, 80 pages to a human, 402 cases."
     f = ov.flow(d)
-    assert [n["title"] for n in f["nodes"]] == ["SOURCES", "INGEST", "PAGE", "TRIAGE", "RESPOND"]
-    assert [n["planned"] for n in f["nodes"]] == [False, False, False, True, True]
-    assert f["nodes"][3]["big"] == "Sprint 5" and f["nodes"][4]["big"] == "Sprint 9"
     assert "pager p95 3.1 s" in f["meta"] and "newest alert 4s ago" in f["meta"]
     quiet = ov.flow(
         doc(flow={**d["flow"], "pager_n": 0, "pager_p95_s": None, "last_alert_age_s": None})
     )
-    assert (
-        "no pages yet" in quiet["meta"]
-        and quiet["nodes"][2]["lines"][0] == "no page sent in this period"
-    )
+    assert "no pages yet" in quiet["meta"]
 
 
 def test_a_healthy_pipeline_is_green_and_the_unbuilt_parts_are_grey() -> None:
