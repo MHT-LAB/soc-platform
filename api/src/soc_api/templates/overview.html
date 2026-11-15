@@ -19,7 +19,10 @@
     <div class="card-head"><h2>Signal flow · {{ period_label | lower }}</h2><span class="meta">{{ flow.meta }}</span></div>
     <div class="scroll">
       <svg class="flowsvg" viewBox="0 0 {{ flow.width }} {{ flow.height }}" role="img" aria-label="{{ flow.aria }}">
-        {% for f in flow.feeds %}<path class="ffeed {{ 'on' if f.on else 'off' }}" d="{{ f.d }}"></path>{% endfor %}
+        {% for f in flow.feeds %}
+        {% if f.mid %}<path class="ffband {{ f.kind }} {{ 'on' if f.on else 'off' }}" d="{{ f.d }}"></path><path class="ffeed {{ f.kind }} {{ 'on' if f.on else 'off' }}" d="{{ f.mid }}"></path>
+        {% else %}<path class="ffeed {{ f.kind }} {{ 'on' if f.on else 'off' }}{% if f.zero %} zero{% endif %}" d="{{ f.d }}"></path>{% endif %}
+        {% endfor %}
         {% for b in flow.bands %}
         <path class="fband {{ b.cls }}" d="{{ b.d }}"></path>
         <path class="fmid {{ b.cls }} {{ b.speed }}{% if b.still %} still{% endif %}" d="{{ b.mid }}"></path>
@@ -34,6 +37,7 @@
         {% for g in flow.groups %}
         <g class="fgroup {{ g.kind }}">
           <text class="fgname" x="{{ flow.panel.x + 14 }}" y="{{ g.y }}">{{ g.name }}</text>
+          {% if g.origin %}<text class="fgorigin{% if g.origin_zero %} zero{% endif %}" x="{{ flow.panel.x + flow.panel.w - 14 }}" y="{{ g.y }}" text-anchor="end">{{ g.origin }}</text>{% endif %}
           <text class="fgcount{% if g.problem %} warn{% endif %}" x="{{ flow.panel.x + 14 }}" y="{{ g.y | int + 14 }}">{{ g.count }}</text>
           {% for i in g.icons %}
           <path class="ficon {{ 'on' if i.on else 'off' }}" transform="translate({{ i.x }} {{ i.y }})" d="{{ i.d }}"><title>{{ i.title }}{% if i.host %} · {{ i.host | vis(64) }}{% endif %}</title></path>
@@ -41,6 +45,7 @@
           {% if g.more %}<text class="fmore" x="{{ g.more_x }}" y="{{ g.more_y }}">{{ g.more }}</text>{% endif %}
         </g>
         {% endfor %}
+        {% if flow.other %}<text class="fgorigin other" x="{{ flow.other.x }}" y="{{ flow.other.y }}" text-anchor="end">{{ flow.other.text }}</text>{% endif %}
         <g class="flegend">
           <path class="ficon on" transform="translate(30 340) scale(.6)" d="M3 3h12v12H3z"></path><text x="43" y="350">endpoint</text>
           <path class="ficon on" transform="translate(100 340) scale(.6)" d="M9 1l8 8-8 8-8-8z"></path><text x="113" y="350">network</text>
