@@ -224,6 +224,6 @@ def test_downgrading_restores_the_previous_claim_and_removes_the_rest(
     soc_db.upgrade(url, "0006")
     assert definition(db, "claim_pages(integer)") == after_downgrade
     soc_db.upgrade(url)  # and forward again
-    assert "late_s" in definition(db, "claim_pages(integer)")
+    assert "late_s" in definition(db, "claim_pages(integer, interval)")
     with fx.worker() as w:
         assert w.execute("SELECT * FROM reconcile_health()").fetchone() == (0, None)

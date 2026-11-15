@@ -117,7 +117,7 @@ def test_only_the_console_can_call_the_console_functions(fx: Fixture) -> None:
                 (function,),
             ).fetchone() == (True,)
         # and the console cannot call what belongs to the other services
-        for function in ("assign_cases(integer, jsonb)", "claim_pages(integer)"):
+        for function in ("assign_cases(integer, jsonb)", "claim_pages(integer, interval)"):
             assert c.execute(
                 "SELECT has_function_privilege('soc_console', %s::regprocedure, 'EXECUTE')",
                 (function,),

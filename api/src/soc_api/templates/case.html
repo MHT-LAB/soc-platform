@@ -93,7 +93,7 @@
       <thead><tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Detail</th></tr></thead>
       <tbody>
       {% for e in doc.events %}
-        <tr><td class="mono">{{ e.at | utc }}</td><td>{{ e.actor | vis }}</td><td>{{ e.kind | vis }}</td><td>{{ (e.body or "") | vis(300) }}</td></tr>
+        <tr><td class="mono">{{ e.at | utc }}</td><td>{{ e.actor | vis }}</td><td>{{ e.kind | event | vis }}</td><td>{{ (e.body or "") | vis(300) }}</td></tr>
       {% endfor %}
       </tbody>
     </table>

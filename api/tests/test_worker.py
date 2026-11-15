@@ -654,15 +654,15 @@ def test_a_page_that_cannot_be_described_fails_instead_of_looping(
     calls: list[tuple[Any, ...]] = []
 
     class FakeDb:
-        def claim_pages(self, batch: int) -> list[dict[str, Any]]:
+        def claim_pages(self, batch: int, window_s: float = 600.0) -> list[dict[str, Any]]:
             return [{"id": "11111111-1111-4111-8111-111111111111", "attempts": 1}]
 
         def finish_page(self, *args: Any) -> str:
             calls.append(args)
             return "failed"
 
-        def due_page_count(self) -> int:
-            return 0
+        def held_summary(self) -> tuple[int, int, str | None]:
+            return 0, 0, None
 
     worker = w.Worker(FakeDb(), client(ntfy_server), {})  # type: ignore[arg-type]
     worker._sender()
