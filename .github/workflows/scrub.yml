@@ -1,0 +1,45 @@
+# The scrub gate has its own workflow so it can re-run when a PR title or body is edited
+# (on squash merge they become the commit message on main, so they must be scanned too)
+# without re-running the rest of ci.yml (the Docker stack tests included).
+# The job name "scrub gate" is what branch protection requires as a status check; it must
+# not change. Actions are pinned to full commit SHAs like everywhere else.
+name: scrub
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrub-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scrub:
+    name: scrub gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # On PRs, check the branch's real commits, not the temporary merge
+          # commit GitHub synthesizes for testing.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: scrub gate self-test
+        run: scripts/test-scrub-check.sh
+      - run: scripts/scrub-check.sh
+        # Values go in through env, never inline in the script: PR text is
+        # attacker-controlled and must not be parsed as shell.
+        env:
+          SCRUB_DENYLIST: ${{ secrets.SCRUB_DENYLIST }}
+          SCRUB_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SCRUB_DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && '1' || '' }}
+          SCRUB_PR: ${{ github.event_name == 'pull_request' && '1' || '' }}
+          SCRUB_PR_TITLE: ${{ github.event.pull_request.title }}
+          SCRUB_PR_BODY: ${{ github.event.pull_request.body }}
