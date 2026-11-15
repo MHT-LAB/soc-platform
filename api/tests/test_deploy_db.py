@@ -22,7 +22,9 @@ case "$1" in
   inspect)
     if [[ "$*" == *Health* ]]; then echo "${FAKE_DB_HEALTH:-healthy}"; else echo imgid; fi
     exit 0 ;;
-  image) printf '%s\\n' "$FAKE_REPODIGEST"; exit 0 ;;
+  image)
+    if [[ "$*" == *Config.Labels* ]]; then echo "${FAKE_OLD_REV:-}"; exit 0; fi
+    printf '%s\\n' "$FAKE_REPODIGEST"; exit 0 ;;
 esac
 exit 0
 """
@@ -46,12 +48,16 @@ class DbHost(Host):
     def with_previous_image(self) -> None:
         self.image_env.write_text(f"SOC_API_IMAGE={OLD_IMAGE}\nSOC_STATE_DIR={self.state}\n")
 
-    def deploy(self, **extra: str) -> subprocess.CompletedProcess[str]:
+    def deploy(
+        self, *, detached: bool = False, stdin: str | None = None, **extra: str
+    ) -> subprocess.CompletedProcess[str]:
+        """detached: no controlling terminal (setsid), so /dev/tty cannot be opened."""
         env = {
             "PATH": "/usr/bin:/bin",
             "HOME": str(self.tmp),
             "SOC_STATE_DIR": str(self.state),
             "SOC_TEST_BIN": str(self.bin),
+            "SOC_DEPLOY_ASSUME_YES": "1",
             "SOC_SOURCE_DIR": str(self.src),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -64,10 +70,12 @@ class DbHost(Host):
         return subprocess.run(  # noqa: S603 - fixed argv, our own script
             [BASH, str(DEPLOY), "edge"],
             env=env,
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
+            start_new_session=detached,
         )
 
     def calls(self) -> list[str]:

@@ -21,7 +21,9 @@ case "$1" in
   inspect)
     if [[ "$*" == *Health* ]]; then echo healthy; else echo imgid; fi
     exit 0 ;;
-  image) printf '%s\\n' "$FAKE_REPODIGEST"; exit 0 ;;
+  image)
+    if [[ "$*" == *Config.Labels* ]]; then echo "${FAKE_OLD_REV:-}"; exit 0; fi
+    printf '%s\\n' "$FAKE_REPODIGEST"; exit 0 ;;
 esac
 exit 0
 """
@@ -43,6 +45,7 @@ class PrepHost(DbHost):
             "HOME": str(self.tmp),
             "SOC_STATE_DIR": str(self.state),
             "SOC_TEST_BIN": str(self.bin),
+            "SOC_DEPLOY_ASSUME_YES": "1",
             "SOC_SOURCE_DIR": str(self.src),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",

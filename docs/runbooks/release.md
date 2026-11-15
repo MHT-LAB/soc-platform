@@ -10,6 +10,7 @@ tag. These controls keep a tag from being a back door:
 | Tag rulesets | `.github/rulesets/*.json` | Moving or deleting a published version tag; creating one without repo-admin rights. **This is the boundary today.** |
 | Deploy-side source check | `deploy.sh`, step 2b | An image built from a commit that is not on `main`. Reads the image's commit label, requires it on `origin/main` in the host's clone, then has cosign prove the signature names that exact commit. Runs on the host, where a branch cannot change it, and before anything on the host changes. |
 | Deploy-side tree check | `deploy.sh`, step 2c | A stale or edited checkout running a new image with an old or modified compose layout. Refuses a clone with uncommitted or untracked files, or whose `HEAD` is not exactly `origin/main` (behind, ahead or diverged), before anything on the host changes. |
+| Deploy-side confirmation | `deploy.sh`, step 2d | A merged-and-green change running on the host without a person having looked at it. Prints the commits between the running image and the new one and requires a typed `yes` from `/dev/tty`; a first deploy prints the last 10. Runs after every check and before anything changes. |
 
 ## Apply the tag rulesets (repo admin, once)
 

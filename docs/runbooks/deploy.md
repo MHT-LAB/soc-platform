@@ -8,6 +8,17 @@ the running container's image digest is exactly the verified one. Any failure
 rolls back to the previous digest. The build's commit (from `/version`) is
 recorded in the deploy log.
 
+**The typed yes.** After every check passes and before anything on the host changes,
+`deploy.sh` prints the commits between the running image's source commit and the new one
+(newest first, at most 50; a first deploy prints the last 10) and waits for you to type
+`yes` on the terminal. Anything else, including an empty line, stops with the host
+unchanged. Read the list: a green build on `main` proves the code was merged, not that you
+want it running here. A step back (the new image is older than the running one) is flagged
+as such. `deploy.sh --prepare` asks too, because it pulls a new image. The answer is read
+from `/dev/tty`, so run it from a real terminal session (not a pipe, `ssh host cmd` without
+`-t`, or a scheduled job: those stop with "no terminal to confirm on"). Nothing in the
+environment skips the question for root; the test-only switches are refused for root.
+
 ## Host layout (Stage A container)
 | Path | Contents | Mode |
 |---|---|---|
