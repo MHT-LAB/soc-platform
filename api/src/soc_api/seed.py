@@ -232,13 +232,39 @@ def _activity_state(
                 "updated": now - timedelta(seconds=50),
             },
         )
+    # Syslog and vendor adapters: one that has not sent a message for days (quiet, which is
+    # amber and healthy for a source that speaks rarely) and the rest reporting.
+    adapters = spec.get("adapters", [])
+    for n, adapter in enumerate(adapters, start=len(spec["hosts"]) + 1):
+        quiet = timedelta(hours=adapter["quiet_hours"])
+        conn.execute(
+            text(
+                "INSERT INTO sensor_state (sid, hostname, platform, version, online, isolated, "
+                "tags, last_seen, updated_at) VALUES (:sid, :host, :platform, NULL, :online, "
+                "false, '{demo}', :seen, :updated)"
+            ),
+            {
+                "sid": f"demo-sensor-{n + 100:04d}",
+                "host": adapter["hostname"],
+                "platform": adapter["platform"],
+                "online": not quiet,
+                "seen": now - (quiet or timedelta(seconds=40)),
+                "updated": now - timedelta(seconds=50),
+            },
+        )
+    quiet_adapters = sum(1 for a in adapters if a["quiet_hours"])
     for i in range(12):
         at = now - timedelta(minutes=5 * i + 2)
         conn.execute(
             text(
-                "INSERT INTO sensor_count (at, online, offline, isolated) VALUES (:at, :on, 1, 1)"
+                "INSERT INTO sensor_count (at, online, offline, isolated) "
+                "VALUES (:at, :on, :off, 1)"
             ),
-            {"at": at, "on": len(spec["hosts"]) - 1},
+            {
+                "at": at,
+                "on": len(spec["hosts"]) + len(adapters) - 1 - quiet_adapters,
+                "off": 1 + quiet_adapters,
+            },
         )
         conn.execute(
             text("INSERT INTO posture_run (at, ok, org_error_count) VALUES (:at, true, 0)"),

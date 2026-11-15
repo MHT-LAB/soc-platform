@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+from soc_api import signalflow
 from soc_api.banner import LIMITS
 from soc_api.worker import stale_reasons
 
@@ -161,74 +162,11 @@ def title_line(data: dict[str, Any]) -> str:
 
 
 def flow(data: dict[str, Any]) -> dict[str, Any]:
-    """The signal-flow diagram: five nodes, each with the figures the database has. The two
-    that are not built are drawn dashed and say which sprint delivers them."""
-    f, h, t = data["flow"], data["health"], data["totals"]
-    sensors_total, sensors_online = count(h["sensors_total"]), count(h["sensors_online"])
+    """The living signal flow (see signalflow.py), plus the one-line meta under its title."""
+    f, h = data["flow"], data["health"]
     p95 = number(f["pager_p95_s"])
-    if sensors_total:
-        sensor_line = f"{sensors_online} of {sensors_total} sensors reporting"
-    else:
-        sensor_line = "no sensor data yet"
-    if count(f["pager_n"]):
-        page_sub = f"p95 {f1(p95 or 0.0)} s created to sent"
-    else:
-        page_sub = "no page sent in this period"
-    failed = count(f["pages_failed"])
-    nodes: list[dict[str, Any]] = [
-        {
-            "title": "SOURCES",
-            "big": f"{count(f['sources_enabled'])} of {count(f['sources_total'])}",
-            "label": "enabled",
-            "lines": [sensor_line],
-            "planned": False,
-        },
-        {
-            "title": "INGEST",
-            "big": f"{count(t['alerts_in']):,}",
-            "label": "alerts in",
-            "lines": [
-                f"newest {ago(f['last_alert_age_s'])} ago"
-                if f["last_alert_age_s"] is not None
-                else "no alert yet",
-                f"catch-up last ran {ago(h['reconcile_quiet_s'])} ago"
-                if count(h["reconcile_sources"])
-                else "catch-up not set up",
-                f"{count(t['cases'])} cases opened",
-            ],
-            "planned": False,
-        },
-        {
-            "title": "PAGE",
-            "big": f"{count(t['pages']):,}",
-            "label": "pages to a human",
-            "lines": [page_sub, f"{failed} failed" if failed else "none failed"],
-            "planned": False,
-        },
-        {
-            "title": "TRIAGE",
-            "big": "Sprint 5",
-            "label": "not built yet",
-            "lines": ["LLM analyst"],
-            "planned": True,
-        },
-        {
-            "title": "RESPOND",
-            "big": "Sprint 9",
-            "label": "not built yet",
-            "lines": ["guarded response"],
-            "planned": True,
-        },
-    ]
-    width, gap, x0 = 180, 50, 10
-    for i, node in enumerate(nodes):
-        node["x"] = x0 + i * (width + gap)
-        node["cx"] = node["x"] + width // 2
-    links = [
-        {"d": f"M{nodes[i]['x'] + width} 110 L{nodes[i + 1]['x']} 110", "planned": i >= 2}
-        for i in range(len(nodes) - 1)
-    ]
-    meta = (
+    drawing = signalflow.build(data)
+    drawing["meta"] = (
         f"newest alert {ago(f['last_alert_age_s'])} ago · "
         + (
             f"catch-up ran {ago(h['reconcile_quiet_s'])} ago"
@@ -238,7 +176,7 @@ def flow(data: dict[str, Any]) -> dict[str, Any]:
         + " · "
         + (f"pager p95 {f1(p95)} s" if count(f["pager_n"]) and p95 is not None else "no pages yet")
     )
-    return {"nodes": nodes, "links": links, "width": width, "meta": meta}
+    return drawing
 
 
 def lane_class(lane: Any) -> str:
@@ -342,7 +280,7 @@ def response(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def status_tiles(data: dict[str, Any]) -> list[dict[str, Any]]:
-    h, f = data["health"], data["flow"]
+    f = data["flow"]
     open_sev = data["open_by_severity"]
     open_total = sum(count(v) for v in open_sev.values())
     parts = [
@@ -350,8 +288,11 @@ def status_tiles(data: dict[str, Any]) -> list[dict[str, Any]]:
         for s in ("critical", "high", "medium", "low", "info")
         if count(open_sev.get(s))
     ]
-    sensors_total = count(h["sensors_total"])
-    online = count(h["sensors_online"])
+    sm = signalflow.summary(data)
+    endpoints, online = int(sm["endpoints"] or 0), int(sm["endpoints_online"] or 0)
+    quiet = int(sm["sources_quiet"] or 0)
+    sources = int(sm["sources"] or 0)
+    total = endpoints + sources
     return [
         {
             "label": "Open cases",
@@ -368,11 +309,16 @@ def status_tiles(data: dict[str, Any]) -> list[dict[str, Any]]:
             else "no acknowledgement yet",
         },
         {
-            "label": "Sensors online",
-            "value": f"{online}/{sensors_total}" if sensors_total else "none",
-            "cls": ("up" if online == sensors_total else "warn") if sensors_total else "setup",
-            "note": "from the posture collector"
-            if sensors_total
+            "label": "Endpoints online",
+            "value": f"{online}/{endpoints}" if endpoints else ("none" if not total else "0/0"),
+            "cls": ("up" if online == endpoints else "warn") if endpoints else "setup",
+            "note": (
+                (f"{quiet} of {sources} sources quiet" if quiet else f"{sources} sources reporting")
+                + " · from the posture collector"
+                if sources
+                else "from the posture collector"
+            )
+            if total
             else "the posture collector has not reported",
         },
         {
@@ -403,23 +349,51 @@ def health(data: dict[str, Any]) -> list[dict[str, str]]:
     )
     rows: list[dict[str, str]] = []
 
-    total, online = count(h["sensors_total"]), count(h["sensors_online"])
-    if not total:
+    sm = signalflow.summary(data)
+    endpoints, online = int(sm["endpoints"] or 0), int(sm["endpoints_online"] or 0)
+    n_sources, n_quiet = int(sm["sources"] or 0), int(sm["sources_quiet"] or 0)
+    if not endpoints and not n_sources:
         sensors = ("idle", "no sensor data: the posture collector has not reported", "")
     elif firing["posture_quiet"]:
-        sensors = ("down", f"{online} of {total} reporting; the sensor list is out of date", "")
-    elif online < total:
-        sensors = ("warn", f"{total - online} of {total} sensors offline", "")
+        sensors = (
+            "down",
+            f"{online} of {endpoints} endpoints reporting; the sensor list is out of date",
+            "",
+        )
+    elif not endpoints:
+        sensors = ("idle", "no endpoint sensors enrolled", "")
+    elif online < endpoints:
+        sensors = ("warn", f"{endpoints - online} of {endpoints} endpoints offline", "")
     else:
-        sensors = ("up", f"{total} enrolled, all reporting", "")
+        sensors = ("up", f"{endpoints} enrolled, all reporting", "")
     rows.append(
         {
             "name": "Endpoint sensors",
             "state": sensors[0],
             "detail": sensors[1],
-            "seen": ago(h["sensors_updated_age_s"]) if total else "",
+            "seen": ago(h["sensors_updated_age_s"]) if endpoints or n_sources else "",
         }
     )
+    if n_sources:
+        # A syslog or vendor source with no message lately is quiet (amber): many of them
+        # speak rarely and are healthy. Only an endpoint that stops is red.
+        if firing["posture_quiet"]:
+            src = ("down", "the sensor list is out of date")
+        elif n_quiet:
+            src = (
+                "warn",
+                f"{n_quiet} of {n_sources} quiet · longest quiet {ago(sm['longest_quiet_s'])}",
+            )
+        else:
+            src = ("up", f"{n_sources} reporting")
+        rows.append(
+            {
+                "name": "Syslog and feed sources",
+                "state": src[0],
+                "detail": src[1],
+                "seen": ago(h["sensors_updated_age_s"]),
+            }
+        )
 
     enabled, sources_total = count(f["sources_enabled"]), count(f["sources_total"])
     rows.append(
@@ -652,18 +626,23 @@ def timeline(data: dict[str, Any]) -> dict[str, Any]:
 
 def fleet(data: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
-    for s in data["fleet"]:
-        online = bool(s["online"])
-        state = "up" if online and not s["isolated"] else ("warn" if online else "down")
+    for s in signalflow.sensors(data):
+        if s["state"] == "up":
+            state, label = ("warn", "isolated") if s["isolated"] else ("up", "online")
+        elif s["state"] == "quiet":
+            state, label = "warn", f"quiet · last message {s['seen']} ago"
+        else:
+            state, label = "down", "offline"
         rows.append(
             {
                 "hostname": s["hostname"],
                 "platform": s["platform"],
-                "version": s.get("version") or "",
+                "version": s["version"],
+                "kind": s["kind"],
                 "state": state,
-                "label": ("isolated" if s["isolated"] else "online") if online else "offline",
-                "last_seen": ago(s.get("last_seen_age_s")),
-                "updated": ago(s.get("updated_age_s")),
+                "label": label,
+                "last_seen": s["seen"],
+                "updated": ago(s["updated_age_s"]),
             }
         )
     return rows

@@ -635,6 +635,20 @@ def test_check_prints_counts_and_field_names_but_no_names(
         assert secret not in out
 
 
+def test_check_counts_online_for_the_kept_sensors_and_labels_the_raw_rows(
+    lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # two real sensors (one online) and the platform's own extension sensor, online
+    lc.sensors = [sensor_row(1), sensor_row(2), sensor_row(3, hostname="ext-lc-service")]
+    lc.online = {f"{SID}1", f"{SID}3"}
+    cfg = p.Config(OID, KEY, "", lc.url, lc.url + "/jwt", True, 300.0, "")
+    assert p.check(cfg) == 0
+    out = capsys.readouterr().out
+    assert "check ok: auth=ok sensors=2 online=1 skipped=0 (kept sensors;" in out
+    assert "raw API rows: all=3 online=2 (before the extension sensors are dropped)" in out
+    assert "host-1" not in out and "ext-lc-service" not in out
+
+
 def test_check_reports_a_failure_as_a_code(lc: FakeLc, capsys: pytest.CaptureFixture[str]) -> None:
     lc.jwt_status = 403
     cfg = p.Config(OID, KEY, "", lc.url, lc.url + "/jwt", True, 300.0, "")

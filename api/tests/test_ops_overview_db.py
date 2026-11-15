@@ -357,9 +357,9 @@ def test_the_demo_seed_fills_every_panel(db: TestDb) -> None:
     assert {f["lane"] for f in doc["funnel"]} == {"paged", "quiet", "vendor"}
     assert {f["status"] for f in doc["funnel"]} == {"open", "acknowledged", "closed"}
     assert doc["response"]["7"]["mtta"]["n"] > 0 and doc["response"]["30"]["mttr"]["n"] > 0
-    assert doc["health"]["sensors_total"] == 12 and doc["health"]["sensors_online"] == 11
+    assert doc["health"]["sensors_total"] == 15 and doc["health"]["sensors_online"] == 13
     assert (
-        len(doc["deploys"]) == 2 and len(doc["fleet"]) == 12 and doc["fleet"][0]["online"] is False
+        len(doc["deploys"]) == 2 and len(doc["fleet"]) == 15 and doc["fleet"][0]["online"] is False
     )
     assert len(doc["sources"]) == 3 and len(doc["rules"]) >= 8 and doc["rule_inventory"]
     kinds = {k for row in doc["timeline"]["rows"] for k in row["c"]}
@@ -381,6 +381,8 @@ def test_the_demo_names_are_synthetic() -> None:
     text = SEED_FILE.read_text()
     for host in json.loads(text)["activity"]["hosts"]:
         assert host.startswith(("ws-demo-", "srv-demo-"))
+    for adapter in json.loads(text)["activity"]["adapters"]:
+        assert "-demo-" in adapter["hostname"] or adapter["hostname"].endswith("-demo-feed")
     assert "@example.com" in text
 
 
