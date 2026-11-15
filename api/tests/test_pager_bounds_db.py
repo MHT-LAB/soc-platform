@@ -335,11 +335,18 @@ def test_an_empty_sensor_id_counts_as_none(fx: Fixture) -> None:
         {"host": None, "sid": ""},
     ],
 )
-def test_alerts_with_an_empty_key_are_never_grouped(fx: Fixture, kw: dict[str, Any]) -> None:
+def test_alerts_with_no_sensor_and_no_host_group_by_rule(fx: Fixture, kw: dict[str, Any]) -> None:
+    # Org-level and synthetic detections: one case per rule, not one page per alert.
     fx.alert(age_min=10, **kw)
     fx.alert(age_min=5, **kw)
     fx.alert(**kw)
-    assert fx.assign() == (3, 3, 3)
+    assert fx.assign() == (3, 1, 1)
+
+
+def test_a_hostless_alert_never_joins_a_case_with_a_sensor(fx: Fixture) -> None:
+    fx.alert(sid=SID_A, age_min=10)
+    fx.alert(host=None)
+    assert fx.assign() == (2, 2, 2)
 
 
 def test_alerts_with_no_rule_are_never_grouped_even_with_a_sensor(fx: Fixture) -> None:

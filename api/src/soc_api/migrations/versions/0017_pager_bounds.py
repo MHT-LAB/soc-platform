@@ -28,8 +28,10 @@ R2, fairness in the claim order (claim_pages):
 
 R4, grouping key:
   the key is the sensor id (routing.sid, which the endpoint cannot rename), and only when
-  there is none, the host name. Two alerts whose key is empty, or that carry no rule, are
-  never grouped. alert_case_group is rebuilt on the new key. Nothing existing is rewritten:
+  there is none, the host name; an alert with neither (org-level or synthetic detections)
+  gets the fixed key "none", so those still group by client and rule rather than paging once
+  per alert. An alert that carries no rule is never grouped. alert_case_group is rebuilt on
+  the new key. Nothing existing is rewritten:
   open cases stay as they are, and an old alert with a host name but no sensor id still
   matches a new alert of the same kind (same key).
 
@@ -56,11 +58,11 @@ MAX_CASE_AGE = "24 hours"
 
 UNASSIGNED = "00000000-0000-4000-8000-000000000001"
 
-# The grouping key of an alert: sensor id, else host name; NULL when neither is there.
-# The prefixes keep a host name from ever equalling a sensor id.
+# The grouping key of an alert: sensor id, else host name, else the fixed key 'none'.
+# The prefixes keep a host name from ever equalling a sensor id or 'none'.
 KEY = (
     "coalesce('sid:' || nullif({p}raw #>> '{{routing,sid}}', ''), "
-    "'host:' || nullif({p}raw #>> '{{routing,hostname}}', ''))"
+    "'host:' || nullif({p}raw #>> '{{routing,hostname}}', ''), 'none')"
 )
 
 
@@ -256,8 +258,9 @@ CREATE OR REPLACE FUNCTION assign_cases(p_batch integer, p_policy jsonb DEFAULT 
                     asev := 'medium';
                 END IF;
                 target := NULL;
-                -- an alert with no rule, or no sensor id and no host name, joins nothing
-                IF a.gkey IS NOT NULL AND coalesce(a.rule, '') <> '' THEN
+                -- an alert with no rule joins nothing (one with no sensor and no host has
+                -- the key 'none' and groups by client and rule)
+                IF coalesce(a.rule, '') <> '' THEN
                     SELECT x.case_id, c.status, c.severity, c.opened_at
                     INTO target, tstatus, tsev, topened
                     FROM alert x JOIN soc_case c ON c.client_id = x.client_id AND c.id = x.case_id

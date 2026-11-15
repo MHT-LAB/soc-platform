@@ -448,8 +448,9 @@ database password: new value in `console-db.env` and `console-owner.env`, then `
   `repage1` or `repage2`, at most one of each per case), so it follows the same retry, give-up,
   page-cap and counter rules as any page.
 - **Bounded cases (migration `0017`).** A case keeps collecting alerts for the same client, rule
-  and sensor (the sensor id; the host name only when an alert has none; an alert with neither, or
-  with no rule, never joins anything) while each alert is within 60 minutes of the last one, with
+  and sensor (the sensor id; the host name only when an alert has none; an alert with neither
+  groups by client and rule alone, so org-level detections don't page once per alert; an alert
+  with no rule never joins anything) while each alert is within 60 minutes of the last one, with
   three limits. An acknowledged case that gains an alert 60 minutes or more after the
   acknowledgement (or after its last push of this kind) gets one more push, titled `NEW ALERTS: `
   (`notification.kind` `reopen`), then the 60 minutes start again from that push. A case stops
