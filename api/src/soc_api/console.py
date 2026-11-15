@@ -140,8 +140,10 @@ async def load_banner(
     request.state.health_known = True
 
 
-# Pipeline stages as they exist today. "live" stages are probed; the rest show
-# the sprint that delivers them, so the page never pretends something works.
+# Pipeline stages as they exist today. "up", "down" and "unknown" come from a probe; "live"
+# is a stage that ships and runs but is not probed here (its health is the Ops Overview's
+# job); "planned" shows the sprint that delivers it, so the page never pretends something
+# works.
 def pipeline(tunnel: status.TunnelStatus, fleet: status.Fleet) -> list[dict[str, str]]:
     if not fleet.configured:
         src_state, src_note = "setup", "connect read-only EDR key"
@@ -159,19 +161,19 @@ def pipeline(tunnel: status.TunnelStatus, fleet: status.Fleet) -> list[dict[str,
     return [
         {"name": "Sources", "state": src_state, "note": src_note},
         {"name": "Edge tunnel", "state": edge_state, "note": edge_note},
-        {"name": "Ingest", "state": "planned", "note": "Sprint 1"},
-        {"name": "Cases", "state": "planned", "note": "Sprint 1"},
-        {"name": "Pager", "state": "planned", "note": "Sprint 1"},
+        {"name": "Ingest", "state": "live", "note": "see Operations"},
+        {"name": "Cases", "state": "live", "note": "see Cases"},
+        {"name": "Pager", "state": "live", "note": "see Operations"},
         {"name": "LLM analyst", "state": "planned", "note": "Sprint 5"},
     ]
 
 
 SPRINTS = [
-    ("S0", "Foundations", "active"),
-    ("S1", "Alert path + pager", "next"),
-    ("S2", "Resilience", "planned"),
-    ("S3", "Ops Overview + SSO", "planned"),
-    ("S4", "Detection as code", "planned"),
+    ("S0", "Foundations", "done"),
+    ("S1", "Alert path + pager", "done"),
+    ("S2", "Resilience", "done"),
+    ("S3", "Ops Overview + SSO", "active"),
+    ("S4", "Detection as code", "next"),
     ("S5", "LLM triage", "planned"),
 ]
 

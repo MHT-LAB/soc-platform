@@ -7,9 +7,11 @@ in one console. An LLM analyst triages each case: whether it's the operator's
 own work, the indicators, related activity, ATT&CK mapping, and a short brief.
 A human incident commander gets paged immediately and makes the calls.
 
-> **Status:** Sprint 0 complete. Signed pipeline, hardened host, one public
-> path, and a tailnet-only console with live sensor status. Sprint 1 (alerts to
-> phone, case store) is next.
+> **Status:** Sprint 3 in progress; v0.2 is done. Alerts arrive over a signed
+> webhook, group into cases, page a phone, and catch up from the detection source
+> after an outage. A tailnet-only console shows the queue, cases and an Ops
+> Overview. Signed releases, a hardened host and one public path.
+> Detection as code and LLM triage come next.
 > Twelve one-week sprints; progress is logged in [`docs/sprint-reviews/`](docs/sprint-reviews/README.md).
 
 ## Principles the code enforces
