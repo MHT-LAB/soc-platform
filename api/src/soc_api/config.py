@@ -101,9 +101,13 @@ class Settings(BaseSettings):
     # Replay window on the signed gen_time (ms epoch inside the body).
     ingest_max_age_seconds: int = 3600
     ingest_max_future_seconds: int = 300
-    # Requests per minute, per client IP and per source. Failed auth costs double.
+    # Requests per minute, per client IP and per source. Failed auth costs double against
+    # the IP bucket and is counted for the source in its own bucket (below), never against
+    # the source's real budget, so someone who only knows a source name cannot hold real
+    # deliveries at 429.
     ingest_rate_per_ip: int = 60
     ingest_rate_per_source: int = 600
+    ingest_rate_fail_per_source: int = 30
 
     # The pager worker (its own service; worker.env holds the first two).
     # A role that can only call the worker functions (soc_worker).

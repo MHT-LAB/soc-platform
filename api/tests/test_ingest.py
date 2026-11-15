@@ -546,6 +546,37 @@ def test_failed_signatures_cost_double() -> None:
     assert bad == [401, 401, 429]  # a flat cost would allow four 401s
 
 
+def test_failed_signatures_do_not_spend_the_sources_real_budget() -> None:
+    client, store = make(ingest_rate_per_source=3, ingest_rate_per_ip=1000)
+    bad = {"lc-signature": "0" * 64}
+    for i in range(10):
+        ip = {"CF-Connecting-IP": f"203.0.113.{i}"}
+        assert post(client, delivery(), secret=None, headers={**bad, **ip}).status_code == 401
+    # The real budget (3 per window) is intact for the sender that holds the secret.
+    codes = [
+        post(client, delivery(detect_id=f"id-{i}"), headers={"CF-Connecting-IP": "198.51.100.7"})
+        for i in range(3)
+    ]
+    assert [c.status_code for c in codes] == [200, 200, 200]
+    assert len(store.calls) == 3
+
+
+def test_failed_signatures_have_their_own_bucket_per_source() -> None:
+    client, _ = make(ingest_rate_fail_per_source=2, ingest_rate_per_ip=1000)
+    bad = {"lc-signature": "0" * 64}
+    codes = [
+        post(
+            client, delivery(), secret=None, headers={**bad, "CF-Connecting-IP": f"203.0.113.{i}"}
+        ).status_code
+        for i in range(4)
+    ]
+    assert codes == [401, 401, 429, 429]
+    # Another source's failures, and valid deliveries, are not affected.
+    other = post(client, delivery(), source="lc-two", secret=None, headers=bad)
+    assert other.status_code == 401
+    assert post(client, delivery()).status_code == 200
+
+
 def test_a_flood_on_one_source_does_not_starve_another() -> None:
     client, _ = make(ingest_rate_per_source=3, ingest_rate_per_ip=1000)
     body = delivery()
