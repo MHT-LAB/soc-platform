@@ -614,10 +614,42 @@ def down_store() -> FakeStore:  # noqa: N802
     return s
 
 
+def _uvicorn_commands() -> list[tuple[str, list[str]]]:
+    """Every uvicorn command line in the Dockerfile and in all compose files, as argv lists."""
+    root = Path(__file__).resolve().parents[2]
+    found: list[tuple[str, list[str]]] = []
+    dockerfile = root / "api" / "Dockerfile"
+    for line in dockerfile.read_text().splitlines():
+        if line.startswith(("CMD", "ENTRYPOINT")) and "uvicorn" in line:
+            found.append((f"{dockerfile.name}: {line}", json.loads(line.split(None, 1)[1])))
+    for path in sorted((root / "deploy").glob("compose*.yml")):
+        lines = path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if line.strip().startswith("#") or "uvicorn" not in line:
+                continue
+            if line.strip() == "- uvicorn":  # block-list form: gather the list's items
+                indent = len(line) - len(line.lstrip())
+                argv = []
+                for item in lines[i:]:
+                    stripped = item.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if not stripped.startswith("- ") or len(item) - len(item.lstrip()) != indent:
+                        break
+                    argv.append(stripped[2:].strip("\"'"))
+            else:  # inline form: command: ["uvicorn", ...] or a shell string
+                argv = line.split(":", 1)[1].replace('"', " ").replace("[", " ").replace("]", " ")
+                argv = argv.replace(",", " ").split()
+            found.append((f"{path.name}:{i + 1}", argv))
+    return found
+
+
 def test_server_access_log_is_off_so_query_strings_never_reach_logs() -> None:
-    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
-    cmd = next(line for line in dockerfile.splitlines() if line.startswith("CMD"))
-    assert "--no-access-log" in cmd
+    commands = _uvicorn_commands()
+    # The Dockerfile's and the console's, at least; a rename must not make this vacuous.
+    assert len(commands) >= 2
+    for where, argv in commands:
+        assert "--no-access-log" in argv, f"{where} leaves the access log on"
 
 
 # ---- least privilege ----
