@@ -295,11 +295,46 @@ class Counts:
     sensors: int = 0
     online: int = 0
     rules: int = 0
-    errors: int = 0
+    errors: int | None = 0  # None: the key cannot read the organization's errors
     skipped: int = 0
+    namespaces_unavailable: int = 0
 
     def line(self) -> str:
-        return " ".join(f"{k}={v}" for k, v in vars(self).items())
+        return " ".join(f"{k}={'unavailable' if v is None else v}" for k, v in vars(self).items())
+
+
+# A rules namespace the organization does not have (no managed rule sets, say) answers one
+# of these; it is skipped, not a failed run. The org-error list answers 401/403 when the
+# key's permissions do not cover it (the client has already retried once with a fresh
+# token); it is stored as unknown, never as zero. Every other failure still fails the
+# whole run, with nothing written.
+NAMESPACE_UNAVAILABLE = frozenset({"http_400", "http_403", "http_404"})
+ERRORS_UNREADABLE = frozenset({"http_401", "http_403"})
+
+
+def rules_by_namespace(
+    lc: PostureClient, limits: Limits
+) -> tuple[dict[str, list[tuple[str, bool]]], list[str]]:
+    """The rules of every namespace that answered, and the namespaces that are not there."""
+    found: dict[str, list[tuple[str, bool]]] = {}
+    missing: list[str] = []
+    for ns in RULE_HIVES:
+        try:
+            found[ns] = lc.list_rules(ns, limits)
+        except LcError as exc:
+            if exc.code not in NAMESPACE_UNAVAILABLE:
+                raise
+            missing.append(ns)
+    return found, missing
+
+
+def errors_or_unknown(lc: PostureClient, limits: Limits) -> tuple[int | None, str | None]:
+    try:
+        return lc.org_errors(limits)
+    except LcError as exc:
+        if exc.code not in ERRORS_UNREADABLE:
+            raise
+        return None, None
 
 
 def collect(lc: PostureClient, limits: Limits) -> tuple[dict[str, Any], Counts]:
@@ -307,18 +342,20 @@ def collect(lc: PostureClient, limits: Limits) -> tuple[dict[str, Any], Counts]:
     everyone = lc.list_sensors(online_only=False, limits=limits)
     online = lc.list_sensors(online_only=True, limits=limits)
     sensors, skipped = shape_sensors(everyone, online)
+    found, missing = rules_by_namespace(lc, limits)
     rules = [
         {"namespace": ns, "name": name, "enabled": enabled}
-        for ns in RULE_HIVES
-        for name, enabled in lc.list_rules(ns, limits)
+        for ns, listed in found.items()
+        for name, enabled in listed
     ]
-    count, newest = lc.org_errors(limits)
+    count, newest = errors_or_unknown(lc, limits)
     counts = Counts(
         sensors=len(sensors),
         online=sum(1 for s in sensors if s["online"]),
         rules=len(rules),
         errors=count,
         skipped=skipped,
+        namespaces_unavailable=len(missing),
     )
     doc = {"sensors": sensors, "rules": rules, "org_errors": {"count": count, "newest": newest}}
     return doc, counts
@@ -410,8 +447,8 @@ def check(cfg: Config) -> int:
         everyone = lc.list_sensors(online_only=False, limits=lim)
         online = lc.list_sensors(online_only=True, limits=lim)
         sensors, skipped = shape_sensors(everyone, online)
-        per_ns = {ns: len(lc.list_rules(ns, lim)) for ns in RULE_HIVES}
-        count, newest = lc.org_errors(lim)
+        found, missing = rules_by_namespace(lc, lim)
+        count, newest = errors_or_unknown(lc, lim)
     except LcError as exc:
         print(f"check failed: {exc.code}")
         return 1
@@ -423,8 +460,16 @@ def check(cfg: Config) -> int:
         + " rows): "
         + " ".join(f"{f}={sum(f in r for r in everyone)}" for f in fields)
     )
-    print("rules: " + " ".join(f"{ns}={n}" for ns, n in per_ns.items()))
-    print(f"org errors: count={count} newest_component={'yes' if newest else 'none'}")
+    print(
+        "rules: "
+        + " ".join(
+            f"{ns}={len(found[ns])}" if ns in found else f"{ns}=not-available" for ns in RULE_HIVES
+        )
+    )
+    if count is None:
+        print("org errors: not readable with this key (stored as unknown)")
+    else:
+        print(f"org errors: count={count} newest_component={'yes' if newest else 'none'}")
     return 0
 
 

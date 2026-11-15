@@ -480,6 +480,8 @@ def health(data: dict[str, Any]) -> list[dict[str, str]]:
         posture = ("idle", "not set up")
     elif firing["posture_quiet"]:
         posture = ("down", f"no good run for {dur(h['posture_quiet_s'])}")
+    elif org is None:
+        posture = ("up", "sensors and rules every 5 minutes; org errors not readable with this key")
     elif count(org):
         posture = ("warn", f"{count(org)} errors reported on the organization")
     else:
