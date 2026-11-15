@@ -373,9 +373,10 @@ def test_a_case_page_has_the_alerts_history_and_the_two_forms(fx: Fixture) -> No
     assert "host-1" in r.text and "general.Rule One" in r.text and "opened" in r.text
     # the tokens in the forms are the ones the checker accepts for this login and case
     tokens = re.findall(r'name="token" value="([0-9a-f]{64})"', r.text)
-    assert len(tokens) == 2
+    assert len(tokens) == 3
     assert csrf.check_token(SECRET, tokens[0], LOGIN, case, "ack")
     assert csrf.check_token(SECRET, tokens[1], LOGIN, case, "close")
+    assert csrf.check_token(SECRET, tokens[2], LOGIN, case, "close-as")
 
 
 def test_a_closed_case_shows_its_note_and_no_forms(fx: Fixture) -> None:

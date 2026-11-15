@@ -23,11 +23,13 @@ from soc_api import banner, csrf, metrics, status
 from soc_api import overview as ov
 from soc_api.cases import (
     STATUS_FILTERS,
+    VERDICTS,
     BadFilter,
     CaseDb,
     CasesUnavailable,
     fmt_time,
     parse_case_id,
+    verdict_label,
 )
 from soc_api.config import DEFAULT_ROLE, Settings, display_name, get_settings
 from soc_api.text import link_path, visible
@@ -39,6 +41,7 @@ templates = Jinja2Templates(directory=HERE / "templates")  # autoescape on for .
 # the template writes the vendor's address and `link_path` supplies only what follows it.
 templates.env.filters["utc"] = fmt_time
 templates.env.filters["vis"] = visible
+templates.env.filters["verdict"] = verdict_label
 templates.env.filters["link_path"] = link_path
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
@@ -241,6 +244,7 @@ MESSAGES = {
     "note_required": "A note is required to close a case.",
     "note_too_long": "The note is too long (2000 characters at most).",
     "closed": "This case is already closed.",
+    "invalid_verdict": "That is not a way to close a case.",
     "invalid_login": "Your sign-in name was not accepted for the audit trail.",
 }
 
@@ -446,6 +450,41 @@ async def close_case(
         return unavailable(request, user, configured=False)
     try:
         result = await run_in_threadpool(db.close, cid, user, form.get("note", ""))
+    except CasesUnavailable:
+        return unavailable(request, user, configured=True)
+    done = finished(cid, "closed_now" if result in ("closed", "already") else result)
+    if done is not None:
+        return done
+    code = {"invalid_login": 403}.get(result, 400)
+    return await render_case(
+        request, user, settings, cid, message=MESSAGES.get(result, "Not done."), code=code
+    )
+
+
+@router.post(
+    "/console/case/{case_id}/close-as",
+    dependencies=[Depends(analyst_user), Depends(load_banner)],
+)
+async def close_case_as(
+    case_id: str,
+    request: Request,
+    user: Annotated[str, Depends(analyst_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Response:
+    """Quick close: one of four fixed verdicts and an optional note."""
+    cid, form = await checked_post(request, user, settings, case_id, "close-as")
+    verdict = form.get("verdict", "")
+    if verdict not in VERDICTS:
+        return await render_case(
+            request, user, settings, cid, message=MESSAGES["invalid_verdict"], code=400
+        )
+    db = case_db(settings)
+    if db is None:
+        return unavailable(request, user, configured=False)
+    try:
+        result = await run_in_threadpool(
+            db.close_with_verdict, cid, user, verdict, form.get("note", "")
+        )
     except CasesUnavailable:
         return unavailable(request, user, configured=True)
     done = finished(cid, "closed_now" if result in ("closed", "already") else result)

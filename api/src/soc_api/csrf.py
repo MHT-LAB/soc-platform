@@ -17,7 +17,7 @@ import hmac
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 
-ACTIONS = ("ack", "close")
+ACTIONS = ("ack", "close", "close-as")
 
 
 def _mac(secret: str, login: str, case_id: str, action: str, day: date) -> str:

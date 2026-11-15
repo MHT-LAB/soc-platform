@@ -19,6 +19,21 @@ from sqlalchemy.engine import make_url
 
 STATUS_FILTERS = ("active", "open", "acknowledged", "closed", "all")
 
+# Quick-close verdicts: the stored value and what a person reads. Kept apart so tuning can
+# count real false positives without our own tests and admin work. The same set is checked
+# in close_case_with_verdict.
+VERDICTS = {
+    "test": "Our test",
+    "authorized_activity": "Our admin work",
+    "false_positive": "False positive",
+    "duplicate": "Duplicate",
+}
+
+
+def verdict_label(value: Any) -> str:
+    """Plain words for a stored verdict; empty for none. The raw value is never shown."""
+    return VERDICTS.get(value, "") if isinstance(value, str) else ""
+
 
 class CasesUnavailable(Exception):
     """The case database cannot be reached or refused the call."""
@@ -124,3 +139,10 @@ class CaseDb:
 
     def close(self, case_id: str, login: str, note: str) -> str:
         return str(self._one("SELECT close_case(%s, %s, %s)", (case_id, login, note)))
+
+    def close_with_verdict(self, case_id: str, login: str, verdict: str, note: str) -> str:
+        return str(
+            self._one(
+                "SELECT close_case_with_verdict(%s, %s, %s, %s)", (case_id, login, verdict, note)
+            )
+        )
