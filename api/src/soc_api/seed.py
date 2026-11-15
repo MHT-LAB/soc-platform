@@ -208,6 +208,15 @@ def seed_activity(url: str, seed_file: Path, now: datetime | None = None) -> Non
         engine.dispose()
 
 
+def _platform_code(spec: dict[str, Any], rule: dict[str, Any], host: str) -> int:
+    """The platform code the vendor puts in an alert's routing: the adapter's for a syslog
+    or vendor-feed source (spec 'alert_platforms'), else Linux for srv hosts and Windows."""
+    fixed = spec.get("alert_platforms", {}).get(rule["source"])
+    if isinstance(fixed, int):
+        return fixed
+    return 0x20000000 if host.startswith("srv") else 0x10000000
+
+
 def _activity_state(
     conn: Connection, source_ids: dict[str, Any], spec: dict[str, Any], now: datetime, days: int
 ) -> None:
@@ -388,7 +397,12 @@ def _activity_cases(
                     "sev": rule["severity"],
                     "summary": rule["rule"].split(".", 1)[1].replace(".", " ") + " on " + host,
                     "mitre": rule["mitre"],
-                    "raw": json.dumps({"cat": rule["rule"], "routing": {"hostname": host}}),
+                    "raw": json.dumps(
+                        {
+                            "cat": rule["rule"],
+                            "routing": {"hostname": host, "plat": _platform_code(spec, rule, host)},
+                        }
+                    ),
                     "case": case_id,
                     "detected": received - timedelta(seconds=rng.randint(1, 20)),
                     "received": received,

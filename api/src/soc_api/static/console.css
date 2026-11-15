@@ -162,7 +162,8 @@ a { color: var(--accent); }
 /* ---- Ops Overview ---- */
 .head.split { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 14px 24px; }
 .head.split > div:first-child { min-width: 0; }
-.filters { display: flex; flex-wrap: wrap; gap: 10px 20px; }
+.filters { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: end; }
+.autonote { font-size: 11px; color: var(--dim); }
 .fgroup { display: grid; gap: 4px; }
 .flabel { font-size: 11px; color: var(--dim); }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -197,7 +198,10 @@ a { color: var(--accent); }
 .flowsvg .fgcount { font-size: 10.5px; fill: var(--dim); } .flowsvg .fgcount.warn { fill: var(--warn); }
 .flowsvg .fmore, .flowsvg .flegend text { font-size: 9.5px; fill: var(--dim); }
 .ficon { stroke-width: 1.5; } .ficon.on, .ldot.on { fill: var(--up-soft); stroke: var(--up); } .ficon.off, .ldot.off { fill: color-mix(in srgb, var(--warn) 20%, transparent); stroke: var(--warn); }
-.ffeed { fill: none; stroke-width: 1.5; stroke-dasharray: 4 5; } .ffeed.on { stroke: var(--up); } .ffeed.off { stroke: var(--warn); }
+.ffband { fill-opacity: .22; } .ffband.on { fill: var(--up); } .ffband.off { fill: var(--warn); } .ffband.unknown { fill: var(--faint); }
+.ffeed.zero { stroke-width: 1; stroke-opacity: .5; animation: none; }
+.flowsvg .fgorigin { font-family: var(--mono); font-size: 10px; fill: var(--soft); } .flowsvg .fgorigin.zero, .flowsvg .fgorigin.other { fill: var(--dim); }
+.ffeed { fill: none; stroke-width: 1.5; stroke-dasharray: 4 5; } .ffeed.on { stroke: var(--up); } .ffeed.off { stroke: var(--warn); } .ffeed.unknown { stroke: var(--faint); }
 .fband { fill-opacity: .24; } .fband.alerts, .fband.paged { fill: var(--accent); } .fband.paged { fill-opacity: .32; } .fband.quiet { fill: var(--faint); fill-opacity: .32; }
 .fmid { fill: none; stroke-width: 1.4; stroke-dasharray: 5 7; stroke-opacity: .9; }
 .fmid.alerts, .fmid.paged { stroke: var(--accent); } .fmid.quiet { stroke: var(--dim); }

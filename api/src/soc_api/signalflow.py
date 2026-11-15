@@ -20,7 +20,10 @@ A sensor's state is one of three:
 * down: an endpoint that stopped reporting. Red on the tiles, health list and Fleet tab.
 """
 
+import re
 from typing import Any
+
+from soc_api.status import platform_name
 
 # What the platform name of a sensor says about its kind. Names come from
 # status.PLATFORMS and the posture collector ("Windows", "Syslog (CEF)", "Email adapter",
@@ -44,6 +47,7 @@ COLS = {"alerts": 340, "cases": 540, "lane": 740, "incidents": 940}
 BAR_W = 10
 MAX_BAR = 200.0
 MIN_BAR = 6.0
+MIN_FEED = 3.0
 CENTER_Y = 190.0
 LANE_TOP = 90.0
 LANE_GAP = 40.0
@@ -58,6 +62,27 @@ def kind_of(platform: Any) -> str:
     if name.startswith("syslog") or name == "vpn":
         return "network"
     return "feed"
+
+
+ORIGIN_KINDS = (*KINDS, "unknown")
+_PLAT_RE = re.compile(r"[0-9]{1,10}")
+FEED_WORDS = {
+    "endpoint": "from endpoints",
+    "network": "from network",
+    "feed": "from vendor feeds",
+    "unknown": "from other",
+}
+
+
+def origin_kind(plat: Any) -> str:
+    """Where an alert came from, from the platform code in its own routing: 'endpoint',
+    'network', 'feed' (any other adapter) or 'unknown' (no usable code). This is the Python
+    twin of the CASE in ops_overview() (migration 0016); a test makes them agree. A code is
+    a whole number of at most ten digits (as a number or as the text the database sees)."""
+    text = str(plat) if isinstance(plat, int) and not isinstance(plat, bool) else plat
+    if not isinstance(text, str) or not _PLAT_RE.fullmatch(text):
+        return "unknown"
+    return kind_of(platform_name(int(text)))
 
 
 def _num(value: Any) -> float | None:
@@ -201,6 +226,8 @@ def groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "has_up": any(s["state"] == "up" for s in members),
                 "any": bool(members),
                 "n_problems": len(problems),
+                "origin": "",
+                "origin_zero": False,
             }
         )
         y += height + 12
@@ -221,6 +248,95 @@ def _band(xa: float, a0: float, a1: float, xb: float, b0: float, b1: float) -> s
 def _mid(xa: float, a0: float, a1: float, xb: float, b0: float, b1: float) -> str:
     m = (xa + xb) / 2
     ya, yb = (a0 + a1) / 2, (b0 + b1) / 2
+    return f"M{xa:.1f} {ya:.1f} C{m:.1f} {ya:.1f} {m:.1f} {yb:.1f} {xb:.1f} {yb:.1f}"
+
+
+def origins(data: dict[str, Any]) -> dict[str, int] | None:
+    """Alert counts by origin kind for the period, or None for a document that has none."""
+    raw = data.get("origins")
+    if not isinstance(raw, dict):
+        return None
+    return {k: _count(raw.get(k)) for k in ORIGIN_KINDS}
+
+
+def feed_curves(
+    data: dict[str, Any], grp: list[dict[str, Any]], xa: float, a0: float, ha: float
+) -> tuple[list[dict[str, Any]], dict[str, str] | None, str]:
+    """The curves from the fleet groups into "alerts in".
+
+    With the period's alert counts by origin, each group's curve is a band whose thickness
+    follows that group's share of the alerts (at least MIN_FEED while it has any), stacked
+    on the left edge of the alerts bar, with a "N from endpoints" label on the group. A
+    group that sent none is a dashed hairline. Alerts of unknown origin get a small grey
+    curve from the foot of the panel, labelled "other", only when there are any. Without the
+    counts (an older document) each group with sensors gets one plain dashed curve.
+    Also returns the words for the drawing's text description."""
+    x0 = float(PANEL_X + PANEL_W)
+    counts = origins(data)
+    if counts is None:
+        out = []
+        active = [g for g in grp if g["any"]]
+        for i, grp_ in enumerate(active):
+            ty = a0 + ha * (i + 0.5) / len(active)
+            out.append(
+                {
+                    "d": _curve(x0, grp_["mid_y"], xa, ty),
+                    "kind": grp_["kind"],
+                    "on": grp_["has_up"],
+                }
+            )
+        return out, None, ""
+
+    total = sum(counts.values())
+    shown = [k for k in ORIGIN_KINDS if counts[k] or (k != "unknown" and _group(grp, k)["any"])]
+    thick = {k: max(counts[k] / total * ha, MIN_FEED) if counts[k] else 0.0 for k in shown}
+    stack = sum(thick.values())
+    y = CENTER_Y - stack / 2
+    out = []
+    unknown_label = ""
+    for k in shown:
+        g = _group(grp, k) if k != "unknown" else None
+        sy = g["mid_y"] if g else PANEL_Y + PANEL_H - 14.0
+        w = thick[k]
+        n = counts[k]
+        label = f"{n:,} {FEED_WORDS[k]}"
+        if g:
+            g["origin"] = label
+            g["origin_zero"] = not n
+        else:
+            unknown_label = label
+        on = bool(g["has_up"]) if g else False
+        if n:
+            out.append(
+                {
+                    "d": _band(x0, sy - w / 2, sy + w / 2, xa, y, y + w),
+                    "mid": _mid(x0, sy - w / 2, sy + w / 2, xa, y, y + w),
+                    "kind": k,
+                    "on": on,
+                    "zero": False,
+                    "w": f"{w:.1f}",
+                }
+            )
+        else:
+            out.append({"d": _curve(x0, sy, xa, y), "kind": k, "on": on, "zero": True})
+        y += w
+    other = None
+    if counts["unknown"]:
+        other = {
+            "x": f"{PANEL_X + PANEL_W - 14}",
+            "y": f"{PANEL_Y + PANEL_H - 10}",
+            "text": unknown_label,
+        }
+    words = ", ".join(f"{counts[k]:,} {FEED_WORDS[k]}" for k in ORIGIN_KINDS if counts[k])
+    return out, other, (f" By origin: {words}." if words else "")
+
+
+def _group(grp: list[dict[str, Any]], kind: str) -> dict[str, Any]:
+    return next(g for g in grp if g["kind"] == kind)
+
+
+def _curve(xa: float, ya: float, xb: float, yb: float) -> str:
+    m = (xa + xb) / 2
     return f"M{xa:.1f} {ya:.1f} C{m:.1f} {ya:.1f} {m:.1f} {yb:.1f} {xb:.1f} {yb:.1f}"
 
 
@@ -346,18 +462,7 @@ def build(data: dict[str, Any]) -> dict[str, Any]:
 
     rows = sensors(data)
     grp = groups(rows)
-    feeds = []
-    active = [g for g in grp if g["any"]]
-    for i, g in enumerate(active):
-        ty = a0 + ha * (i + 0.5) / len(active)
-        sy = g["mid_y"]
-        feeds.append(
-            {
-                "d": f"M{PANEL_X + PANEL_W} {sy:.1f} C{PANEL_X + PANEL_W + 30} {sy:.1f}, "
-                f"{xa - 25:.0f} {ty:.1f}, {xa:.0f} {ty:.1f}",
-                "on": g["has_up"],
-            }
-        )
+    feeds, other, origin_text = feed_curves(data, grp, xa, a0, ha)
     on = sum(1 for s in rows if s["state"] == "up")
     return {
         "width": WIDTH,
@@ -367,6 +472,7 @@ def build(data: dict[str, Any]) -> dict[str, Any]:
         "all_up": bool(rows) and on == len(rows),
         "groups": grp,
         "feeds": feeds,
+        "other": other,
         "bars": bars,
         "bands": bands,
         "labels": labels,
@@ -375,6 +481,6 @@ def build(data: dict[str, Any]) -> dict[str, Any]:
         "aria": (
             f"Signal flow for {_period_words(days)}: {alerts:,} alerts in, {cases:,} cases, "
             f"{paged:,} paged to a human, {quiet:,} in the quiet lane; {on} of {len(rows)} "
-            "sensors reporting."
+            f"sensors reporting.{origin_text}"
         ),
     }
