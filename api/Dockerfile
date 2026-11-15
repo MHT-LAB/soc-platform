@@ -1,11 +1,14 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # Base image pinned by digest so a rebuilt tag can't silently change what ships.
 # Dependabot proposes digest bumps as PRs.
 
 # ---- build: resolve dependencies from the lockfile into /app/.venv ----
 FROM python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS build
 
-RUN pip install --no-cache-dir uv==0.10.12
+# uv is copied from its digest-pinned release image rather than pip-installed, so the tool
+# that writes the signed virtual environment is fixed by hash (ADR 0005). Dependabot
+# proposes digest bumps. The tag is kept for readers; the digest is what is fetched.
+COPY --from=ghcr.io/astral-sh/uv:0.10.12@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec /uv /usr/local/bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
