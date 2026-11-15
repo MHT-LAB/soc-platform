@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     page_policy: str = ""
     # Bounded so a typo cannot silence the pager (cap 0) or hammer the database (tick 0).
     worker_tick_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
+    # Optional dead-man's switch: an https URL (a secret: it is the monitor's ping address,
+    # from env/worker.env) that the worker calls after a good pass, at most once a minute.
+    # When the calls stop, the monitor sends the alert. Empty = nothing is sent.
+    worker_deadman_url: SecretStr = SecretStr("")
     # At most this many pushes per window; the rest wait (and one notice says so).
     page_cap: int = Field(default=10, ge=1, le=1000)
     page_cap_window_seconds: int = Field(default=600, ge=60, le=86400)
