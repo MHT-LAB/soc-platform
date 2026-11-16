@@ -43,8 +43,13 @@
     </div>
     <div class="tile">
       <span class="label">Sprint</span>
-      <strong class="accent">S0</strong>
-      <span class="note">foundations, in progress</span>
+      {% if sprint_now %}
+      <strong class="accent">{{ sprint_now[0] }}</strong>
+      <span class="note">{{ sprint_now[1] }}, in progress</span>
+      {% else %}
+      <strong class="setup">none</strong>
+      <span class="note">no sprint is marked active</span>
+      {% endif %}
     </div>
   </section>
 

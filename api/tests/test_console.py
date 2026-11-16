@@ -69,6 +69,26 @@ def test_shipped_stages_and_sprints_do_not_say_planned() -> None:
     assert states["S3"] == "active"
 
 
+def test_the_sprint_tile_names_the_active_sprint(fake_probes: None) -> None:
+    """The tile used to say "S0 foundations, in progress" whatever the build, a stale claim
+    that would show up in every public screenshot."""
+    from soc_api.console import SPRINTS
+
+    active = [(n, title) for n, title, state in SPRINTS if state == "active"]
+    assert len(active) == 1
+    r = client().get("/console", headers=TAILNET)
+    tile = r.text.split('<span class="label">Sprint</span>')[1].split("</div>")[0]
+    assert f">{active[0][0]}<" in tile and active[0][1] in tile
+    assert "foundations" not in tile.lower() and ">S0<" not in tile
+
+
+def test_no_sprint_title_claims_sso() -> None:
+    """Sign-in is the tailnet identity plus roles; real OIDC waits for the VPS sprint (S11)."""
+    from soc_api.console import SPRINTS
+
+    assert not [title for _, title, _ in SPRINTS if "sso" in title.lower()]
+
+
 def test_console_escapes_sensor_hostnames(fake_probes: None) -> None:
     r = client().get("/console", headers=TAILNET)
     assert "<script>alert(1)</script>" not in r.text
