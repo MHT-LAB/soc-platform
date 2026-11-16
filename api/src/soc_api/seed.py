@@ -363,7 +363,9 @@ def _activity_cases(
             status = rng.choices(["acknowledged", "open", "closed"], [0.5, 0.4, 0.1])[0]
         if n < 4:
             status = "open" if n % 2 else "acknowledged"
-        if lane == "quiet" and age > 3600:
+        # quiet cases close within the hour, except the pinned recent ones: they keep
+        # the queue and the funnel filled whatever time of day the seed runs
+        if lane == "quiet" and age > 3600 and n >= 4:
             status = "closed"
         closed_at = None
         if status == "closed":
