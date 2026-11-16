@@ -89,10 +89,6 @@ class Settings(BaseSettings):
     # console service runs on the host network, so it reaches it there.
     tunnel_ready_url: str = "http://127.0.0.1:2000/ready"
 
-    # Read-only EDR platform API access, for the sensor fleet panel.
-    lc_oid: str = ""
-    lc_api_key: SecretStr = SecretStr("")
-
     # Ingest (public app only; read from ingest.env, never from the image).
     # SOC_INGEST_SECRETS is JSON: {"<source slug>": ["<current>", "<next>"]}. Two
     # secrets per source let a rotation happen without downtime. A source with no

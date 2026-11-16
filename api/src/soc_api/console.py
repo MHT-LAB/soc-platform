@@ -167,14 +167,14 @@ async def load_banner(
 # works.
 def pipeline(tunnel: status.TunnelStatus, fleet: status.Fleet) -> list[dict[str, str]]:
     if not fleet.configured:
-        src_state, src_note = "setup", "connect read-only EDR key"
+        src_state, src_note = "setup", fleet.setup_note or "posture collector not set up"
     elif fleet.error:
-        src_state, src_note = "down", f"API error ({fleet.error})"
+        src_state, src_note = "down", fleet.error
     else:
-        src_state = "unknown" if fleet.partial else "up"
-        src_note = f"{fleet.online} of {len(fleet.sensors)}{'+' if fleet.partial else ''} reporting"
-        if fleet.partial:
-            src_note += " (partial list)"
+        src_state = "unknown" if fleet.stale else "up"
+        src_note = f"{fleet.online} of {len(fleet.sensors)} reporting"
+        if fleet.stale:
+            src_note += f" (list {fleet.posture_age} old)"
     edge_state = {"up": "up", "down": "down"}.get(tunnel.state, "unknown")
     edge_note = (
         f"{tunnel.connections} edge connections" if tunnel.state == "up" else "not connected"
@@ -199,6 +199,19 @@ SPRINTS = [
 ]
 
 
+async def posture_fleet(settings: Settings) -> status.Fleet:
+    """The sensor panel, read from the database: the rows the posture collector keeps, the same
+    ones the Fleet tab shows. The console holds no EDR key and makes no call to the EDR API."""
+    db = case_db(settings)
+    if db is None:
+        return status.Fleet(configured=False, setup_note="no database login for the console yet")
+    try:
+        data = await run_in_threadpool(db.ops_overview, 1, "all")
+    except (CasesUnavailable, BadFilter):
+        return status.Fleet(configured=True, error="the database cannot be reached")
+    return ov.system_fleet(data)
+
+
 @router.get("/console", response_class=HTMLResponse, dependencies=[Depends(load_banner)])
 async def console(
     request: Request,
@@ -206,7 +219,7 @@ async def console(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> HTMLResponse:
     tunnel = await status.tunnel_status(settings)
-    fleet = await status.sensor_fleet(settings)
+    fleet = await posture_fleet(settings)
     digest = settings.image_ref.split("@", 1)[1] if "@" in settings.image_ref else ""
     response = templates.TemplateResponse(
         request,

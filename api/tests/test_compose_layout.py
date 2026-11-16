@@ -173,8 +173,8 @@ def test_the_worker_never_gets_the_owner_the_ingest_or_the_edr_credentials() -> 
 
 
 def test_the_console_form_secret_and_database_login_go_to_the_console_only() -> None:
+    # No lc.env: the console holds no EDR key (R19), its sensor panel reads the database.
     assert env_files("console") == {
-        "lc.env": False,
         "console.env": False,
         "console-db.env": False,
         "pager-ack.env": False,

@@ -41,7 +41,7 @@ def test_public_app_starts_without_console_users() -> None:
 
 def test_validation_error_does_not_echo_secrets() -> None:
     with pytest.raises(ValidationError) as exc:
-        Settings(env="nonsense", lc_api_key="super-secret-value")  # type: ignore[arg-type]
+        Settings(env="nonsense", reconcile_lc_key="super-secret-value")  # type: ignore[arg-type]
     assert "super-secret-value" not in str(exc.value)
 
 
@@ -51,7 +51,7 @@ def test_importing_the_console_app_in_prod_without_users_exits_nonzero() -> None
         **os.environ,
         "SOC_ENV": "prod",
         "SOC_CONSOLE_USERS": "",
-        "SOC_LC_API_KEY": "super-secret-value",
+        "SOC_RECONCILE_LC_KEY": "super-secret-value",
     }
     r = subprocess.run(
         [sys.executable, "-c", "import soc_api.console_main"],

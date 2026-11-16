@@ -742,10 +742,10 @@ made the set, or the migration step after the load cannot recognise the database
    (`SOC_BACKUP_AGE_PUB`), then `init-worker.sh`, `init-console-db.sh`, `init-reconcile.sh`,
    `init-reconcile-lc.sh`, `init-posture.sh` and `init-posture-lc.sh` with `--restore` as each
    header describes. The data directory must be empty (`init-secrets.sh --restore` creates it).
-   Also by hand, not needed for the restore itself: `env/console.env` (the allow-list),
-   `env/policy.env` (from the deploy repo, not secret) and, for the console's sensor fleet panel,
-   `env/lc.env` (mode 600, `SOC_LC_OID` and `SOC_LC_API_KEY`, the read-only key; see the deploy
-   runbook). The restore drill on 2026-11-14 rebuilt everything else from the secrets manager alone.
+   Also by hand, not needed for the restore itself: `env/console.env` (the allow-list) and
+   `env/policy.env` (from the deploy repo, not secret). The console needs no EDR key: its sensor
+   panel reads the posture collector's rows from the database. The restore drill on 2026-11-14
+   rebuilt everything else from the secrets manager alone.
 3. Put the set where the script can read it: the three files `soc-<time>.dump.age`,
    `soc-<time>.globals.sql.age` and `soc-<time>.sha256` together. They are in `/srv/soc/backups`, or
    inside the container's archive on the NAS. Either copy all three into `/srv/soc/backups`, or give

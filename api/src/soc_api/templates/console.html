@@ -28,12 +28,12 @@
     <div class="tile">
       <span class="label">Sensors reporting</span>
       {% if fleet.configured and not fleet.error %}
-      <strong class="{{ 'up' if fleet.online == fleet.sensors|length and not fleet.partial else 'warn' }}">{{ fleet.online }}/{{ fleet.sensors|length }}{{ '+' if fleet.partial }}</strong>
-      <span class="note">{% if fleet.partial %}PARTIAL list, page limit reached{% else %}endpoints and adapters{% endif %}</span>
+      <strong class="{{ 'up' if fleet.online == fleet.sensors|length and not fleet.stale else 'warn' }}">{{ fleet.online }}/{{ fleet.sensors|length }}</strong>
+      <span class="note">{% if fleet.stale %}OUT OF DATE, last good run {{ fleet.posture_age }} ago{% else %}endpoints and adapters{% if fleet.posture_age %} · as of {{ fleet.posture_age }} ago{% endif %}{% endif %}</span>
       {% elif fleet.error %}
       <strong class="down">ERROR</strong><span class="note">{{ fleet.error }}</span>
       {% else %}
-      <strong class="setup">SETUP</strong><span class="note">read-only key not connected</span>
+      <strong class="setup">SETUP</strong><span class="note">{{ fleet.setup_note }}</span>
       {% endif %}
     </div>
     <div class="tile">
@@ -64,27 +64,27 @@
 
   <div class="cols">
     <section class="card">
-      <div class="card-head"><h2>Sensor fleet</h2><span class="meta">read-only · cached 60 s</span></div>
+      <div class="card-head"><h2>Sensor fleet</h2><span class="meta">from the posture collector{% if fleet.posture_age %} · last good run {{ fleet.posture_age }} ago{% endif %}</span></div>
       {% if not fleet.configured %}
       <div class="empty">
-        <strong>Connect the EDR platform</strong>
-        <p>Create a read-only API key, save it on the host as <code>/srv/soc/env/lc.env</code>, and redeploy. Sensors appear here with their platform and status.</p>
+        <strong>No sensor data yet</strong>
+        <p>{{ fleet.setup_note | capitalize }}. Sensors appear here once the posture collector has run; the console keeps no key for the EDR platform and does not call it.</p>
       </div>
       {% elif fleet.error %}
-      <div class="empty"><strong>Couldn't reach the sensor API</strong><p>{{ fleet.error }}. The rest of the console keeps working.</p></div>
+      <div class="empty"><strong>Couldn't read the sensor data</strong><p>{{ fleet.error | capitalize }}. The rest of the console keeps working.</p></div>
       {% else %}
-      {% if fleet.partial %}
-      <div class="empty"><strong>Partial fleet</strong><p>The sensor list hit the page limit, so some sensors may be missing below.</p></div>
+      {% if fleet.stale %}
+      <div class="empty"><strong>Sensor list out of date</strong><p>The posture collector's last good run was {{ fleet.posture_age }} ago, so the statuses below may be wrong. The pager sends a SOC STALE push for this.</p></div>
       {% endif %}
       <div class="scroll"><table>
-        <thead><tr><th>Sensor</th><th>Platform</th><th>Status</th><th class="r">Last seen (UTC)</th></tr></thead>
+        <thead><tr><th>Sensor</th><th>Platform</th><th>Status</th><th class="r">Last seen</th></tr></thead>
         <tbody>
         {% for s in fleet.sensors %}
           <tr>
-            <td class="mono">{{ s.hostname }}</td>
-            <td>{{ s.platform }}</td>
-            <td><span class="chip {{ 'up' if s.online else 'down' }}">{{ 'online' if s.online else 'offline' }}</span></td>
-            <td class="r mono dim">{{ s.last_seen }}</td>
+            <td class="mono">{{ s.hostname | vis(64) }}</td>
+            <td>{{ s.platform | vis(40) }}</td>
+            <td><span class="chip {{ s.state }}">{{ s.label }}</span></td>
+            <td class="r mono {{ 'down' if s.state == 'down' else 'dim' }}">{{ s.last_seen }}</td>
           </tr>
         {% endfor %}
         </tbody>

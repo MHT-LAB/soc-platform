@@ -75,12 +75,11 @@ services:
       # cloudflared readiness, published on the host's loopback by the edge overlay.
       SOC_TUNNEL_READY_URL: ${SOC_TUNNEL_READY_URL:-http://127.0.0.1:2000/ready}
     # Secrets written by the operator on the host (mode 600): the console
-    # allowlist (required), the optional read-only EDR key, and the case pages' database
-    # login and form secret (deploy/init-console-db.sh; without it the case pages say
-    # cases are not set up).
+    # allowlist (required), and the case pages' database login and form secret
+    # (deploy/init-console-db.sh; without it the case pages say cases are not set up).
+    # The console holds no key for the EDR platform and does not call it: the sensor
+    # panel reads the posture collector's rows from the database (R19).
     env_file:
-      - path: ${SOC_STATE_DIR:-/srv/soc}/env/lc.env
-        required: false
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/console.env
         required: false
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/console-db.env

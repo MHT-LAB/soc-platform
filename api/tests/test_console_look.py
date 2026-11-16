@@ -41,11 +41,13 @@ def fake_probes(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def fleet(_: Settings) -> status.Fleet:
         return status.Fleet(
-            configured=True, sensors=[status.Sensor("ws-1", "Linux", True, "2026-10-17 18:00:00")]
+            configured=True,
+            sensors=[status.Sensor("ws-1", "Linux", True, "4s", "up", "online")],
+            posture_age="2m",
         )
 
     monkeypatch.setattr(status, "tunnel_status", tunnel)
-    monkeypatch.setattr(status, "sensor_fleet", fleet)
+    monkeypatch.setattr(console, "posture_fleet", fleet)
 
 
 # ---- display names: parsing and fallback ----
