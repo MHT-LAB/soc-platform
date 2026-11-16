@@ -193,7 +193,7 @@ SPRINTS = [
     ("S0", "Foundations", "done"),
     ("S1", "Alert path + pager", "done"),
     ("S2", "Resilience", "done"),
-    ("S3", "Ops Overview + SSO", "active"),
+    ("S3", "Ops Overview and identity", "active"),
     ("S4", "Detection as code", "next"),
     ("S5", "LLM triage", "planned"),
 ]
@@ -221,11 +221,14 @@ async def console(
     tunnel = await status.tunnel_status(settings)
     fleet = await posture_fleet(settings)
     digest = settings.image_ref.split("@", 1)[1] if "@" in settings.image_ref else ""
+    # The sprint tile follows the list below, so it cannot go stale on its own.
+    sprint_now = next(((n, title) for n, title, state in SPRINTS if state == "active"), None)
     response = templates.TemplateResponse(
         request,
         "console.html",
         {
             "user": user,
+            "sprint_now": sprint_now,
             "now": status.utc_now(),
             "settings": settings,
             "digest": digest,
