@@ -3,6 +3,7 @@ from typing import Literal
 import pytest
 from fastapi.testclient import TestClient
 
+from soc_api import console as console_module
 from soc_api import status
 from soc_api.config import Settings
 from soc_api.console import CONSOLE_CSP
@@ -21,13 +22,14 @@ def fake_probes(monkeypatch: pytest.MonkeyPatch) -> None:
             configured=True,
             sensors=[
                 # Hostnames come from endpoints, so they are attacker-controlled.
-                status.Sensor("<script>alert(1)</script>", "Linux", True, "2026-10-17 18:00:00"),
-                status.Sensor("ws-demo-02", "Windows", False, "2026-10-16 09:12:00"),
+                status.Sensor("<script>alert(1)</script>", "Linux", True, "4s", "up", "online"),
+                status.Sensor("ws-demo-02", "Windows", False, "3h 00m", "down", "offline"),
             ],
+            posture_age="2m",
         )
 
     monkeypatch.setattr(status, "tunnel_status", tunnel)
-    monkeypatch.setattr(status, "sensor_fleet", fleet)
+    monkeypatch.setattr(console_module, "posture_fleet", fleet)
 
 
 def client(**overrides: str) -> TestClient:
@@ -89,26 +91,30 @@ def test_unconfigured_fleet_shows_setup_state(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(status, "tunnel_status", tunnel)
     r = client().get("/console", headers=TAILNET)
     assert r.status_code == 200
-    assert "Connect the EDR platform" in r.text
+    assert "No sensor data yet" in r.text
+    assert "No database login for the console yet" in r.text
     assert "UNKNOWN" in r.text
 
 
-def test_partial_fleet_is_flagged_on_the_console(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_stale_sensor_list_is_flagged_on_the_console(monkeypatch: pytest.MonkeyPatch) -> None:
     async def tunnel(_: Settings) -> status.TunnelStatus:
         return status.TunnelStatus("up", 4)
 
     async def fleet(_: Settings) -> status.Fleet:
         return status.Fleet(
             configured=True,
-            sensors=[status.Sensor("ws-demo-01", "Linux", True, "2026-10-17 18:00:00")],
-            partial=True,
+            sensors=[status.Sensor("ws-demo-01", "Linux", True, "4s", "up", "online")],
+            posture_age="1h 20m",
+            stale=True,
         )
 
     monkeypatch.setattr(status, "tunnel_status", tunnel)
-    monkeypatch.setattr(status, "sensor_fleet", fleet)
+    monkeypatch.setattr(console_module, "posture_fleet", fleet)
     r = client().get("/console", headers=TAILNET)
     assert r.status_code == 200
-    assert "Partial fleet" in r.text and "1/1+" in r.text
+    assert "Sensor list out of date" in r.text and "OUT OF DATE" in r.text
+    assert "list 1h 20m old" in r.text  # the pipeline's Sources stage says it too
+    assert "1/1" in r.text
 
 
 # --- identity: a forged Tailscale-User-Login header must not get anyone in ----------

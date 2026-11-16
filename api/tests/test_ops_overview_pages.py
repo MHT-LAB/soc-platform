@@ -192,11 +192,24 @@ def test_good_filters_work_and_carry_across_tabs(demo: TestClient) -> None:
     assert "Today" in one and "Detection volume · today" in one
 
 
+def says_no_alerts(text: str) -> bool:
+    """True when the page says zero alerts came in. "420 alerts in" is not that: a plain
+    substring test for "0 alerts in" matches any count that ends in a zero, and the demo's
+    count depends on the time of day it is seeded."""
+    return re.search(r"(?<![\d,.])0 alerts in", text) is not None
+
+
+def test_a_count_ending_in_zero_is_not_zero_alerts() -> None:
+    assert not says_no_alerts("420 alerts in, 27 pages to a human, 116 cases.")
+    assert not says_no_alerts("1,200 alerts in, 3 pages")
+    assert says_no_alerts("0 alerts in, 0 pages to a human, 0 cases.")
+
+
 def test_the_client_filter_changes_the_numbers(demo: TestClient) -> None:
     everything = get(demo, "/console/overview").text
     unassigned = get(demo, "/console/overview?client=unassigned").text
     assert "0 alerts in, 0 pages to a human, 0 cases" in unassigned
-    assert "0 alerts in" not in everything
+    assert not says_no_alerts(everything)
     assert "No alerts in this period" in unassigned
 
 

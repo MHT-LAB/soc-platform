@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from soc_api import signalflow
+from soc_api import signalflow, status
 from soc_api.banner import LIMITS
 from soc_api.worker import stale_reasons
 
@@ -330,11 +330,12 @@ def status_tiles(data: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def health(data: dict[str, Any]) -> list[dict[str, str]]:
-    """The pipeline health list. The thresholds are the pager's own (worker.Limits), so a red
-    dot here is a SOC STALE push there."""
-    h, f = data["health"], data["flow"]
-    firing = stale_reasons(
+def stale_firing(data: dict[str, Any]) -> dict[str, bool]:
+    """Which of the pager's STALE conditions hold right now, from the pager's own thresholds
+    (worker.Limits). The health list and the System page both read this, so a red dot on
+    either is a SOC STALE push."""
+    h = data["health"]
+    return stale_reasons(
         {
             "oldest_pending_page_s": h["oldest_pending_page_s"],
             "failed_last_24h": h["failed_last_24h"],
@@ -347,6 +348,13 @@ def health(data: dict[str, Any]) -> list[dict[str, str]]:
         count(h["posture_runs"]),
         number(h["posture_quiet_s"]),
     )
+
+
+def health(data: dict[str, Any]) -> list[dict[str, str]]:
+    """The pipeline health list. The thresholds are the pager's own (worker.Limits), so a red
+    dot here is a SOC STALE push there."""
+    h, f = data["health"], data["flow"]
+    firing = stale_firing(data)
     rows: list[dict[str, str]] = []
 
     sm = signalflow.summary(data)
@@ -624,15 +632,49 @@ def timeline(data: dict[str, Any]) -> dict[str, Any]:
 # ---- the other pages ----
 
 
+def sensor_chip(s: dict[str, Any]) -> tuple[str, str]:
+    """The colour class and the words for one sensor row from signalflow.sensors()."""
+    if s["state"] == "up":
+        return ("warn", "isolated") if s["isolated"] else ("up", "online")
+    if s["state"] == "quiet":
+        return "warn", f"quiet · last message {s['seen']} ago"
+    return "down", "offline"
+
+
+def system_fleet(data: dict[str, Any]) -> status.Fleet:
+    """The System page's sensor panel, from the posture collector's rows in the overview
+    document: the same data as the Fleet tab, so the console needs no EDR key and makes no
+    call to the EDR platform. `stale` is the pager's own posture condition."""
+    h = data["health"]
+    runs = count(h["posture_runs"])
+    sensors = signalflow.sensors(data)
+    if not runs and not sensors:
+        return status.Fleet(
+            configured=False, setup_note="the posture collector has not reported yet"
+        )
+    chips = [sensor_chip(s) for s in sensors]
+    return status.Fleet(
+        configured=True,
+        sensors=[
+            status.Sensor(
+                hostname=s["hostname"],
+                platform=s["platform"],
+                online=s["state"] == "up",
+                last_seen=s["seen"],
+                state=state,
+                label=label,
+            )
+            for s, (state, label) in zip(sensors, chips, strict=True)
+        ],
+        posture_age=ago(h["posture_quiet_s"]) if runs else "",
+        stale=bool(stale_firing(data)["posture_quiet"]),
+    )
+
+
 def fleet(data: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for s in signalflow.sensors(data):
-        if s["state"] == "up":
-            state, label = ("warn", "isolated") if s["isolated"] else ("up", "online")
-        elif s["state"] == "quiet":
-            state, label = "warn", f"quiet · last message {s['seen']} ago"
-        else:
-            state, label = "down", "offline"
+        state, label = sensor_chip(s)
         rows.append(
             {
                 "hostname": s["hostname"],

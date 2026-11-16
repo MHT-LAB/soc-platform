@@ -143,10 +143,9 @@ shows the part of the login before the `@`. It is for display only: the allow-li
 audit trail use the tailnet login, and a malformed entry is ignored. Names are cut at 64 characters
 and cannot contain a comma.
 
-Host files (mode 600) read by the console service (the public app gets none):
+Host files (mode 600) read by the console service (the public app gets none). The console holds no key for the EDR platform and does not call it: its sensor panel shows the posture collector's rows from the database (the same data as the Fleet tab), so a host that still has an old `env/lc.env` can delete it; nothing reads it any more.
 
 | File | Contents |
 |---|---|
 | `/srv/soc/env/console.env` | **Required.** `SOC_CONSOLE_USERS=login@example.com`, the logins allowed into the console. Add a role with a colon: `login@example.com:viewer` (see the roles paragraph below). A login without a role is an analyst. The console refuses to start in prod without it, or with a malformed entry or an unknown role, and `deploy.sh` stops before changing anything if it is missing. |
-| `/srv/soc/env/lc.env` (optional) | `SOC_LC_OID=…` and `SOC_LC_API_KEY=…` (read-only key) for the sensor fleet panel |
 | `/srv/soc/env/ingest.env` (the `api` service only, mode 600) | `SOC_INGEST_SECRETS={"<source>": ["<current>", "<next>"]}` as one line of JSON (each secret 16+ characters; a source with no entry is a 404 on the internet). Make each source name unguessable, for example `lc-` plus 16 random lowercase letters and digits: a configured source answers 401/413/415 where an unknown one answers 404. Failed signatures are counted in their own per-source bucket (30 a minute, then 429 on the bad ones) and do not spend the source's real delivery budget, so a stranger who learns the name still cannot hold real deliveries at 429; an unguessable name keeps them from finding it at all. And `SOC_INGEST_DATABASE_URL=postgresql+psycopg://soc_ingest:…@<host>/<db>`. The role can only call `ingest_alert()`. Rotate by adding the new secret as `next`, changing the webhook output to it, then dropping the old one. Without this file every `/ingest/` path is a 404; with secrets but no database, deliveries get a 503 (nothing is stored, never a false 200). The edge rule for `/ingest/` is live (private deploy repo). |

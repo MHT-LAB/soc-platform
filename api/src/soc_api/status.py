@@ -5,7 +5,6 @@ slow or broken dependency shows up as a red light on the console rather than
 breaking the page.
 """
 
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -14,11 +13,6 @@ import httpx2
 from soc_api.config import Settings
 
 PROBE_TIMEOUT = 3.0
-FLEET_CACHE_SECONDS = 60
-MAX_PAGES = 50  # hard stop on runaway pagination
-
-LC_JWT_URL = "https://jwt.limacharlie.io"
-LC_API = "https://api.limacharlie.io/v1"
 
 # Platform codes from LimaCharlie's SDK (go-limacharlie identification.go).
 # Codes not listed here display as "Adapter" with the hex code.
@@ -65,17 +59,25 @@ class Sensor:
     hostname: str
     platform: str
     online: bool
-    last_seen: str
+    last_seen: str  # how long ago, in words ("3m", "1h 52m", "never")
+    state: str = ""  # colour class: up, warn or down
+    label: str = ""  # the words on the chip
 
 
 @dataclass
 class Fleet:
+    """The sensor panel. It comes from the posture collector's rows in the database (the same
+    data as the Fleet tab); the console holds no EDR key and calls no EDR API."""
+
     configured: bool
     sensors: list[Sensor] = field(default_factory=list)
     error: str = ""
-    checked_at: float = 0.0
-    # True when pagination stopped at MAX_PAGES, so the list may be missing sensors.
-    partial: bool = False
+    # Why the panel is empty when `configured` is False.
+    setup_note: str = ""
+    # How long ago the collector's last good run was, in words, and whether that is older
+    # than the pager's own limit (the sensor list may then be wrong).
+    posture_age: str = ""
+    stale: bool = False
 
     @property
     def online(self) -> int:
@@ -99,87 +101,6 @@ async def tunnel_status(settings: Settings) -> TunnelStatus:
         return TunnelStatus("down", n, f"HTTP {r.status_code}")
     except (httpx2.HTTPError, ValueError) as exc:
         return TunnelStatus("unknown", 0, type(exc).__name__)
-
-
-_fleet_cache: Fleet | None = None
-
-
-async def _list_sensors(
-    client: httpx2.AsyncClient, oid: str, headers: dict[str, str], online_only: bool
-) -> tuple[list[dict[str, object]], bool]:
-    """All pages of GET /sensors/{oid}, plus whether the list is complete. The
-    online filter is `is_online_only`; unknown parameters are silently ignored by
-    the API, so a wrong name returns every sensor (a bug this project shipped
-    once; see test_fleet.py). Rows that are not objects are skipped."""
-    out: list[dict[str, object]] = []
-    params: dict[str, str] = {"is_online_only": "true"} if online_only else {}
-    for _ in range(MAX_PAGES):
-        r = await client.get(f"{LC_API}/sensors/{oid}", headers=headers, params=params)
-        r.raise_for_status()
-        body = r.json()
-        if not isinstance(body, dict):
-            raise ValueError("unexpected response shape")
-        rows = body.get("sensors", [])
-        if isinstance(rows, list):
-            out.extend(row for row in rows if isinstance(row, dict))
-        token = body.get("continuation_token")
-        if not token:
-            return out, True
-        params = {**params, "continuation_token": str(token)}
-    return out, False
-
-
-async def sensor_fleet(
-    settings: Settings, transport: httpx2.AsyncBaseTransport | None = None
-) -> Fleet:
-    """Sensors from the EDR platform, read-only, cached for a minute."""
-    global _fleet_cache
-    if not settings.lc_oid or not settings.lc_api_key.get_secret_value():
-        return Fleet(configured=False)
-    if _fleet_cache and time.monotonic() - _fleet_cache.checked_at < FLEET_CACHE_SECONDS:
-        return _fleet_cache
-
-    oid = settings.lc_oid
-    try:
-        async with httpx2.AsyncClient(timeout=PROBE_TIMEOUT * 2, transport=transport) as client:
-            tok = await client.post(
-                LC_JWT_URL,
-                data={"oid": oid, "secret": settings.lc_api_key.get_secret_value()},
-            )
-            tok.raise_for_status()
-            headers = {"Authorization": f"Bearer {tok.json()['jwt']}"}
-            everyone, everyone_complete = await _list_sensors(
-                client, oid, headers, online_only=False
-            )
-            online, online_complete = await _list_sensors(client, oid, headers, online_only=True)
-    except (httpx2.HTTPError, KeyError, ValueError, TypeError) as exc:
-        # Never echo response bodies: they could contain tokens or tenant data.
-        return Fleet(configured=True, error=type(exc).__name__)
-
-    # A row without a sensor id can't be matched to anything, so it is never
-    # counted online (str(None) would otherwise make every id-less row match).
-    online_ids = {str(s["sid"]) for s in online if s.get("sid") is not None}
-    sensors = []
-    for s in everyone:
-        hostname = str(s.get("hostname", "?"))
-        if hostname.startswith("ext-"):
-            continue  # the platform's own extension service sensors, not sources
-        sensors.append(
-            Sensor(
-                hostname=hostname,
-                platform=platform_name(as_int(s.get("plat"))),
-                online=s.get("sid") is not None and str(s["sid"]) in online_ids,
-                last_seen=str(s.get("alive", "")),
-            )
-        )
-    sensors.sort(key=lambda s: (not s.online, s.hostname))
-    _fleet_cache = Fleet(
-        configured=True,
-        sensors=sensors,
-        checked_at=time.monotonic(),
-        partial=not (everyone_complete and online_complete),
-    )
-    return _fleet_cache
 
 
 def utc_now() -> str:
