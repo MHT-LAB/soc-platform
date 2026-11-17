@@ -1,0 +1,96 @@
+{
+  "name": "EXAMPLE - WINDOWS - Hosts File Written From The Command Line",
+  "pack": "examples",
+  "status": "ready",
+  "platform": "windows",
+  "description": "A command that writes to the Windows hosts file (echo, Add-Content, Set-Content or Out-File aimed at drivers\\etc\\hosts). Redirecting a name elsewhere is a common way to break updates or reach a fake site.",
+  "notes": "Synthetic example for the rule format. Admin tools that manage the hosts file will hit it; exclude them by parent process in an org overlay.",
+  "detect": {
+    "event": "NEW_PROCESS",
+    "op": "and",
+    "rules": [
+      {
+        "op": "is platform",
+        "name": "windows"
+      },
+      {
+        "op": "matches",
+        "path": "event/COMMAND_LINE",
+        "re": "\\b(echo|add-content|set-content|out-file)\\b.*\\\\drivers\\\\etc\\\\hosts"
+      }
+    ]
+  },
+  "respond": [
+    {
+      "action": "report",
+      "name": "EXAMPLE_WIN_Hosts_File_Written",
+      "priority": 3
+    }
+  ],
+  "tests": {
+    "positive": [
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "cmd.exe /c echo 203.0.113.9 intranet.example >> C:\\Windows\\System32\\drivers\\etc\\hosts"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "\"C:\\Windows\\System32\\cmd.exe\" /c echo 203.0.113.9 intranet.example >> C:\\Windows\\System32\\drivers\\etc\\hosts"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -Command \"Add-Content C:\\Windows\\System32\\drivers\\etc\\hosts '203.0.113.9 intranet.example'\""
+        }
+      }
+    ],
+    "negative": [
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "\"C:\\Windows\\System32\\cmd.exe\" /c type C:\\Windows\\System32\\drivers\\etc\\hosts"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "\"C:\\Windows\\System32\\cmd.exe\" /c echo hello"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "notepad.exe C:\\notes\\todo.txt"
+        }
+      }
+    ]
+  }
+}

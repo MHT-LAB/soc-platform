@@ -65,8 +65,8 @@ def test_shipped_stages_and_sprints_do_not_say_planned() -> None:
     assert [stages[n] for n in ("Ingest", "Cases", "Pager")] == ["live"] * 3
     assert stages["LLM analyst"] == "planned"  # still to come
     states = {n: state for n, _, state in SPRINTS}
-    assert [states[n] for n in ("S0", "S1", "S2")] == ["done"] * 3
-    assert states["S3"] == "active"
+    assert [states[n] for n in ("S0", "S1", "S2", "S3")] == ["done"] * 4
+    assert states["S4"] == "active"
 
 
 def test_the_sprint_tile_names_the_active_sprint(fake_probes: None) -> None:

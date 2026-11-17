@@ -193,9 +193,9 @@ SPRINTS = [
     ("S0", "Foundations", "done"),
     ("S1", "Alert path + pager", "done"),
     ("S2", "Resilience", "done"),
-    ("S3", "Ops Overview and identity", "active"),
-    ("S4", "Detection as code", "next"),
-    ("S5", "LLM triage", "planned"),
+    ("S3", "Ops Overview and identity", "done"),
+    ("S4", "Detection as code", "active"),
+    ("S5", "LLM triage", "next"),
 ]
 
 
