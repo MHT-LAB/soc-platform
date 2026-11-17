@@ -674,6 +674,15 @@ def test_the_base_can_be_any_commit_or_branch(repo: Path) -> None:
     assert any("removed or edited" in m for m in problems(repo, "base"))
 
 
+def test_malformed_tests_at_either_end_are_reported_never_a_crash(repo: Path) -> None:
+    commit_rule(repo, valid_rule())
+    put(repo, valid_rule(tests=[]), "detections/t/rule.json")  # tests is a list now
+    assert any("needs a 'tests' object" in m for m in problems(repo))
+    commit_rule(repo, valid_rule(tests=[]))  # ...and at the base too
+    put(repo, valid_rule(), "detections/t/rule.json")
+    assert problems(repo) == []
+
+
 def test_an_unknown_or_unsafe_base_fails_closed(repo: Path) -> None:
     commit_rule(repo, valid_rule())
     assert any("cannot find 'no-such-ref'" in m for m in problems(repo, "no-such-ref"))

@@ -271,10 +271,13 @@ def check_append_only(root: Path, files: list[RuleFile], base: str) -> list[Prob
             old = json.loads(old_text)
         except ValueError:
             continue
-        old_positives = old.get("tests", {}).get("positive", []) if isinstance(old, dict) else []
-        new_positives = rf.data.get("tests", {}).get("positive", [])
+        # Either side may be malformed; that is the contract check's to report, never a crash.
+        old_tests = old.get("tests") if isinstance(old, dict) else None
+        old_positives = old_tests.get("positive", []) if isinstance(old_tests, dict) else []
+        new_tests = rf.data.get("tests")
+        new_positives = new_tests.get("positive") if isinstance(new_tests, dict) else None
         if not isinstance(new_positives, list):
-            continue  # reported by the contract check
+            continue
         for event in old_positives if isinstance(old_positives, list) else []:
             if event not in new_positives:
                 problems.append(
