@@ -1,0 +1,86 @@
+{
+  "name": "EXAMPLE - LINUX - Crontab Replaced From A Pipe",
+  "pack": "examples",
+  "status": "ready",
+  "platform": "linux",
+  "description": "A command that feeds a new crontab through a pipe (... | crontab -). Persistence tools use it because it leaves no file to find.",
+  "notes": "Synthetic example for the rule format. Configuration management tools sometimes do the same; exclude them in an org overlay.",
+  "detect": {
+    "event": "NEW_PROCESS",
+    "op": "and",
+    "rules": [
+      {
+        "op": "is platform",
+        "name": "linux"
+      },
+      {
+        "op": "matches",
+        "path": "event/COMMAND_LINE",
+        "re": "\\|\\s*crontab\\s+-(\\s|['\"]|$)"
+      }
+    ]
+  },
+  "respond": [
+    {
+      "action": "report",
+      "name": "EXAMPLE_LINUX_Crontab_From_Pipe",
+      "priority": 3
+    }
+  ],
+  "tests": {
+    "positive": [
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 536870912,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "sh -c 'echo \"* * * * * /tmp/job.sh\" | crontab -'"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 536870912,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "/bin/bash -c \"cat jobs.txt | crontab - \""
+        }
+      }
+    ],
+    "negative": [
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 536870912,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "crontab -l"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 536870912,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "sh -c 'ls /etc/cron.d'"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "NEW_PROCESS",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "COMMAND_LINE": "sh -c 'echo x | crontab -'"
+        }
+      }
+    ]
+  }
+}

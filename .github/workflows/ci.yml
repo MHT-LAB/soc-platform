@@ -65,6 +65,21 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
+      # Detection rules as code: the contract and a replay of every rule's own test events. The
+      # checkout is shallow, so on a pull request the base commit is fetched for the
+      # append-only check (no positive test of an existing rule may be removed or edited). No key
+      # and no network beyond that fetch: the evaluator is local.
+      - name: detections, fetch the pull request's base commit
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      - name: detections, contract and replay
+        run: |
+          uv run python -m soc_api.rules check ../detections ${BASE_SHA:+--base "$BASE_SHA"}
+          uv run python -m soc_api.rules replay ../detections
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
       - run: uv run pytest -q -W error
 
   secrets:

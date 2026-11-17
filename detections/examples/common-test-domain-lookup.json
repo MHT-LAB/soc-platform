@@ -1,0 +1,87 @@
+{
+  "name": "EXAMPLE - COMMON - Lookup Of A Test Domain",
+  "pack": "examples",
+  "status": "ready",
+  "platform": "any",
+  "description": "A DNS lookup of the reserved test domain, or any name below it. Shows a rule that applies to every platform and matches a whole domain, not a substring.",
+  "notes": "Synthetic example for the rule format. The platform's matches operator ignores case unless told otherwise, which the third positive shows.",
+  "detect": {
+    "event": "DNS_REQUEST",
+    "op": "matches",
+    "path": "event/DOMAIN_NAME",
+    "re": "(^|\\.)bad-domain-for-tests\\.example$"
+  },
+  "respond": [
+    {
+      "action": "report",
+      "name": "EXAMPLE_COMMON_Test_Domain_Lookup",
+      "priority": 2
+    }
+  ],
+  "tests": {
+    "positive": [
+      {
+        "routing": {
+          "event_type": "DNS_REQUEST",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "DOMAIN_NAME": "bad-domain-for-tests.example"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "DNS_REQUEST",
+          "plat": 536870912,
+          "hostname": "host.example"
+        },
+        "event": {
+          "DOMAIN_NAME": "api.bad-domain-for-tests.example"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "DNS_REQUEST",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "DOMAIN_NAME": "BAD-DOMAIN-FOR-TESTS.EXAMPLE"
+        }
+      }
+    ],
+    "negative": [
+      {
+        "routing": {
+          "event_type": "DNS_REQUEST",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "DOMAIN_NAME": "good.example"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "DNS_REQUEST",
+          "plat": 536870912,
+          "hostname": "host.example"
+        },
+        "event": {
+          "DOMAIN_NAME": "notbad-domain-for-tests.example"
+        }
+      },
+      {
+        "routing": {
+          "event_type": "DNS_REQUEST",
+          "plat": 268435456,
+          "hostname": "host.example"
+        },
+        "event": {
+          "DOMAIN_NAME": "bad-domain-for-tests.example.net"
+        }
+      }
+    ]
+  }
+}
