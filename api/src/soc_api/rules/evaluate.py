@@ -17,6 +17,11 @@ changes):
   * exists: the path is present. is tagged: the tag is in `routing/tags`.
   * `event` (one type) or `events` (a list) filter on `routing/event_type`.
   * is platform: `routing/plat` equals the code for windows, linux or macos.
+  * A list met before the end of a path is walked element by element (and lists inside lists);
+    a condition holds if it holds for ANY element. Each condition is judged on its own, so an
+    `and` can be met by different elements. A list at the very end of a path is just a value
+    (not flattened). `not` inverts the any-element answer. `exists` is about the key being
+    there, whatever it holds (an empty list, null, an empty string).
 """
 
 import functools
@@ -77,13 +82,33 @@ def iter_nodes(detect: Any) -> Iterator[dict[str, Any]]:
 
 
 def lookup(event: dict[str, Any], path: str) -> Any:
-    """The value at a slash path ("event/COMMAND_LINE", "routing/hostname"), or _MISSING."""
+    """The value at a slash path ("routing/plat", "routing/hostname") that runs through objects
+    only, or _MISSING."""
     current: Any = event
     for part in path.split("/"):
         if not isinstance(current, dict) or part not in current:
             return _MISSING
         current = current[part]
     return current
+
+
+def lookup_all(event: dict[str, Any], path: str) -> list[Any]:
+    """Every value a slash path reaches in an event. Where the path meets a list before its end,
+    it goes on into each element (and into lists inside lists), the way the platform reads
+    "event/NETWORK_ACTIVITY/IS_OUTGOING" over a list of connections. Empty when nothing is
+    reached. Iterative, so an event nested very deeply cannot overflow the stack."""
+    parts = path.split("/")
+    found: list[Any] = []
+    stack: list[tuple[Any, int]] = [(event, 0)]
+    while stack:
+        node, i = stack.pop()
+        if i == len(parts):
+            found.append(node)
+        elif isinstance(node, list):
+            stack.extend((item, i) for item in node)
+        elif isinstance(node, dict) and parts[i] in node:
+            stack.append((node[parts[i]], i + 1))
+    return found
 
 
 def _flag(node: dict[str, Any], key: str, default: bool) -> bool:
@@ -111,30 +136,36 @@ def _leaf(op: str, node: dict[str, Any], event: dict[str, Any]) -> bool:
         tags = lookup(event, "routing/tags")
         return isinstance(tags, list) and tag in tags
     path = _text(node, "path")
-    value = lookup(event, path)
+    values = lookup_all(event, path)
     if op == "exists":
-        return value is not _MISSING
+        return bool(values)
     if op == "matches":
         pattern = _text(node, "re")
         sensitive = _flag(node, "case sensitive", False)
         compiled = compile_regex(pattern, sensitive)
-        return isinstance(value, str) and compiled.search(value) is not None
+        return any(isinstance(v, str) and compiled.search(v) is not None for v in values)
     sensitive = _flag(node, "case sensitive", True)
     want = node.get("value")
     if op == "is" and not isinstance(want, str):
-        return value is not _MISSING and bool(value == want)
+        return any(bool(v == want) for v in values)
     if not isinstance(want, str):
         raise BadRule(f"{op!r} needs a text 'value'")
-    if not isinstance(value, str):
-        return False
-    have, wanted = (value, want) if sensitive else (value.lower(), want.lower())
-    if op == "is":
-        return have == wanted
-    if op == "contains":
-        return wanted in have
-    if op == "starts with":
-        return have.startswith(wanted)
-    return have.endswith(wanted)  # ends with
+    wanted = want if sensitive else want.lower()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        have = value if sensitive else value.lower()
+        if op == "is":
+            hit = have == wanted
+        elif op == "contains":
+            hit = wanted in have
+        elif op == "starts with":
+            hit = have.startswith(wanted)
+        else:  # ends with
+            hit = have.endswith(wanted)
+        if hit:
+            return True
+    return False
 
 
 def _node(node: Any, event: dict[str, Any]) -> bool:

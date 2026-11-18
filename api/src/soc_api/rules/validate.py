@@ -79,14 +79,23 @@ def _event_problems(events: Any, kind: str) -> list[str]:
     return out
 
 
+def _real_addresses(text: str) -> list[str]:
+    """IPv4 addresses in `text` that are not documentation, loopback or the any-address."""
+    return [
+        ip
+        for ip in dict.fromkeys(_IPV4.findall(text))
+        if all(int(o) <= 255 for o in ip.split("."))
+        and not ip.startswith(_DOC_NETS)
+        and ip != _ANY_ADDR
+    ]
+
+
 def _identifier_problems(data: Any) -> list[str]:
     """What identifies a real org, sensor or person, in a file that is not an org overlay."""
     text = json.dumps(data)
-    out: list[str] = []
-    for ip in dict.fromkeys(_IPV4.findall(text)):
-        if all(int(o) <= 255 for o in ip.split(".")) and not ip.startswith(_DOC_NETS):
-            if ip != _ANY_ADDR:
-                out.append(f"contains the address {ip}; use a documentation address")
+    out = [
+        f"contains the address {ip}; use a documentation address" for ip in _real_addresses(text)
+    ]
     if _UUID.search(text):
         out.append("contains an identifier that looks like an org or sensor id")
     domains = dict.fromkeys(m.group(1).lower() for m in _EMAIL.finditer(text))
@@ -95,22 +104,13 @@ def _identifier_problems(data: Any) -> list[str]:
     return out
 
 
-def check_rule(rf: RuleFile) -> list[str]:
-    """The contract problems of one rule file, as sentences."""
-    if rf.error:
-        return [rf.error]
-    data = rf.data
-    if not isinstance(data, dict):
-        return ["must be a JSON object"]
-    kind = data.get("kind", "rule")
-    if kind != "rule":
-        return [f"unsupported kind {kind!r}: this tool checks detection rules only"]
-
+def _common_problems(data: dict[str, Any], where: str, org_dir: str | None) -> list[str]:
+    """What every kind of rule file must have: a name, a description, a status, an owner, and a
+    place that fits it."""
     out: list[str] = []
-    org_dir = overlay_org(rf.rel)
-    if "orgs" in rf.rel.split("/")[:-1] and org_dir is None:
+    folders = where.split("/")[:-1]
+    if "orgs" in folders and org_dir is None:
         out.append("files under orgs/ must sit in orgs/<org>/")
-
     for key in ("name", "description"):
         if not isinstance(data.get(key), str) or not data[key].strip():
             out.append(f"needs a text {key!r}")
@@ -118,6 +118,8 @@ def check_rule(rf: RuleFile) -> list[str]:
         out.append("'name' is longer than 255 characters")
     if data.get("status") not in STATUSES:
         out.append(f"'status' must be one of {', '.join(STATUSES)}")
+    elif data["status"] != "ready" and "baseline" in folders:
+        out.append("a file under baseline/ must have status 'ready' (drafts belong under draft/)")
     pack, org = data.get("pack"), data.get("org")
     if not (isinstance(pack, str) and pack) and not (isinstance(org, str) and org):
         out.append("needs a 'pack' (shared rules) or an 'org' (an org's own rules)")
@@ -125,7 +127,28 @@ def check_rule(rf: RuleFile) -> list[str]:
         out.append(f"'org' must be {org_dir!r} to match its folder")
     if org_dir is None and org:
         out.append("'org' is only for files under orgs/<org>/")
+    return out
 
+
+def _node_problems(nodes: list[dict[str, Any]]) -> list[str]:
+    """Known operators and RE2-only regexes, for any tree of rule nodes."""
+    out: list[str] = []
+    for node in nodes:
+        op = node.get("op")
+        if not isinstance(op, str) or op not in SUPPORTED_OPS:
+            out.append(f"operator {op!r} is not supported by the local replay")
+        elif op == "matches":
+            pattern = node.get("re")
+            reason = check_regex(pattern) if isinstance(pattern, str) else "no 're' text"
+            if reason:
+                out.append(f"regex {str(pattern)[:60]!r} rejected by RE2: {reason}")
+    return out
+
+
+def _detection_problems(data: dict[str, Any], org_dir: str | None) -> list[str]:
+    """The contract for a detection rule (kind "rule")."""
+    out: list[str] = []
+    pack = data.get("pack")
     detect = data.get("detect")
     if not isinstance(detect, dict):
         out.append("needs a 'detect' object")
@@ -159,15 +182,7 @@ def check_rule(rf: RuleFile) -> list[str]:
     # nodes: supported operators, RE2-only regexes, platform check
     nodes = list(iter_nodes(detect))
     paths = {n["path"] for n in nodes if isinstance(n.get("path"), str)}
-    for node in nodes:
-        op = node.get("op")
-        if not isinstance(op, str) or op not in SUPPORTED_OPS:
-            out.append(f"operator {op!r} is not supported by the local replay")
-        elif op == "matches":
-            pattern = node.get("re")
-            reason = check_regex(pattern) if isinstance(pattern, str) else "no 're' text"
-            if reason:
-                out.append(f"regex {str(pattern)[:60]!r} rejected by RE2: {reason}")
+    out.extend(_node_problems(nodes))
     default_platform = pack if isinstance(pack, str) and pack in PLATFORM_CODES else "any"
     platform = data.get("platform", default_platform)
     if platform not in PLATFORMS:
@@ -209,7 +224,84 @@ def check_rule(rf: RuleFile) -> list[str]:
                 'with a quoted full program path, like "C:\\Windows\\System32\\x.exe" args '
                 "(real command lines quote the path)"
             )
+    return out
 
+
+def _fp_problems(data: dict[str, Any]) -> list[str]:
+    """A false-positive rule (kind "fp"): the match, and the command lines that pin it down. The
+    platform cannot dry-run these, so there is nothing to replay; the lines are the record."""
+    out: list[str] = []
+    fp = data.get("fp")
+    if not isinstance(fp, dict):
+        out.append("needs an 'fp' object (the false-positive match)")
+    else:
+        out.extend(_node_problems(list(iter_nodes(fp))))
+    tests = data.get("tests")
+    if not isinstance(tests, dict):
+        out.append("needs a 'tests' object with 'match_command_lines' and 'no_match_command_lines'")
+        tests = {}
+    for key in ("match_command_lines", "no_match_command_lines"):
+        lines = tests.get(key)
+        if (
+            not isinstance(lines, list)
+            or not lines
+            or not all(isinstance(x, str) and x for x in lines)
+        ):
+            out.append(f"tests.{key} needs a non-empty list of command lines")
+    return out
+
+
+def _fim_problems(data: dict[str, Any]) -> list[str]:
+    """A file-integrity watch list (kind "fim"): Linux-only groups of absolute path patterns,
+    with no literal user names (a /home/<name>/ pattern would name a person)."""
+    out: list[str] = []
+    default = data.get("fim_rules")
+    if not isinstance(default, dict) or not default:
+        out.append("fim_rules (default tier) is required")
+    for key in ("fim_rules", "fim_rules_optional"):
+        groups = data.get(key, {})
+        if not isinstance(groups, dict):
+            out.append(f"{key} must be an object of watch groups")
+            continue
+        for group, body in groups.items():
+            if not isinstance(body, dict):
+                out.append(f"{key}.{group}: must be an object")
+                continue
+            filters = body.get("filters")
+            if (filters.get("platforms") if isinstance(filters, dict) else None) != ["linux"]:
+                out.append(f"{group}: platforms must be ['linux']")
+            patterns = body.get("patterns")
+            if (
+                not isinstance(patterns, list)
+                or not patterns
+                or not all(isinstance(p, str) for p in patterns)
+            ):
+                out.append(f"{group}: needs a non-empty list of string patterns")
+                continue
+            for pattern in patterns:
+                if not pattern.startswith("/"):
+                    out.append(f"{group}: pattern must be absolute: {pattern}")
+                parts = pattern.split("/")
+                if len(parts) >= 4 and parts[1] == "home" and parts[2] != "*":
+                    out.append(f"{group}: literal username in pattern: {pattern}")
+    return out
+
+
+def check_rule(rf: RuleFile) -> list[str]:
+    """The contract problems of one rule file, as sentences."""
+    if rf.error:
+        return [rf.error]
+    data = rf.data
+    if not isinstance(data, dict):
+        return ["must be a JSON object"]
+    kind = data.get("kind", "rule")
+    checks = {"rule": None, "fp": _fp_problems, "fim": _fim_problems}
+    if kind not in checks:
+        return [f"unsupported kind {kind!r}: this tool checks rules, fp rules and fim lists"]
+    org_dir = overlay_org(rf.where)
+    out = _common_problems(data, rf.where, org_dir)
+    check = checks[kind]
+    out.extend(_detection_problems(data, org_dir) if check is None else check(data))
     if org_dir is None:
         out.extend(_identifier_problems(data))
     return out
@@ -249,6 +341,22 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
+def _masked(event: Any) -> str:
+    """An event as text with every IPv4 address blanked, to compare all but the addresses."""
+    return _IPV4.sub("<ip>", json.dumps(event, sort_keys=True))
+
+
+def _pinned(data: Any) -> list[Any] | None:
+    """The test events a rule's history is pinned by: the positives of a detection, the
+    matching command lines of an fp rule. None when the file does not have them as a list."""
+    tests = data.get("tests") if isinstance(data, dict) else None
+    if not isinstance(tests, dict):
+        return None
+    key = "match_command_lines" if data.get("kind") == "fp" else "positive"
+    events = tests.get(key)
+    return events if isinstance(events, list) else None
+
+
 def check_append_only(root: Path, files: list[RuleFile], base: str) -> list[Problem]:
     """Positives are append-only: every positive test event a rule had at `base` must still be
     there. A rule file that did not exist at `base` is new and free."""
@@ -272,21 +380,30 @@ def check_append_only(root: Path, files: list[RuleFile], base: str) -> list[Prob
         except ValueError:
             continue
         # Either side may be malformed; that is the contract check's to report, never a crash.
-        old_tests = old.get("tests") if isinstance(old, dict) else None
-        old_positives = old_tests.get("positive", []) if isinstance(old_tests, dict) else []
-        new_tests = rf.data.get("tests")
-        new_positives = new_tests.get("positive") if isinstance(new_tests, dict) else None
-        if not isinstance(new_positives, list):
+        old_positives = _pinned(old)
+        new_positives = _pinned(rf.data)
+        if new_positives is None:
             continue
-        for event in old_positives if isinstance(old_positives, list) else []:
-            if event not in new_positives:
-                problems.append(
-                    Problem(
-                        rf.rel,
-                        "a positive test was removed or edited (positives are append-only): "
-                        + _summary(event),
-                    )
+        new_masked: set[str] | None = None
+        for event in old_positives or []:
+            if event in new_positives:
+                continue
+            # One edit is allowed: taking a real-looking address out of a positive. Only when the
+            # old event had one, only the addresses may differ, and the new event has no
+            # real-looking address left; anything else is a removal.
+            if _real_addresses(json.dumps(event)):
+                new_masked = new_masked or {
+                    _masked(e) for e in new_positives if not _real_addresses(json.dumps(e))
+                }
+                if _masked(event) in new_masked:
+                    continue
+            problems.append(
+                Problem(
+                    rf.rel,
+                    "a positive test was removed or edited (positives are append-only): "
+                    + _summary(event),
                 )
+            )
     return problems
 
 
@@ -302,6 +419,8 @@ def check_tree(root: Path, base: str | None = None) -> list[Problem]:
 
 
 def _summary(event: Any) -> str:
+    if isinstance(event, str):
+        return repr(event[:80])
     body = event.get("event") if isinstance(event, dict) else None
     if isinstance(body, dict):
         for key in ("COMMAND_LINE", "FILE_PATH", "DOMAIN_NAME"):
@@ -313,6 +432,8 @@ def _summary(event: Any) -> str:
 def replay_rule(rf: RuleFile) -> list[str]:
     if rf.error or not isinstance(rf.data, dict):
         return ["cannot replay: " + (rf.error or "not a JSON object")]
+    if rf.data.get("kind", "rule") != "rule":
+        return []  # fp rules and fim lists cannot be dry-run, here or on the platform
     detect, tests = rf.data.get("detect"), rf.data.get("tests")
     if not isinstance(detect, dict) or not isinstance(tests, dict):
         return ["cannot replay: needs 'detect' and 'tests'"]

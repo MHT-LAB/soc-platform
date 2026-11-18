@@ -64,9 +64,21 @@ no rule files (an empty or mistyped directory never passes quietly).
 7. **Known operators only**, so replay never skips something it does not understand.
 8. **Nothing that identifies a real org outside an overlay:** no non-documentation IP address, org or sensor id, or non-example email address.
 9. **Unique names.**
-10. **Positives are append-only** (`--base <ref>`): every positive an existing rule had at the base commit is still there, unchanged. A rule file that is new at that commit is free. In CI the base is the pull request's base commit.
+10. **Positives are append-only** (`--base <ref>`): every positive an existing rule had at the base commit is still there, unchanged. A rule file that is new at that commit is free. In CI the base is the pull request's base commit. One edit is allowed: taking a real-looking IP address out of a positive (the same event, only its addresses changed, the old one had a non-documentation address and the new one has none). Anything else, including swapping one documentation address for another, counts as removing the positive.
 
-`replay` then runs every positive (must fire) and every negative (must not) through the evaluator.
+`replay` then runs every positive of a detection rule (must fire) and every negative (must not) through the evaluator.
+
+## Other kinds of file
+
+A file says what it is with `"kind"`: `rule` (the default, everything above), `fp` or `fim`. Any other kind is refused, so nothing slips past the checks by naming itself something else. All kinds share the basics: `name`, `description`, `status`, `pack` or `org`, and the same place rules (below). Neither kind is replayed: the platform cannot dry-run them either, so the test lines are the record.
+
+- **`fp`**: a false-positive rule. An `fp` tree (the same `and`/`or`/`is`/`matches` operators; regexes must be RE2) and `tests` with non-empty lists `match_command_lines` and `no_match_command_lines`. The match lines are append-only against `--base`, like positives.
+- **`fim`**: a file-integrity watch list. `fim_rules` (the default tier, required) and optionally `fim_rules_optional`, each an object of groups with `filters.platforms` exactly `["linux"]` and a non-empty list of absolute `patterns`. A pattern may not name a user: `/home/*/.ssh/*` is fine, a pattern with a real user name in that position is refused.
+
+## Where a file sits
+
+- A file under `orgs/<org>/` is an org overlay (its `org` must match the folder); a file directly under `orgs/` is refused. The tool recognizes this when you scan `detections`, `orgs`, or one org's folder. It looks only at the scanned folder and its parent, so scanning a folder deeper than `orgs/<org>/` is never treated as an overlay.
+- A file under `baseline/` must have status `ready`; drafts belong under `draft/`.
 
 ## Operators
 
@@ -77,7 +89,7 @@ no rule files (an empty or mistyped directory never passes quietly).
 | `is`, `contains`, `starts with`, `ends with` | case-sensitive | `"case sensitive": false` ignores case |
 | `matches` | **case-insensitive** | `"case sensitive": true` respects case |
 
-A path that is missing makes a leaf false (so `not` makes it true). `is tagged` reads `routing/tags`.
+A path that is missing makes a leaf false (so `not` makes it true). A list met before the end of a path is walked element by element, and a condition holds if it holds for any element (each condition is judged on its own, so an `and` can be met by different elements); a list at the very end of a path is just a value, and `exists` only asks that the key is there. `is tagged` reads `routing/tags`.
 `is platform` compares `routing/plat` (windows `0x10000000`, linux `0x20000000`, macos `0x30000000`).
 
 The local evaluator is a model, not the platform. It lets CI replay every rule with no key and no
