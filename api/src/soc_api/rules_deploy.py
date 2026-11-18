@@ -57,7 +57,10 @@ MAX_RULES = 5000
 KEY_RE = re.compile(r"[A-Za-z0-9._-]{16,128}")
 ORG_RE = re.compile(r"[a-z0-9-]{1,32}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
-STAMP_KEY_RE = re.compile(rf"[\x21-\x7e]{{{MIN_KEY_CHARS},256}}")  # printable, no spaces
+# The stamp key and the prefixes come through a compose env file: only characters it cannot
+# read as a quote, a comment or a variable.
+STAMP_KEY_RE = re.compile(rf"[A-Za-z0-9._-]{{{MIN_KEY_CHARS},255}}")
+PREFIX_RE = re.compile(r"[A-Za-z0-9 ._-]{3,64}")
 MAX_PROBLEMS_SHOWN = 20
 
 OK, FAILED, DECLINED, REFUSED = 0, 1, 3, 2
@@ -198,9 +201,9 @@ class Config:
             return value
 
         # No defaults for who the rules belong to: the private deploy side says (public code).
-        prefixes = tuple(p for p in env.get("SOC_RULES_PREFIXES", "").split("|") if p)
-        if not prefixes or any(len(p) < 3 for p in prefixes):
-            raise ConfigError("SOC_RULES_PREFIXES needs prefixes of at least 3 characters")
+        prefixes = tuple(env.get("SOC_RULES_PREFIXES", "").split("|"))
+        if not all(PREFIX_RE.fullmatch(p) for p in prefixes):
+            raise ConfigError("SOC_RULES_PREFIXES is missing or malformed")
         return Config(
             key=need("SOC_RULES_LC_KEY", KEY_RE),
             oid=need("SOC_RULES_LC_OID", OID_RE),

@@ -587,6 +587,10 @@ def test_settings_accept_several_prefixes() -> None:
         ("SOC_RULES_COMMIT", COMMIT[:39]),
         ("SOC_RULES_ORG", "Not Valid"),
         ("SOC_RULES_PREFIXES", "a|"),
+        ("SOC_RULES_PREFIXES", "T - |"),
+        ("SOC_RULES_PREFIXES", 'T - "x'),
+        ("SOC_RULES_STAMP_KEY", "x" * 31 + "$"),
+        ("SOC_RULES_STAMP_KEY", "x" * 40 + "#"),
     ],
 )
 def test_a_bad_setting_is_refused_by_name_and_never_by_value(name: str, bad: str) -> None:

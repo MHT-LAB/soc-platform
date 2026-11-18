@@ -288,6 +288,46 @@ services:
       retries: 3
       start_period: 120s
 
+  # One-off: `deploy/rules-deploy.sh` runs this to put the detection rules in git onto the
+  # detection source (python -m soc_api.rules_deploy): it shows the difference, asks for a
+  # typed yes on the terminal, then writes, stamps and records. Its own profile and
+  # `restart: no`, and deploy.sh never turns the profile on, so `up -d` never starts it; only
+  # `run` does. It is on `egress` ONLY: no database network, not the tunnel's network,
+  # nothing published. It holds the one key that can change rules (env/rules-lc.env: the
+  # `soc-rules-deploy` key limited to dr.list, dr.set, dr.del, and the stamp key) and no
+  # other secret; no other service is given that file. It sees the rules clone read-only
+  # and one folder to write its record to.
+  rules:
+    profiles: [rules]
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    restart: "no"
+    command: ["python", "-m", "soc_api.rules_deploy"]
+    environment:
+      SOC_ENV: ${SOC_ENV:-prod}
+      # The verified commit of the rules clone; the script sets it. Empty is refused inside.
+      SOC_RULES_COMMIT: ${SOC_RULES_COMMIT:-}
+      SOC_RULES_DIR: /rules
+      SOC_RULES_OUT: /out
+    env_file:
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/rules-lc.env
+        required: true
+    volumes:
+      - ${SOC_RULES_SRC:-/opt/detection-packs}/detections:/rules:ro
+      - ${SOC_STATE_DIR:-/srv/soc}/rules-out:/out
+    networks:
+      - egress
+    stdin_open: true
+    tty: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+
   # One-off: `soc-compose.sh run --rm offsite <restic command>` (deploy/offsite.sh does it)
   # sends the encrypted backup sets in $SOC_STATE_DIR/backups to the off-site restic
   # repository. Its own profile and `restart: no`, so `up -d` never starts it. It is on

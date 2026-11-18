@@ -108,7 +108,7 @@ def test_the_worker_is_on_the_database_and_egress_networks_and_never_on_default(
     assert WORKER["networks"] == ["db", "egress"]  # `default` is the tunnel's network
     assert COMPOSE["networks"]["egress"] == {}  # outbound for pushes: not internal
     on_egress = {n for n, s in SERVICES.items() if "egress" in s.get("networks", [])}
-    assert on_egress == {"worker", "reconcile", "posture", "offsite"}
+    assert on_egress == {"worker", "reconcile", "posture", "offsite", "rules"}
     assert "networks" not in OVERLAY["services"]["tunnel"]
 
 
@@ -352,3 +352,72 @@ def test_the_posture_collector_never_gets_anyone_elses_secrets_and_nobody_gets_i
     for name in ("api", "console", "worker", "db", "migrate", "reconcile"):
         assert "posture-lc.env" not in set(env_files(name)), name
         assert "posture-db.env" not in set(env_files(name)), name
+
+
+# ---- the rules deploy (one-shot) ----
+
+RULES = SERVICES["rules"]
+
+
+def test_the_rules_service_runs_only_when_asked_and_never_restarts() -> None:
+    assert RULES["profiles"] == ["rules"]
+    assert RULES["restart"] == "no"
+    assert "depends_on" not in RULES
+    assert RULES["image"] == SERVICES["api"]["image"]
+    assert RULES["command"] == ["python", "-m", "soc_api.rules_deploy"]
+
+
+def test_no_deploy_script_ever_turns_the_rules_profile_on() -> None:
+    for script in ("deploy.sh", "soc-compose.sh", "restore.sh", "backup.sh"):
+        text = (DEPLOY / script).read_text()
+        assert ",rules" not in text and "=rules" not in text and "--profile rules" not in text, (
+            script
+        )
+    # the one place that does is the rules deploy script, and it names the profile on the command
+    assert "--profile rules run --rm rules" in (DEPLOY / "rules-deploy.sh").read_text()
+
+
+def test_the_rules_service_is_on_the_outbound_network_only_and_publishes_nothing() -> None:
+    assert RULES["networks"] == ["egress"]
+    assert "ports" not in RULES and "expose" not in RULES
+    assert RULES.get("network_mode") is None
+
+
+def test_the_rules_service_is_hardened_like_the_other_one_shots() -> None:
+    for key in ("read_only", "cap_drop", "security_opt", "tmpfs", "pids_limit"):
+        assert RULES[key] == POSTURE[key], key
+    assert RULES["read_only"] is True and RULES["cap_drop"] == ["ALL"]
+    assert "user" not in RULES or RULES["user"] != "0"
+    # it asks a person a question, so it needs a terminal
+    assert RULES["stdin_open"] is True and RULES["tty"] is True
+
+
+def test_the_rules_service_sees_the_rules_read_only_and_writes_one_folder() -> None:
+    mounts: dict[str, str] = {}
+    for volume in RULES["volumes"]:
+        rest, _, last = volume.rpartition(":")
+        if last in ("ro", "rw"):
+            mounts[rest.rpartition(":")[2]] = last
+        else:
+            mounts[last] = "rw"  # the default; the source has ${VAR:-default} colons of its own
+    assert mounts == {"/rules": "ro", "/out": "rw"}
+    assert RULES["volumes"][0].endswith("/detections:/rules:ro")
+
+
+def test_the_rules_key_goes_to_the_rules_service_and_nobody_else() -> None:
+    assert env_files("rules") == {"rules-lc.env": True}
+    assert {n for n in SERVICES if "rules-lc.env" in env_files(n)} == {"rules"}
+    assert "rules-lc.env" not in " ".join(
+        e["path"] for e in OVERLAY["services"]["tunnel"].get("env_file", [])
+    )
+    env = RULES.get("environment", {})
+    assert not {k for k in env if k.startswith(("SOC_MIGRATE", "SOC_INGEST", "SOC_WORKER"))}
+    assert not {k for k in env if "KEY" in k}  # no key is spelled out in the compose file
+    # ...and the rules service never gets anyone else's
+    assert not set(env_files("rules")) - {"rules-lc.env"}
+
+
+def test_the_compose_file_does_not_require_a_rules_commit_to_start_the_stack() -> None:
+    """`up` reads the whole file; an unset commit must not stop it (the service refuses an
+    empty one itself)."""
+    assert RULES["environment"]["SOC_RULES_COMMIT"] == "${SOC_RULES_COMMIT:-}"
