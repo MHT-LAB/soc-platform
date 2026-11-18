@@ -300,3 +300,82 @@ def test_a_draft_does_not_belong_under_baseline(tmp_path: Path, make: Any) -> No
 def test_a_ready_rule_under_baseline_is_fine(tmp_path: Path) -> None:
     put(tmp_path, valid_rule(), "baseline/linux/x.json")
     assert found(tmp_path) == []
+
+
+# ---- paths that run through lists (verified against the platform's rule tester, 2026-11-17) ----
+
+
+def conn(**activity: Any) -> dict[str, Any]:
+    return {
+        "routing": {"event_type": "NETWORK_CONNECTIONS", "plat": 0x20000000},
+        "event": {"NETWORK_ACTIVITY": activity["items"]},
+    }
+
+
+def holds(node: dict[str, Any], event: dict[str, Any]) -> bool:
+    from soc_api.rules import fires
+
+    return fires({"event": "NETWORK_CONNECTIONS", **node}, event)
+
+
+INCOMING = {"op": "is", "path": "event/NETWORK_ACTIVITY/IS_OUTGOING", "value": 0}
+
+
+def test_a_list_inside_a_path_is_walked_and_any_element_will_do() -> None:
+    assert holds(INCOMING, conn(items={"IS_OUTGOING": 0}))  # a single object works too
+    assert holds(INCOMING, conn(items=[{"IS_OUTGOING": 0}]))
+    assert holds(INCOMING, conn(items=[{"IS_OUTGOING": 1}, {"IS_OUTGOING": 0}]))
+    assert not holds(INCOMING, conn(items=[{"IS_OUTGOING": 1}, {"IS_OUTGOING": 1}]))
+    assert not holds(INCOMING, conn(items=[]))
+
+
+def test_not_inverts_the_any_element_answer() -> None:
+    node = {**INCOMING, "not": True}
+    assert not holds(node, conn(items=[{"IS_OUTGOING": 1}, {"IS_OUTGOING": 0}]))
+    assert not holds(node, conn(items=[{"IS_OUTGOING": 0}]))
+    assert holds(node, conn(items=[{"IS_OUTGOING": 1}, {"IS_OUTGOING": 1}]))
+    assert holds(node, conn(items=[]))  # nothing matched, so "not" holds
+
+
+def test_each_condition_is_judged_on_its_own_with_no_same_element_rule() -> None:
+    node = {
+        "op": "and",
+        "rules": [
+            INCOMING,
+            {"op": "is", "path": "event/NETWORK_ACTIVITY/DESTINATION/PORT", "value": 22},
+        ],
+    }
+    same = [{"IS_OUTGOING": 0, "DESTINATION": {"PORT": 22}}]
+    different = [
+        {"IS_OUTGOING": 0, "DESTINATION": {"PORT": 80}},
+        {"IS_OUTGOING": 1, "DESTINATION": {"PORT": 22}},
+    ]
+    assert holds(node, conn(items=same))
+    assert holds(node, conn(items=different))  # the platform does the same
+
+
+def test_nested_lists_are_walked_and_elements_without_the_key_do_not_match() -> None:
+    bad = {"op": "matches", "path": "event/NETWORK_ACTIVITY/NAME", "re": "^bad$"}
+    assert holds(bad, conn(items=[[{"NAME": "bad"}]]))
+    assert holds(bad, conn(items=[{"NAME": "ok"}, {"NAME": "bad"}]))
+    assert not holds(bad, conn(items=[{"OTHER": "bad"}, {"NAME": "ok"}]))
+
+
+def test_a_list_at_the_end_of_a_path_is_not_flattened() -> None:
+    node = {"op": "is", "path": "event/TAGS", "value": "b"}
+    listed = {
+        "routing": {"event_type": "NETWORK_CONNECTIONS", "plat": 1},
+        "event": {"TAGS": ["a", "b"]},
+    }
+    plain = {"routing": {"event_type": "NETWORK_CONNECTIONS", "plat": 1}, "event": {"TAGS": "b"}}
+    assert not holds(node, listed)
+    assert holds(node, plain)
+
+
+@pytest.mark.parametrize("value", [[], ["x"], None, "", 0, {}])
+def test_exists_is_about_the_key_not_the_value(value: Any) -> None:
+    node = {"op": "exists", "path": "event/LST"}
+    event = {"routing": {"event_type": "NETWORK_CONNECTIONS", "plat": 1}, "event": {"LST": value}}
+    assert holds(node, event)
+    absent = {"routing": {"event_type": "NETWORK_CONNECTIONS", "plat": 1}, "event": {}}
+    assert not holds(node, absent)

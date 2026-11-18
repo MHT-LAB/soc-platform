@@ -89,7 +89,7 @@ A file says what it is with `"kind"`: `rule` (the default, everything above), `f
 | `is`, `contains`, `starts with`, `ends with` | case-sensitive | `"case sensitive": false` ignores case |
 | `matches` | **case-insensitive** | `"case sensitive": true` respects case |
 
-A path that is missing makes a leaf false (so `not` makes it true). `is tagged` reads `routing/tags`.
+A path that is missing makes a leaf false (so `not` makes it true). A list met before the end of a path is walked element by element, and a condition holds if it holds for any element (each condition is judged on its own, so an `and` can be met by different elements); a list at the very end of a path is just a value, and `exists` only asks that the key is there. `is tagged` reads `routing/tags`.
 `is platform` compares `routing/plat` (windows `0x10000000`, linux `0x20000000`, macos `0x30000000`).
 
 The local evaluator is a model, not the platform. It lets CI replay every rule with no key and no
