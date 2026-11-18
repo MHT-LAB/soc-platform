@@ -95,7 +95,9 @@ set -e
 
 # --- 4. the record -------------------------------------------------------------------------
 if [[ -s "$OUT/record.txt" ]]; then
-  record="$(head -c 1000 "$OUT/record.txt" | head -n 1)"
+  # Written inside the container: keep printable characters only, so nothing in it can
+  # drive root's terminal (escape sequences) or forge extra lines in the log.
+  record="$(head -c 1000 "$OUT/record.txt" | head -n 1 | LC_ALL=C tr -cd '[:print:]')"
   printf '%s\n' "$record" >> "$LOG"
   echo
   echo "Record for the vault Build Log (and the CT 110 note):"

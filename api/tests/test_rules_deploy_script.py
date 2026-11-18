@@ -306,3 +306,15 @@ def test_a_shell_variable_cannot_pick_the_profiles_or_the_commit(host: Host) -> 
     calls = host.docker_calls()
     assert f"commit={head} src={host.repo}" in calls
     assert "f" * 40 not in calls and "/elsewhere" not in calls
+
+
+def test_control_characters_in_the_record_never_reach_roots_terminal_or_the_log(
+    host: Host,
+) -> None:
+    """The record is written inside the container; a compromised one must not be able to
+    send terminal escape sequences to the operator."""
+    r = host.run(FAKE_RECORD="rules-deploy \x1b]0;owned\x07 result=applied\x1b[2J")
+    assert r.returncode == 0
+    assert "\x1b" not in r.stdout and "\x07" not in r.stdout
+    assert "\x1b" not in host.deploy_log() and "\x07" not in host.deploy_log()
+    assert "rules-deploy ]0;owned result=applied[2J" in host.deploy_log()

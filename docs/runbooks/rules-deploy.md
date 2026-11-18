@@ -35,7 +35,7 @@ left), 2 refused before changing anything, 3 not confirmed.
 | What | How | Where |
 |---|---|---|
 | Rules clone with a read-only deploy key | `git clone` the private repository over SSH with a deploy key; set `SOC_RULES_SSH_KEY` if git does not already know the key | host, as root |
-| Signer's public key | import GitHub's commit-signing key into root's gpg keyring | host, as root |
+| Signer's public key | import GitHub's commit-signing key into root's gpg keyring, then mark it trusted (`gpg --import-ownertrust` with `<fingerprint>:6:`); without the trust line git reports `U` (good signature, unknown key), not `G`, and the deploy refuses | host, as root |
 | Vendor key `soc-rules-deploy` | in the vendor's console: `dr.list`, `dr.set`, `dr.del` only (never `output.*`, sensor writes, `org.*`, billing); rotate every 90 days | vendor console |
 | Settings file | `deploy/init-rules-lc.sh` asks for the vendor key (hidden), the organization id, the stamp key (hidden), the organization's folder name under `detections/orgs/`, and the managed name prefixes; writes `env/rules-lc.env` mode 600 and never overwrites | host, as root |
 
