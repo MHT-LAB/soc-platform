@@ -389,9 +389,12 @@ def check_append_only(root: Path, files: list[RuleFile], base: str) -> list[Prob
             if event in new_positives:
                 continue
             # One edit is allowed: taking a real-looking address out of a positive. Only when the
-            # old event had one, and only the addresses may differ; anything else is a removal.
+            # old event had one, only the addresses may differ, and the new event has no
+            # real-looking address left; anything else is a removal.
             if _real_addresses(json.dumps(event)):
-                new_masked = new_masked or {_masked(e) for e in new_positives}
+                new_masked = new_masked or {
+                    _masked(e) for e in new_positives if not _real_addresses(json.dumps(e))
+                }
                 if _masked(event) in new_masked:
                     continue
             problems.append(

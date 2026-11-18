@@ -427,3 +427,10 @@ def test_changing_one_documentation_address_for_another_is_refused(repo: Path) -
 def test_an_edit_that_changes_the_command_and_the_address_is_refused(repo: Path) -> None:
     messages = edit_and_check(repo, f"run evil {REAL_IP}", f"run fine {DOC_IP}")
     assert any("removed or edited" in m for m in messages), messages
+
+
+def test_swapping_a_real_looking_address_for_another_real_one_is_refused(repo: Path) -> None:
+    """The edit exists to take a real address out; putting a different real one in is a new
+    positive, not a cleanup (and inside an org overlay nothing else would catch it)."""
+    messages = edit_and_check(repo, f"run evil {REAL_IP}", "run evil 5.6.7.8")
+    assert any("removed or edited" in m for m in messages), messages

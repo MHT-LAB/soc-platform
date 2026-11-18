@@ -64,7 +64,7 @@ no rule files (an empty or mistyped directory never passes quietly).
 7. **Known operators only**, so replay never skips something it does not understand.
 8. **Nothing that identifies a real org outside an overlay:** no non-documentation IP address, org or sensor id, or non-example email address.
 9. **Unique names.**
-10. **Positives are append-only** (`--base <ref>`): every positive an existing rule had at the base commit is still there, unchanged. A rule file that is new at that commit is free. In CI the base is the pull request's base commit. One edit is allowed: taking a real-looking IP address out of a positive (the same event, only its addresses changed, and the old one had a non-documentation address). Anything else, including swapping one documentation address for another, counts as removing the positive.
+10. **Positives are append-only** (`--base <ref>`): every positive an existing rule had at the base commit is still there, unchanged. A rule file that is new at that commit is free. In CI the base is the pull request's base commit. One edit is allowed: taking a real-looking IP address out of a positive (the same event, only its addresses changed, the old one had a non-documentation address and the new one has none). Anything else, including swapping one documentation address for another, counts as removing the positive.
 
 `replay` then runs every positive of a detection rule (must fire) and every negative (must not) through the evaluator.
 
