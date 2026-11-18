@@ -491,11 +491,11 @@ def test_invalid_json_and_non_objects_and_other_kinds_are_reported_not_skipped(
 ) -> None:
     put(tmp_path, "{not json", "broken.json")
     put(tmp_path, "[1, 2]", "list.json")
-    put(tmp_path, {"kind": "fim", "name": "x"}, "fim.json")
+    put(tmp_path, {"kind": "lookup", "name": "x"}, "fim.json")
     found = {p.file: p.message for p in check_tree(tmp_path)}
     assert "cannot be read as JSON" in found["broken.json"]
     assert "must be a JSON object" in found["list.json"]
-    assert "unsupported kind 'fim'" in found["fim.json"]
+    assert "unsupported kind 'lookup'" in found["fim.json"]
 
 
 # ---- org overlays ----

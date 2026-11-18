@@ -66,7 +66,19 @@ no rule files (an empty or mistyped directory never passes quietly).
 9. **Unique names.**
 10. **Positives are append-only** (`--base <ref>`): every positive an existing rule had at the base commit is still there, unchanged. A rule file that is new at that commit is free. In CI the base is the pull request's base commit.
 
-`replay` then runs every positive (must fire) and every negative (must not) through the evaluator.
+`replay` then runs every positive of a detection rule (must fire) and every negative (must not) through the evaluator.
+
+## Other kinds of file
+
+A file says what it is with `"kind"`: `rule` (the default, everything above), `fp` or `fim`. Any other kind is refused, so nothing slips past the checks by naming itself something else. All kinds share the basics: `name`, `description`, `status`, `pack` or `org`, and the same place rules (below). Neither kind is replayed: the platform cannot dry-run them either, so the test lines are the record.
+
+- **`fp`**: a false-positive rule. An `fp` tree (the same `and`/`or`/`is`/`matches` operators; regexes must be RE2) and `tests` with non-empty lists `match_command_lines` and `no_match_command_lines`. The match lines are append-only against `--base`, like positives.
+- **`fim`**: a file-integrity watch list. `fim_rules` (the default tier, required) and optionally `fim_rules_optional`, each an object of groups with `filters.platforms` exactly `["linux"]` and a non-empty list of absolute `patterns`. A pattern may not name a user: `/home/*/.ssh/*` is fine, a pattern with a real user name in that position is refused.
+
+## Where a file sits
+
+- A file under `orgs/<org>/` is an org overlay (its `org` must match the folder); a file directly under `orgs/` is refused. The tool recognizes this when you scan `detections`, `orgs`, or one org's folder. It looks only at the scanned folder and its parent, so scanning a folder deeper than `orgs/<org>/` is never treated as an overlay.
+- A file under `baseline/` must have status `ready`; drafts belong under `draft/`.
 
 ## Operators
 
