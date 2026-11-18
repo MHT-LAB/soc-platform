@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_rules import DELETE, commit_rule, git, mutate, overlay_rule, put, valid_rule
+from test_rules import DELETE, cmd, commit_rule, git, mutate, overlay_rule, put, valid_rule
 
 from soc_api.rules import check_tree, replay_tree
 from soc_api.rules.cli import main
@@ -379,3 +379,51 @@ def test_exists_is_about_the_key_not_the_value(value: Any) -> None:
     assert holds(node, event)
     absent = {"routing": {"event_type": "NETWORK_CONNECTIONS", "plat": 1}, "event": {}}
     assert not holds(node, absent)
+
+
+# ---- a positive may be edited only to take a real-looking address out of it ----
+
+DOC_IP = "203.0.113.9"
+REAL_IP = "1.2.3.4"  # a plain public placeholder: not a documentation address
+
+
+def scan_rule(command: str) -> dict[str, Any]:
+    return valid_rule(
+        tests={
+            "positive": [cmd(command)],
+            "negative": [cmd("run good thing")],
+        }
+    )
+
+
+def edit_and_check(repo: Path, old_command: str, new_command: str) -> list[str]:
+    commit_rule(repo, scan_rule(old_command), "detections/t/rule.json")
+    put(repo, scan_rule(new_command), "detections/t/rule.json")
+    return found(repo / "detections", base="HEAD")
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    git(tmp_path, "init", "-q", "-b", "main")
+    return tmp_path
+
+
+def test_swapping_a_real_looking_address_for_a_documentation_one_is_allowed(repo: Path) -> None:
+    messages = edit_and_check(repo, f"run evil {REAL_IP}", f"run evil {DOC_IP}")
+    assert not any("removed or edited" in m for m in messages), messages
+
+
+def test_any_other_edit_of_the_same_positive_is_still_refused(repo: Path) -> None:
+    messages = edit_and_check(repo, f"run evil {REAL_IP}", f"run evil {DOC_IP} --and-more")
+    assert any("removed or edited" in m for m in messages), messages
+
+
+def test_changing_one_documentation_address_for_another_is_refused(repo: Path) -> None:
+    """Only a real-looking address justifies an edit; an indicator address is not one."""
+    messages = edit_and_check(repo, f"run evil {DOC_IP}", "run evil 198.51.100.7")
+    assert any("removed or edited" in m for m in messages), messages
+
+
+def test_an_edit_that_changes_the_command_and_the_address_is_refused(repo: Path) -> None:
+    messages = edit_and_check(repo, f"run evil {REAL_IP}", f"run fine {DOC_IP}")
+    assert any("removed or edited" in m for m in messages), messages

@@ -79,14 +79,23 @@ def _event_problems(events: Any, kind: str) -> list[str]:
     return out
 
 
+def _real_addresses(text: str) -> list[str]:
+    """IPv4 addresses in `text` that are not documentation, loopback or the any-address."""
+    return [
+        ip
+        for ip in dict.fromkeys(_IPV4.findall(text))
+        if all(int(o) <= 255 for o in ip.split("."))
+        and not ip.startswith(_DOC_NETS)
+        and ip != _ANY_ADDR
+    ]
+
+
 def _identifier_problems(data: Any) -> list[str]:
     """What identifies a real org, sensor or person, in a file that is not an org overlay."""
     text = json.dumps(data)
-    out: list[str] = []
-    for ip in dict.fromkeys(_IPV4.findall(text)):
-        if all(int(o) <= 255 for o in ip.split(".")) and not ip.startswith(_DOC_NETS):
-            if ip != _ANY_ADDR:
-                out.append(f"contains the address {ip}; use a documentation address")
+    out = [
+        f"contains the address {ip}; use a documentation address" for ip in _real_addresses(text)
+    ]
     if _UUID.search(text):
         out.append("contains an identifier that looks like an org or sensor id")
     domains = dict.fromkeys(m.group(1).lower() for m in _EMAIL.finditer(text))
@@ -332,6 +341,11 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
+def _masked(event: Any) -> str:
+    """An event as text with every IPv4 address blanked, to compare all but the addresses."""
+    return _IPV4.sub("<ip>", json.dumps(event, sort_keys=True))
+
+
 def _pinned(data: Any) -> list[Any] | None:
     """The test events a rule's history is pinned by: the positives of a detection, the
     matching command lines of an fp rule. None when the file does not have them as a list."""
@@ -370,15 +384,23 @@ def check_append_only(root: Path, files: list[RuleFile], base: str) -> list[Prob
         new_positives = _pinned(rf.data)
         if new_positives is None:
             continue
+        new_masked: set[str] | None = None
         for event in old_positives or []:
-            if event not in new_positives:
-                problems.append(
-                    Problem(
-                        rf.rel,
-                        "a positive test was removed or edited (positives are append-only): "
-                        + _summary(event),
-                    )
+            if event in new_positives:
+                continue
+            # One edit is allowed: taking a real-looking address out of a positive. Only when the
+            # old event had one, and only the addresses may differ; anything else is a removal.
+            if _real_addresses(json.dumps(event)):
+                new_masked = new_masked or {_masked(e) for e in new_positives}
+                if _masked(event) in new_masked:
+                    continue
+            problems.append(
+                Problem(
+                    rf.rel,
+                    "a positive test was removed or edited (positives are append-only): "
+                    + _summary(event),
                 )
+            )
     return problems
 
 
