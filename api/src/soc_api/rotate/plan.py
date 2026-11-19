@@ -10,7 +10,8 @@ would rotate: an approval is good for that plan and no other.
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from soc_api.rotate.keys import KeyFile, Register, printable
 from soc_api.rotate.state import KeyState, State
@@ -18,6 +19,11 @@ from soc_api.rotate.state import KeyState, State
 DUE_SOON_DAYS = 7
 ACTIONABLE = ("overdue", "no_record", "due_soon", "this_session")
 RANK = {"overdue": 0, "no_record": 1, "due_soon": 2, "this_session": 3, "ok": 4, "not_ready": 5}
+
+
+def local_today(moment: datetime) -> date:
+    """The calendar day in New York, where the sessions and the calendar hold are kept."""
+    return moment.astimezone(ZoneInfo("America/New_York")).date()
 
 
 def first_monday(year: int, month: int) -> date:

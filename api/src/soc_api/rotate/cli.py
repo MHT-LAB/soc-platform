@@ -4,11 +4,17 @@
     python -m soc_api.rotate --plan [--quiet]    the plan only; asks nothing (the daily timer)
     python -m soc_api.rotate --record ID [--date YYYY-MM-DD] [--due YYYY-MM-DD]
                                                  a person did this key by hand: write it down
+    python -m soc_api.rotate --apply HASH        rotate the automatic keys of the approved plan
+    python -m soc_api.rotate --preflight         the read calls of an apply, nothing changed
 
-Started by deploy/rotate.sh as the one-shot compose `rotate` service, which has no network, no
-secret and no way to reach a vendor. It reads the key register (read-only) and writes three
-small files to its state folder: state.json (dates and outcomes), status.json (counts only,
-for the console) and record.txt (one line for the operator's log).
+The last two run on the host (deploy/rotate.sh starts them), not in the container: they need
+the rights on standard input, the vendor and the secrets manager over the network, and the
+consumer's env file and service. See soc_api.rotate.apply.
+
+The first three are started by deploy/rotate.sh as the one-shot compose `rotate` service, which
+has no network, no secret and no way to reach a vendor. They read the key register (read-only)
+and write three small files to its state folder: state.json (dates and outcomes), status.json
+(counts only, for the console) and record.txt (one line for the operator's log).
 
 Exit codes: 0 done or nothing to do, 1 could not write its files, 2 refused before changing
 anything, 3 not confirmed, 4 (plan only) something is overdue, has no record, or has an old
@@ -23,13 +29,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from soc_api.rotate import state as st
-from soc_api.rotate.keys import ID_RE, load_register, printable
-from soc_api.rotate.plan import Plan, build_plan, render
+from soc_api.rotate.codes import ATTENTION, DECLINED, FAILED, OK, REFUSED
+from soc_api.rotate.keys import ID_RE, load_register
+from soc_api.rotate.plan import Plan, build_plan, local_today, render
+from soc_api.rotate.records import record_line
 
-OK, FAILED, REFUSED, DECLINED, ATTENTION = 0, 1, 2, 3, 4
 DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MAX_PROBLEMS_SHOWN = 20
 USAGE = "usage: rotate [--plan [--quiet] | --record ID [--date YYYY-MM-DD] [--due YYYY-MM-DD]]"
@@ -63,8 +69,9 @@ class Config:
 
 @dataclass(frozen=True)
 class Args:
-    mode: str  # approve | plan | record
+    mode: str  # approve | plan | record | apply | preflight
     quiet: bool = False
+    plan_hash: str = ""
     key_id: str = ""
     on: date | None = None
     due: date | None = None
@@ -86,6 +93,12 @@ def parse_args(argv: list[str]) -> Args:
         if argv[1:] not in ([], ["--quiet"]):
             raise UsageError(USAGE)
         return Args("plan", quiet=argv[1:] == ["--quiet"])
+    if argv[0] == "--apply":
+        if len(argv) != 2 or not st.HASH_RE.fullmatch(argv[1]):
+            raise UsageError(USAGE)
+        return Args("apply", plan_hash=argv[1])
+    if argv == ["--preflight"]:
+        return Args("preflight")
     if argv[0] == "--record":
         if len(argv) < 2 or not ID_RE.fullmatch(argv[1]):
             raise UsageError(USAGE)
@@ -103,14 +116,6 @@ def parse_args(argv: list[str]) -> Args:
             rest = rest[2:]
         return Args("record", key_id=argv[1], on=on, due=due)
     raise UsageError(USAGE)
-
-
-def record_line(now: datetime, run_id: str, action: str, result: str, **fields: str | int) -> str:
-    """One line for the operator's log and the vault Build Log: ids, dates and counts only."""
-    parts = [f"rotate {st.stamp(now)} {action}"]
-    parts += [f"{k}={printable(str(v), 64).replace(' ', '_')}" for k, v in fields.items()]
-    parts += [f"result={result}", f"run={run_id}"]
-    return " ".join(parts)
 
 
 def tty_confirm(prompt: str) -> bool:
@@ -153,9 +158,12 @@ def run(
     say: Callable[[str], None] = print,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> int:
+    if args.mode not in ("plan", "approve", "record"):
+        say("refused: that mode runs on the host through deploy/rotate.sh, not here")
+        return REFUSED
     moment = now()
     run_id = uuid.uuid4().hex[:12]
-    today = moment.astimezone(ZoneInfo("America/New_York")).date()
+    today = local_today(moment)
     commit12 = cfg.commit[:12]
 
     register = load_register(cfg.keys_dir)
@@ -332,4 +340,49 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"refused: {exc}")
         return REFUSED
+    if args.mode in ("apply", "preflight"):
+        return _host_run(cfg, args)
     return run(cfg, args, tty_confirm)
+
+
+def _host_run(cfg: Config, args: Args) -> int:
+    """The two modes that touch the network, the consumer and the secrets manager."""
+    import time
+
+    from soc_api.rotate import apply as ap
+    from soc_api.rotate.consumer import HostConsumer
+    from soc_api.rotate.lc import LimaCharlieKeys
+    from soc_api.rotate.rights import Rights, read_rights
+    from soc_api.rotate.store import SecretsManager
+
+    compose = Path(os.environ.get("SOC_ROTATE_COMPOSE", ""))
+    if not (compose.is_file() and os.access(compose, os.X_OK)):
+        print("refused: SOC_ROTATE_COMPOSE is not the compose wrapper (deploy/rotate.sh sets it)")
+        return REFUSED
+    state_root = Path(os.environ.get("SOC_STATE_DIR", "/srv/soc"))
+
+    def build(rights: Rights) -> ap.Deps:
+        return ap.Deps(
+            vendor_for=lambda oid: LimaCharlieKeys(oid, rights.lc_key),
+            store=SecretsManager(rights),
+            consumer=HostConsumer(state_root, compose),
+            sleep=time.sleep,
+        )
+
+    common = {
+        "keys_dir": cfg.keys_dir,
+        "state_dir": cfg.state_dir,
+        "commit": cfg.commit,
+        "read": lambda: read_rights(sys.stdin),
+        "build": build,
+        "say": print,
+        "now": lambda: datetime.now(UTC),
+    }
+    ap.stop_on_hangup()
+    try:
+        if args.mode == "preflight":
+            return ap.run_preflight(**common)  # type: ignore[arg-type]
+        return ap.run_apply(plan_hash=args.plan_hash, **common)  # type: ignore[arg-type]
+    except KeyboardInterrupt:
+        print("INTERRUPTED: anything done for the key in progress was undone (see above)")
+        return FAILED

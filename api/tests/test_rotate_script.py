@@ -10,6 +10,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,23 @@ class Host:
         self.bin.mkdir()
         (self.bin / "docker").write_text(FAKE_DOCKER)
         (self.bin / "docker").chmod(0o755)
+        # The host modes run python3. This shim records what the process was given (its whole
+        # environment, its arguments, its standard input) and then runs the real interpreter.
+        # The recording paths are baked in: the script starts python with an empty environment.
+        self.py_env, self.py_args, self.py_stdin = (
+            root / "py.env",
+            root / "py.args",
+            root / "py.stdin",
+        )
+        (self.bin / "python3").write_text(
+            "#!/bin/sh\n"
+            f'env > "{self.py_env}"\n'
+            f'echo "$*" >> "{self.py_args}"\n'
+            'data="$(cat)"\n'
+            f'printf "%s\\n" "$data" > "{self.py_stdin}"\n'
+            f'printf "%s\\n" "$data" | "{sys.executable}" "$@"\n'
+        )
+        (self.bin / "python3").chmod(0o755)
         for key in (self.key, self.other_key):
             self._run(SSH_KEYGEN or "", "-q", "-t", "ed25519", "-N", "", "-f", str(key))
         pub = Path(f"{self.key}.pub").read_text().strip()
@@ -110,7 +128,7 @@ class Host:
     def push(self) -> None:
         self.git("push", "-q", "origin", "main")
 
-    def run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+    def run(self, *args: str, stdin: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
         env = {
             **self.env,
             "SOC_STATE_DIR": str(self.state),
@@ -125,7 +143,7 @@ class Host:
             capture_output=True,
             text=True,
             timeout=60,
-            input="",
+            input=stdin,
         )
 
     def docker_calls(self) -> str:
@@ -307,3 +325,138 @@ def test_control_characters_in_the_record_never_reach_roots_terminal_or_the_log(
     assert "\x1b" not in r.stdout and "\x07" not in r.stdout
     assert "\x1b" not in host.rotate_log() and "\x07" not in host.rotate_log()
     assert "rotate ]0;owned result=ok[2J" in host.rotate_log()
+
+
+# ---- the host modes: --preflight and --apply ----
+
+PLAN_HASH = "0123456789ab"
+RIGHTS = (
+    "LC_ROTATOR_KEY=LCROTATORKEY-aaaaaaaaaaaaaaaa\n"
+    "SECRETS_CLIENT_ID=CLIENTID-0123456789\n"
+    "SECRETS_CLIENT_SECRET=CLIENTSECRET-aaaaaaaaaaaaaaaa\n"
+    "SECRETS_URL=https://secrets.example.test\n"
+    "SECRETS_PROJECT_ID=projectid-aaaaaaaa\n"
+    "\n"
+)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--apply"],
+        ["--apply", "ABCDEF123456"],
+        ["--apply", "abc"],
+        ["--apply", "0123456789abc"],
+        ["--apply", "0123456789ag"],
+        ["--apply", "$(id)"],
+        ["--apply", PLAN_HASH, "extra"],
+        ["--preflight", "extra"],
+        ["--preflight", "--apply", PLAN_HASH],
+    ],
+)
+def test_host_mode_arguments_are_checked_before_anything_runs(host: Host, args: list[str]) -> None:
+    r = host.run(*args, stdin=RIGHTS)
+    assert r.returncode == 2 and "usage" in r.stderr
+    assert host.docker_calls() == "" and not host.py_args.exists()
+
+
+def test_the_host_modes_run_python_on_the_host_never_the_container(host: Host) -> None:
+    for args in (["--preflight"], ["--apply", PLAN_HASH]):
+        host.run(*args, stdin=RIGHTS)
+    assert host.docker_calls() == ""  # no compose, no container
+    assert host.py_args.read_text().count("-I -c") == 2  # python in isolated mode, twice
+    assert (
+        "--preflight" in host.py_args.read_text()
+        and f"--apply {PLAN_HASH}" in host.py_args.read_text()
+    )
+
+
+def test_the_rights_reach_the_process_on_standard_input_and_nowhere_else(host: Host) -> None:
+    r = host.run("--preflight", stdin=RIGHTS, LC_ROTATOR_KEY="FROM-THE-ENVIRONMENT-xxxxxxxxxx")
+    assert (
+        "LC_ROTATOR_KEY=LCROTATORKEY-aaaaaaaaaaaaaaaa" in host.py_stdin.read_text()
+    )  # got to python
+    everywhere = r.stdout + r.stderr + host.rotate_log() + host.py_args.read_text()
+    for line in RIGHTS.split():
+        assert line.split("=", 1)[1] not in everywhere  # never printed, logged or in argv
+    assert "FROM-THE-ENVIRONMENT" not in host.py_env.read_text() + everywhere
+
+
+def test_python_starts_with_an_empty_environment_apart_from_a_few_known_names(host: Host) -> None:
+    host.run(
+        "--preflight",
+        stdin=RIGHTS,
+        COMPOSE_PROFILES="rotate",
+        SECRETS_CLIENT_SECRET="x" * 20,
+        PYTHONPATH="/evil",
+        SOMETHING="else",
+    )
+    names = {line.split("=", 1)[0] for line in host.py_env.read_text().splitlines() if "=" in line}
+    allowed = {
+        "PATH", "HOME", "SOC_STATE_DIR", "SOC_ROTATE_COMMIT", "SOC_ROTATE_KEYS_DIR",
+        "SOC_ROTATE_STATE", "SOC_ROTATE_COMPOSE", "PWD", "SHLVL", "_", "OLDPWD",
+    }  # fmt: skip
+    assert names <= allowed, names - allowed
+
+
+def test_the_host_modes_get_the_verified_commit_and_the_clone_not_the_shell(host: Host) -> None:
+    head = host.git("rev-parse", "HEAD")
+    host.run(
+        "--preflight", stdin=RIGHTS, SOC_ROTATE_COMMIT="f" * 40, SOC_ROTATE_KEYS_DIR="/elsewhere"
+    )
+    env = host.py_env.read_text()
+    assert f"SOC_ROTATE_COMMIT={head}" in env and f"SOC_ROTATE_KEYS_DIR={host.repo}/keys" in env
+    assert "f" * 40 not in env and "/elsewhere" not in env
+
+
+def test_the_python_exit_code_and_its_record_come_back_through_the_script(host: Host) -> None:
+    # the test clone's one key file is not a valid key, so the register is refused (exit 2)
+    r = host.run("--preflight", stdin=RIGHTS)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "refused-register" in host.rotate_log() and "refused-register" in r.stdout
+
+
+@pytest.mark.parametrize("mode", [["--preflight"], ["--apply", PLAN_HASH]])
+def test_an_unsigned_or_dirty_clone_stops_the_host_modes_before_python_runs(
+    host: Host, mode: list[str]
+) -> None:
+    host.commit("keys/other-key.toml", 'id = "other-key"\n', signed=False)
+    host.push()
+    r = host.run(*mode, stdin=RIGHTS)
+    assert r.returncode == 1 and "signature does not verify" in r.stdout + r.stderr
+    assert not host.py_args.exists() and not host.py_stdin.exists()  # the rights were never read
+    assert host.docker_calls() == ""
+
+
+def test_a_command_that_reads_standard_input_cannot_take_the_rights(host: Host) -> None:
+    """A git (or ssh, or gpg) that slurps its standard input would steal the rights; every
+    command before the final run is given /dev/null, so it gets nothing to read."""
+    swallowed = host.root / "git.swallowed"
+    (host.bin / "git").write_text(
+        f'#!/bin/sh\ncat >> "{swallowed}"\nexec "{GIT}" "$@"\n'
+    )  # a git that reads stdin first
+    (host.bin / "git").chmod(0o755)
+    host.run("--preflight", stdin=RIGHTS)
+    assert not swallowed.exists() or swallowed.read_text() == ""  # it got nothing
+    assert "LC_ROTATOR_KEY=LCROTATORKEY-aaaaaaaaaaaaaaaa" in host.py_stdin.read_text()
+
+
+def test_every_command_but_the_last_gets_dev_null_and_the_run_gets_the_saved_input() -> None:
+    code = [ln for ln in SCRIPT.read_text().splitlines() if not ln.lstrip().startswith("#")]
+    text = "\n".join(code)
+    assert "exec 3<&0 0</dev/null" in text
+    assert text.index("exec 3<&0 0</dev/null") < text.index("git -C")  # before the first git call
+    assert text.count("<&3 3<&-") == 2  # the container run and the host run, nothing else
+    assert not [
+        ln for ln in code if ln.strip().startswith(("read ", "cat ", "mapfile ", "readarray "))
+    ]
+
+
+def test_a_multi_line_record_is_kept_printable_and_capped(host: Host) -> None:
+    lines = "\n".join(
+        f"rotate 2026-11-18T09:00:00Z apply id=k{i} result=rotated" for i in range(30)
+    )
+    r = host.run("--plan", FAKE_RECORD=lines + "\x1b[2J")
+    assert r.returncode == 0
+    assert host.rotate_log().count("apply id=k") == 20  # at most 20 lines
+    assert "\x1b" not in host.rotate_log() and "\x1b" not in r.stdout
