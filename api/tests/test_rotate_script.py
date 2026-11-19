@@ -441,6 +441,20 @@ def test_a_command_that_reads_standard_input_cannot_take_the_rights(host: Host) 
     assert "LC_ROTATOR_KEY=LCROTATORKEY-aaaaaaaaaaaaaaaa" in host.py_stdin.read_text()
 
 
+def test_the_host_modes_check_the_platform_checkout_before_python_runs() -> None:
+    """Outside test mode the code that will hold the rights must be clean and signed."""
+    text = SCRIPT.read_text()
+    check = text.index('PSIG="$(git -C "$PLATFORM" log -1 --format=%G? HEAD)"')
+    assert text.index('platform_state="$(git -C "$PLATFORM" status --porcelain)"') < check
+    assert check < text.index("python3 -I -c")
+    assert '[[ "$PSIG" == G ]]' in text
+
+
+def test_test_mode_says_it_skipped_the_platform_check(host: Host) -> None:
+    host.run("--preflight", stdin=RIGHTS)
+    assert "test mode: the soc-platform checkout's signature is not checked" in host.rotate_log()
+
+
 def test_every_command_but_the_last_gets_dev_null_and_the_run_gets_the_saved_input() -> None:
     code = [ln for ln in SCRIPT.read_text().splitlines() if not ln.lstrip().startswith("#")]
     text = "\n".join(code)

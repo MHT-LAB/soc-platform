@@ -160,6 +160,21 @@ set +e
 if [[ -n "$HOST_MODE" ]]; then
   SRC="$HERE/../api/src"
   [[ -f "$SRC/soc_api/rotate/cli.py" ]] || die "$SRC/soc_api/rotate is missing"
+  # The code about to hold the rights, as root, with the network, must be the reviewed code:
+  # this checkout clean (deploy.sh keeps it at origin/main) and its head commit signed.
+  PLATFORM="$(cd "$HERE/.." && pwd)"
+  if [[ -n "${SOC_TEST_BIN:-}" ]]; then
+    log "test mode: the soc-platform checkout's signature is not checked"
+  else
+    platform_state="$(git -C "$PLATFORM" status --porcelain)" \
+      || die "could not read the git status of $PLATFORM"
+    [[ -z "$platform_state" ]] \
+      || die "$PLATFORM has uncommitted or untracked files; the code that holds the rights must be the reviewed code"
+    PSIG="$(git -C "$PLATFORM" log -1 --format=%G? HEAD)" \
+      || die "could not read the signature status of $PLATFORM"
+    [[ "$PSIG" == G ]] \
+      || die "the soc-platform checkout's head commit signature does not verify (git status '$PSIG')"
+  fi
   command -v python3 >/dev/null || die "python3 is needed on the host for --preflight and --apply"
   # An empty environment on purpose, and -I so no PYTHON* variable or stray folder is read.
   # Standard input is the saved original (descriptor 3): it carries the rights.

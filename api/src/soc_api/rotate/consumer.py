@@ -106,6 +106,23 @@ class HostConsumer:
             staged.unlink(missing_ok=True)
             prev.unlink(missing_ok=True)
             raise RotateError("env_write_failed") from None
+        # Read it back. If the file does not hold the new value, the health check would pass on
+        # the OLD key and the old key would then be revoked under a working-looking service.
+        try:
+            now_holds = [
+                ln
+                for ln in path.read_text(encoding="utf-8").split("\n")
+                if ln.startswith(f"{var}=")
+            ]
+        except (OSError, UnicodeDecodeError):
+            now_holds = []
+        if now_holds != [f"{var}={value.reveal()}"]:
+            staged.unlink(missing_ok=True)
+            try:
+                os.replace(prev, path)
+            except OSError:
+                pass  # the caller's rollback reports what is left
+            raise RotateError("env_readback_failed")
 
     def restore(self, env_file: str) -> None:
         path = self._path(env_file)

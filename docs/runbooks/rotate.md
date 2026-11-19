@@ -43,8 +43,9 @@ An apply must rewrite a consumer's env file, recreate that service and run its h
 hardened container cannot do that without the Docker socket, which is root-equivalent, so the
 apply is standard-library Python started by `rotate.sh` as root. What keeps that safe:
 
-- `rotate.sh` runs the same signed-clone gate as `rules-deploy.sh` first, so the code and the
-  key list are the reviewed, signed commits.
+- `rotate.sh` runs the same signed-clone gate as `rules-deploy.sh` on the key register, and
+  for these two modes also refuses unless this checkout (`/opt/soc-platform`) is clean and its
+  head commit's signature verifies, so the code that will hold the rights is the reviewed code.
 - Its input is standard input. `rotate.sh` saves it on a spare descriptor and gives every
   command before the final run `/dev/null`, so nothing else (git, ssh, gpg) can read the
   rights. The Python gets an empty environment and no PYTHON variables.
@@ -89,14 +90,17 @@ your own machine once with a throwaway value).
 
 Only the keys of the approved plan, one at a time, stopping at the first failure:
 
-1. **Check the live old key.** It is found by the id recorded last time, else by its exact
-   name; there must be exactly one. Its permissions must equal the key file's list exactly; any
+1. **Check the live old key.** It is found by the id recorded last time. With no id on record
+   (the first rotation, or a state rebuilt with `--record`) it is found by name: exactly the
+   console name, or the console name, a hyphen and an eight-digit date (the name a rotation
+   gives the keys it makes). Exactly one must match; two (an unfinished rotation) is refused. Its permissions must equal the key file's list exactly; any
    difference refuses the key with nothing changed. The new key's name (the old name plus the
    date) must be free.
 2. **Create the new key** with the same permissions.
 3. **Store the new value** in the secrets manager (the old value is held in memory for rollback).
 4. **Rewrite the consumer's env file** (written whole, same owner and mode, the old file kept as
-   `<name>.prev`) and **recreate its service**.
+   `<name>.prev`), read it back to be sure it holds the new value (otherwise the check would
+   pass on the old key), and **recreate its service**.
 5. **Run its named health check, wait the grace period, run it again.**
 6. **Only now revoke the old key**, by the exact id found in step 1.
 
@@ -127,11 +131,17 @@ The vendor and secrets-manager request and reply shapes this code expects are **
 against a live call** (they are marked `[C]` in the source), and the code refuses anything
 unexpected rather than guess. So:
 
-1. Run `--preflight` first. It makes only the read calls, shows whether each automatic key is
-   ready, and exercises both logins and both reply shapes without changing anything.
-2. If it reports `problem-bad_shape` (or similar), stop: the source needs a small fix before an
+1. **Remove the stale copy.** If a key's value is also kept somewhere the rotator does not
+   write (an older project or folder in the secrets manager), delete that copy first, or point
+   the restore steps at the rotator's project: after a rotation the old copy is a revoked key,
+   and restoring a host from it would fail.
+2. Run `--preflight`. It makes only the read calls, shows whether each automatic key is
+   ready, and exercises both logins and the list and read reply shapes without changing
+   anything. It does not exercise the writes (create, store, delete): the first apply does,
+   and a write that fails is undone before the old key is touched.
+3. If it reports `problem-bad_shape` (or similar), stop: the source needs a small fix before an
    apply, and nothing was touched.
-3. Then a normal run: plan, approve, apply, attended, for one key.
+4. Then a normal run: plan, approve, apply, attended, for one key.
 
 ## Files
 

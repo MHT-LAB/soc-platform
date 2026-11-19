@@ -27,6 +27,7 @@ Nothing printed or recorded here is a value: ids appear as their last four chara
 
 import fcntl
 import os
+import re
 import signal
 import uuid
 from collections.abc import Callable
@@ -127,6 +128,12 @@ class Session:
         self.say(line)
 
 
+def is_ours(name: str, console_name: str) -> bool:
+    """A key this rotator made or replaces: exactly the console name, or the console name, a
+    hyphen and the eight-digit date it was made. Nothing looser, so a stranger is never taken."""
+    return name == console_name or bool(re.fullmatch(re.escape(console_name) + r"-\d{8}", name))
+
+
 def _locate(
     keys: dict[str, VendorKey], ks: st.KeyState | None, spec: ApplySpec
 ) -> tuple[VendorKey | None, str]:
@@ -135,10 +142,12 @@ def _locate(
         found = keys.get(ks.vendor_key_id)
         if found is None:
             return None, "recorded_key_missing"
-        if found.name != spec.console_name and not found.name.startswith(f"{spec.console_name}-"):
+        if not is_ours(found.name, spec.console_name):
             return None, "recorded_key_renamed"
         return found, ""
-    named = [k for k in keys.values() if k.name == spec.console_name]
+    # No id on record (first rotation, or the state was rebuilt): exactly one live key with our
+    # name, with or without a date. Two (an unfinished rotation) is refused for a person.
+    named = [k for k in keys.values() if is_ours(k.name, spec.console_name)]
     if len(named) == 1:
         return named[0], ""
     return None, "old_key_missing" if not named else "old_key_ambiguous"
@@ -230,7 +239,7 @@ def _finish_revoke(session: Session, row: Row, spec: ApplySpec, oid: str) -> boo
         live = vendor.list_keys().get(ks.old_key_id)
         if live is None:
             session.say(f"  {row.key.id}: the old key is already gone")
-        elif live.name != spec.console_name:
+        elif not is_ours(live.name, spec.console_name):
             session.note("revoke", "refused-old_key_renamed", id=row.key.id)
             return False
         else:

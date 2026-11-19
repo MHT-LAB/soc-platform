@@ -248,6 +248,64 @@ def test_a_pending_revoke_never_deletes_a_key_that_was_renamed(h: Harness) -> No
     assert "delete old" not in h.world.log
 
 
+def test_a_revoke_left_pending_on_a_later_rotation_can_still_be_finished(h: Harness) -> None:
+    """Regression: after the first rotation the live key carries a dated name."""
+    h.approve()
+    h.apply()
+    h.moment += timedelta(days=91)
+    h.world.fail.add("delete")
+    h.world.checks = [True, True]
+    h.approve()
+    h.apply()
+    assert h.state().keys["auto-key"].revoke_pending is True
+    h.world.fail.clear()
+    h.world.log.clear()
+    h.approve()
+    assert h.apply() == OK, h.text()
+    assert "delete new" in h.world.log  # x-20261118, the key made by the first rotation
+    assert h.state().keys["auto-key"].revoke_pending is False
+
+
+def test_a_key_is_found_again_by_name_when_its_recorded_id_is_lost(h: Harness) -> None:
+    """Regression: a state rebuilt by --record has no vendor id; the dated key must be found."""
+    h.approve()
+    h.apply()
+    state = h.state()
+    state.keys["auto-key"] = st.KeyState(date(2026, 11, 18), "recorded")  # what --record writes
+    h.put_state(state)
+    h.moment += timedelta(days=91)
+    h.world.log.clear()
+    h.world.checks = [True, True]
+    h.approve()
+    assert h.apply() == OK, h.text()
+    assert "delete new" in h.world.log
+
+
+@pytest.mark.parametrize(
+    ("name", "ours"),
+    [
+        ("x", True),
+        ("x-20261118", True),
+        ("x-2026111", False),
+        ("x-202611180", False),
+        ("x-evil", False),
+        ("xx-20261118", False),
+        ("x-20261118-copy", False),
+        ("y", False),
+    ],
+)
+def test_only_the_exact_name_or_the_name_and_a_date_are_ours(name: str, ours: bool) -> None:
+    assert ap.is_ours(name, "x") is ours
+
+
+def test_an_unfinished_rotation_without_a_recorded_id_is_refused_not_guessed(h: Harness) -> None:
+    h.world.keys["newkeyid0009"] = VendorKey("newkeyid0009", "x-20261001", frozenset(PERMS))
+    h.approve()
+    assert h.apply() == FAILED
+    assert "refused-old_key_ambiguous" in h.text()
+    untouched(h)
+
+
 # ---- refusals before any change ----
 
 
@@ -283,7 +341,18 @@ def test_two_live_keys_with_the_name_are_ambiguous_and_refused(tmp_path: Path) -
 
 
 def test_a_leftover_key_with_todays_name_is_refused(h: Harness) -> None:
-    h.world.keys["leftover0004"] = VendorKey("leftover0004", "x-20261118", frozenset(PERMS))
+    leftover = VendorKey("leftover0004", "x-20261118", frozenset(PERMS))
+    # with no recorded id, two keys are ours: which is the old one is not guessed
+    h.world.keys["leftover0004"] = leftover
+    h.approve()
+    assert h.apply() == FAILED
+    assert "refused-old_key_ambiguous" in h.text()
+    untouched(h)
+    # with the old key known by its recorded id, today's name being taken is the reason
+    h.put_state(
+        st.State(keys={"auto-key": st.KeyState(date(2026, 8, 1), "rotated", vendor_key_id=OLD_ID)})
+    )
+    h.said.clear()
     h.approve()
     assert h.apply() == FAILED
     assert "refused-new_name_taken" in h.text()

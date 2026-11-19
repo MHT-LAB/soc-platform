@@ -143,6 +143,20 @@ def test_a_write_that_fails_part_way_leaves_the_original_whole_and_no_copy(
     assert [p.name for p in (root / "env").iterdir()] == ["posture-lc.env"]
 
 
+def test_a_file_that_does_not_hold_the_new_value_after_writing_is_put_back(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the rename silently did nothing, the check would pass on the old key."""
+    monkeypatch.setattr(
+        os, "replace", lambda src, dst: None
+    )  # the write "succeeds" but changes nothing
+    with pytest.raises(RotateError, match="env_readback_failed"):
+        make(root).install("env/posture-lc.env", "SOC_POSTURE_LC_KEY", Secret(NEW))
+    monkeypatch.undo()
+    assert (root / "env" / "posture-lc.env").read_text() == ENV_TEXT
+    assert not (root / "env" / ".posture-lc.env.new").exists()  # no staged file left behind
+
+
 def test_restoring_without_a_copy_is_a_short_code(root: Path) -> None:
     with pytest.raises(RotateError, match="restore_failed"):
         make(root).restore("env/posture-lc.env")
