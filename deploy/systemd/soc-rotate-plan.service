@@ -9,6 +9,10 @@
 Description=SOC key rotation plan (dry run, changes nothing)
 After=docker.service network-online.target
 Requires=docker.service
+# It fetches the register over the network. `After=` alone only orders; `Wants=` makes systemd
+# actually wait for the network, so a run caught up at boot (Persistent=true) is not a false
+# failure.
+Wants=network-online.target
 ConditionPathExists=/opt/key-register/.git
 
 [Service]

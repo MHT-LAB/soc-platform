@@ -207,7 +207,7 @@ def run(
 
     if args.mode == "approve":
         return _approve(cfg, plan, state, confirm, say, moment, run_id)
-    return _record(cfg, args, register.keys, state, plan, confirm, say, moment, run_id, today)
+    return _record(cfg, args, state, plan, confirm, say, moment, run_id, today)
 
 
 def _approve(
@@ -262,7 +262,6 @@ def _approve(
 def _record(
     cfg: Config,
     args: Args,
-    keys: Mapping[str, object],
     state: st.State,
     plan: Plan,
     confirm: Callable[[str], bool],
