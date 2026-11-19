@@ -1,0 +1,13 @@
+# Once a day, in the morning: the plan of what is due, overdue or waiting for the first-Monday
+# session. The zone is written out so the hour is the same whatever zone the container uses,
+# and across daylight saving time.
+[Unit]
+Description=SOC key rotation plan, daily
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 America/New_York
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

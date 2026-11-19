@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Plan and record key rotations. Run it as root on the host. This build changes no key anywhere.
+#
+#   rotate.sh                     the plan, then a typed yes to approve it
+#   rotate.sh --plan [--quiet]    the plan only, nothing asked (the daily timer runs this)
+#   rotate.sh --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD]
+#                                 a key was rotated by hand: write it down (typed yes)
+#
+# 1. Bring the key register clone (default /opt/key-register) up to origin/main (fast-forward
+#    only, over its own read-only deploy key), then require: a clean tree, a head commit exactly
+#    at origin/main, and a head commit whose signature verifies (git reports status G).
+#    Anything else is refused before anything is run.
+# 2. Check the host has been deployed (env/image.env). The service needs no settings file: it
+#    holds no key, has no network and cannot reach a vendor.
+# 3. Run the one-shot `rotate` service (python -m soc_api.rotate). deploy.sh never starts it;
+#    only this script does.
+# 4. Append the service's one-line record to rotate.log and print it, for the vault Build Log.
+#    The exit code is the service's: 0 done or nothing due, 1 could not write its files,
+#    2 refused before changing anything, 3 not confirmed, 4 (plan only) something is overdue,
+#    has no record, or has an old key still live.
+#
+# Environment (defaults suit the Stage A container):
+#   SOC_STATE_DIR      state root                                    /srv/soc
+#   SOC_KEYS_REPO      the key register clone                        /opt/key-register
+#   SOC_KEYS_SSH_KEY   the clone's read-only deploy key, if git does not already know it
+#   SOC_TEST_BIN       TESTS ONLY: directory searched first for docker. Refused for root, so
+#                      nothing in the environment can swap a tool on a host.
+set -euo pipefail
+
+if [[ -n "${SOC_TEST_BIN:-}" && "$EUID" -eq 0 ]]; then
+  echo "FAILED: SOC_TEST_BIN is for tests only and is refused for root" >&2
+  exit 1
+fi
+if [[ "$EUID" -ne 0 && -z "${SOC_TEST_BIN:-}" ]]; then
+  echo "FAILED: run as root" >&2
+  exit 1
+fi
+# Don't depend on how the shell was opened (pct enter gives a minimal PATH).
+export PATH="${SOC_TEST_BIN:+$SOC_TEST_BIN:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Never let the shell choose profiles or the commit: both come from this script.
+unset COMPOSE_PROFILES SOC_ROTATE_COMMIT SOC_KEYS_SRC
+export SOC_ENV=prod
+
+STATE="${SOC_STATE_DIR:-/srv/soc}"
+REPO="${SOC_KEYS_REPO:-/opt/key-register}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OUT="$STATE/rotate"
+LOG="$STATE/rotate.log"
+
+usage() {
+  echo "usage: rotate.sh [--plan [--quiet] | --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD]]" >&2
+  exit 2
+}
+
+# The arguments are checked here, in the shell, before anything else happens. The service
+# checks them again: the second check is the one that counts, this one keeps junk off the
+# command line.
+ID_RE='^[a-z0-9][a-z0-9-]{1,48}$'
+DAY_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+ARGS=()
+RUN_FLAGS=(--rm)
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    --plan)
+      ARGS+=(--plan)
+      shift
+      if [[ "${1:-}" == "--quiet" ]]; then ARGS+=(--quiet); shift; fi
+      [[ $# -eq 0 ]] || usage
+      RUN_FLAGS+=(-T) # the daily timer has no terminal
+      ;;
+    --record)
+      shift
+      [[ $# -ge 1 && "$1" =~ $ID_RE ]] || usage
+      ARGS+=(--record "$1")
+      shift
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --date | --due)
+            [[ $# -ge 2 && "$2" =~ $DAY_RE ]] || usage
+            ARGS+=("$1" "$2")
+            shift 2
+            ;;
+          *) usage ;;
+        esac
+      done
+      ;;
+    *) usage ;;
+  esac
+fi
+
+mkdir -p "$STATE"
+touch "$LOG"
+log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
+die() { log "FAILED: $*"; exit 1; }
+
+# --- 1. the register clone: up to date, clean, at origin/main, signed ---------------------
+[[ -d "$REPO/.git" ]] || die "$REPO is not a git clone of the key register"
+if [[ -n "${SOC_KEYS_SSH_KEY:-}" ]]; then
+  [[ -r "$SOC_KEYS_SSH_KEY" ]] || die "SOC_KEYS_SSH_KEY is not a readable file"
+  export GIT_SSH_COMMAND="ssh -i $SOC_KEYS_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
+fi
+git -C "$REPO" fetch -q origin main \
+  || die "could not fetch origin/main in $REPO"
+# Fast-forward only: a clone that has diverged is refused, never merged or reset here.
+git -C "$REPO" merge -q --ff-only origin/main \
+  || die "$REPO cannot be fast-forwarded to origin/main (diverged or has local commits)"
+tree_state="$(git -C "$REPO" status --porcelain)" \
+  || die "could not read the git status of $REPO"
+[[ -z "$tree_state" ]] \
+  || die "$REPO has uncommitted or untracked files; restore it to origin/main before planning"
+COMMIT="$(git -C "$REPO" rev-parse HEAD)"
+[[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "unexpected head commit id"
+[[ "$COMMIT" == "$(git -C "$REPO" rev-parse origin/main)" ]] \
+  || die "$REPO is not at origin/main"
+SIG="$(git -C "$REPO" log -1 --format=%G? "$COMMIT")" \
+  || die "could not read the signature status of $COMMIT"
+[[ "$SIG" == G ]] \
+  || die "the head commit's signature does not verify (git status '$SIG'); the host needs the signer's public key in its keyring"
+[[ -d "$REPO/keys" ]] || die "$REPO/keys is missing"
+log "register commit $COMMIT is at origin/main, signed by $(git -C "$REPO" log -1 --format=%GF "$COMMIT")"
+
+# --- 2. what this host must have -------------------------------------------------------------
+[[ -s "$STATE/env/image.env" ]] || die "no $STATE/env/image.env yet: run deploy.sh first"
+
+# --- 3. the one-shot service, on this terminal (or with none, for the plan) -----------------
+# The service runs as the image's user (10001) and keeps its files in this folder.
+install -d -m 700 "$OUT"
+[[ "$EUID" -ne 0 ]] || chown 10001:10001 "$OUT"
+rm -f "$OUT/record.txt"
+export SOC_ROTATE_COMMIT="$COMMIT" SOC_KEYS_SRC="$REPO"
+set +e
+"$HERE/soc-compose.sh" --profile rotate run "${RUN_FLAGS[@]}" rotate ${ARGS[@]+"${ARGS[@]}"}
+rc=$?
+set -e
+
+# --- 4. the record ------------------------------------------------------------------------------
+if [[ -s "$OUT/record.txt" ]]; then
+  # Written inside the container: keep printable characters only, so nothing in it can
+  # drive root's terminal (escape sequences) or forge extra lines in the log.
+  record="$(head -c 1000 "$OUT/record.txt" | head -n 1 | LC_ALL=C tr -cd '[:print:]')"
+  printf '%s\n' "$record" >> "$LOG"
+  echo
+  echo "Record for the vault Build Log:"
+  printf '  %s\n' "$record"
+else
+  log "no record was written by the rotate service (exit code $rc)"
+fi
+exit "$rc"

@@ -1,0 +1,25 @@
+# The daily key rotation plan (deploy/rotate.sh --plan --quiet). Started by
+# soc-rotate-plan.timer; run it by hand with `systemctl start soc-rotate-plan.service`, read the
+# result with `journalctl -u soc-rotate-plan.service -n 20`. It only reads: it changes no key.
+# It exits 4 when a key is overdue, has no record of a last rotation, or has an old key still
+# live, so the unit shows in `systemctl --failed` until someone deals with it. (Until the pager
+# reads status.json, that and the first-Monday calendar hold are the reminders.)
+# Install: see docs/runbooks/rotate.md.
+[Unit]
+Description=SOC key rotation plan (dry run, changes nothing)
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/key-register/.git
+
+[Service]
+Type=oneshot
+ExecStart=/opt/soc-platform/deploy/rotate.sh --plan --quiet
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=5min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
