@@ -6,21 +6,51 @@ because any of those can carry a credential.
 """
 
 import http.client
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from typing import Any
 
 MAX_BODY = 1024 * 1024
 Fetch = Callable[..., bytes]
 
 
 class RotateError(Exception):
-    """A failure with a short code that is safe to print and log."""
+    """A failure with a short code that is safe to print and log. `detail`, when set, is the
+    shape of an unexpected reply (field names and value types, never a value)."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(code)
         self.code = code
+        self.detail = detail
+
+
+FIELD_RE = re.compile(r"[A-Za-z_]{1,40}")
+MAX_SHAPE = 400
+
+
+def shape(doc: Any, depth: int = 0) -> str:
+    """What a reply looks like, without any of its content: field names that look like names
+    are kept, anything else (an id, a hash) becomes <id>, and every value becomes its type.
+    Safe to print even for a reply that carries a key, because no value is ever included."""
+    if depth > 3:
+        return "..."
+    if isinstance(doc, dict):
+        named = [(k, v) for k, v in doc.items() if isinstance(k, str) and FIELD_RE.fullmatch(k)]
+        ids = [v for k, v in doc.items() if not (isinstance(k, str) and FIELD_RE.fullmatch(k))]
+        parts = [f"{k}:{shape(v, depth + 1)}" for k, v in named[:12]]
+        if ids:
+            parts.append(f"<id>x{len(ids)}:{shape(ids[0], depth + 1)}")
+        return "{" + ",".join(parts) + "}"
+    if isinstance(doc, list):
+        return f"[{shape(doc[0], depth + 1)}]x{len(doc)}" if doc else "[]"
+    return type(doc).__name__
+
+
+def described(doc: Any) -> str:
+    return shape(doc)[:MAX_SHAPE]
 
 
 _OPENER = urllib.request.OpenerDirector()

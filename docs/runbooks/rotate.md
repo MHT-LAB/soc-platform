@@ -122,6 +122,11 @@ one fails.
 | `rotated-REVOKE-PENDING` | the new key works and the old one could not be revoked | run an apply again after a new approval: it only finishes the revoke |
 | `prev_exists` | a `.prev` copy of the env file is left over from a failed run | compare it with the file, then remove it |
 
+Every failure code names the step it happened in: `org_id_…` (reading the organization id),
+`secrets_read_…`, `secrets_write_…` (the secrets manager; `…_login_…` for its login),
+`vendor_list_…`, `vendor_create_…`, `vendor_delete_…` (the detection vendor; `…_jwt_…` for its
+login), then the cause, such as `http_403` or `bad_shape`.
+
 A dropped connection or a terminate signal is treated like Ctrl-C: the work is undone and the
 record is still written. `INTERRUPTED` is printed.
 

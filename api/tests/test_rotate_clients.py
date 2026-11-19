@@ -207,7 +207,7 @@ def test_an_expired_token_is_renewed_once_and_only_once() -> None:
 @pytest.mark.parametrize(
     "doc",
     [
-        [],
+        "not a table or a list",
         {"oldkeyid0001": "not a dict"},
         {"oldkeyid0001": {"key_name": "x"}},  # no permissions: never guessed
         {"oldkeyid0001": {"priv": ["a.b"]}},  # no name
@@ -349,3 +349,101 @@ def test_an_address_that_is_not_a_plain_https_host_is_refused_before_any_call(ur
     with pytest.raises(RotateError, match="bad_url"):
         store.SecretsManager(rights(url), fetch=fake)
     assert fake.calls == []
+
+
+def test_every_failure_names_the_step_it_happened_in() -> None:
+    client, _ = vendor(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        client.list_keys()
+    assert exc.value.code == "vendor_list_http_403"
+    client, _ = vendor(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        client.create_key("x-20261118", ("dr.list",))
+    assert exc.value.code == "vendor_create_http_403"
+    client, _ = vendor(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        client.delete_key("oldkeyid0001")
+    assert exc.value.code == "vendor_delete_http_403"
+    secrets, _ = manager(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        secrets.get("/SOC", "A_KEY")
+    assert exc.value.code == "secrets_read_http_403"
+    secrets, _ = manager(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        secrets.set("/SOC", "A_KEY", Secret(NEW_VALUE))
+    assert exc.value.code == "secrets_write_http_403"
+    secrets = store.SecretsManager(rights(), fetch=FakeNet(RotateError("http_403")))
+    with pytest.raises(RotateError) as exc:
+        secrets.get("/SOC", "A_KEY")
+    assert exc.value.code == "secrets_read_login_http_403"  # the login, inside the read
+
+
+# ---- the reply shapes the vendor's own SDK accepts, and a safe description of anything else ----
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"api_keys": {"oldkeyid0001": {"key_name": "x", "priv": ["dr.list"]}}},
+        {"api_keys": [{"key_hash": "oldkeyid0001", "name": "x", "perms": ["dr.list"]}]},
+        [{"hash": "oldkeyid0001", "key_name": "x", "permissions": "dr.list"}],
+        {"keys": {"oldkeyid0001": {"name": "x", "priv": "dr.list"}}},
+        {"oldkeyid0001": {"key_name": "x", "priv": ["dr.list"]}},
+    ],
+)
+def test_the_key_list_is_read_in_every_shape_the_vendor_sdk_accepts(doc: Any) -> None:
+    keys = lc.parse_keys(doc)
+    assert keys["oldkeyid0001"].name == "x" and keys["oldkeyid0001"].perms == {"dr.list"}
+
+
+def test_an_empty_key_list_is_read_as_no_keys() -> None:
+    assert lc.parse_keys([]) == {} and lc.parse_keys({"api_keys": {}}) == {}
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"api_key": NEW_VALUE, "hash": "newkeyid0003"},
+        {"key": NEW_VALUE, "key_hash": "newkeyid0003"},
+    ],
+)
+def test_the_create_reply_is_read_in_both_field_spellings(doc: Any) -> None:
+    new = lc.parse_new_key(doc)
+    assert new.id == "newkeyid0003" and new.value.reveal() == NEW_VALUE
+
+
+def test_an_unexpected_reply_is_described_by_names_and_types_never_values() -> None:
+    weird = {
+        "result": {
+            "keyid0123456789abcdef": {"label": "LABELVALUE", "secret_value": NEW_VALUE, "n": 3}
+        },
+        "token": LC_KEY,
+    }
+    with pytest.raises(RotateError) as exc:
+        lc.parse_keys(weird)
+    detail = exc.value.detail
+    assert exc.value.code == "bad_shape"
+    assert "result" in detail and "label" in detail and "secret_value" in detail and "str" in detail
+    assert "<id>" in detail  # the key's id is not shown
+    for value in (NEW_VALUE, LC_KEY, "keyid0123456789abcdef", "LABELVALUE"):
+        assert value not in detail
+    with pytest.raises(RotateError) as exc2:
+        lc.parse_new_key({"the_new_key": NEW_VALUE, "its_id": "newkeyid0003"})
+    assert NEW_VALUE not in exc2.value.detail and "newkeyid0003" not in exc2.value.detail
+    assert "the_new_key:str" in exc2.value.detail
+
+
+def test_the_description_survives_the_step_prefix() -> None:
+    client, _ = vendor({"surprise": [1, 2]})
+    with pytest.raises(RotateError) as exc:
+        client.list_keys()
+    assert exc.value.code == "vendor_list_bad_shape" and "surprise" in exc.value.detail
+
+
+def test_a_description_is_capped_and_never_deeper_than_needed() -> None:
+    from soc_api.rotate.net import MAX_SHAPE, described
+
+    deep = {"a": {"b": {"c": {"d": {"e": {"f": NEW_VALUE}}}}}}
+    assert NEW_VALUE not in described(deep) and "..." in described(deep)
+    wide = {f"field_{chr(97 + i)}": i for i in range(26)}
+    assert len(described([wide] * 3)) <= MAX_SHAPE
