@@ -328,6 +328,39 @@ services:
     pids_limit: 64
     mem_limit: 512m
 
+  # One-off: `deploy/rotate.sh` starts it (never `up -d`, never deploy.sh): plans key rotations
+  # from the key register and records a rotation a person did by hand. This build changes no
+  # key anywhere, so it is given nothing to do that with: NO network at all (`network_mode:
+  # none`), no env file and no secret. It sees the register clone read-only and one folder for
+  # its three small files (state.json, status.json, record.txt). A later build that rotates
+  # keys will receive its rights on stdin from an attended run, never from a file here.
+  rotate:
+    profiles: [rotate]
+    image: ${SOC_API_IMAGE:-soc-api:dev}
+    restart: "no"
+    entrypoint: ["python", "-m", "soc_api.rotate"]
+    environment:
+      SOC_ENV: ${SOC_ENV:-prod}
+      # The verified commit of the register clone; the script sets it. Empty is refused inside.
+      SOC_ROTATE_COMMIT: ${SOC_ROTATE_COMMIT:-}
+      SOC_ROTATE_KEYS_DIR: /keys
+      SOC_ROTATE_STATE: /state
+    volumes:
+      - ${SOC_KEYS_SRC:-/opt/key-register}/keys:/keys:ro
+      - ${SOC_STATE_DIR:-/srv/soc}/rotate:/state
+    network_mode: none
+    stdin_open: true
+    tty: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 256m
+
   # One-off: `soc-compose.sh run --rm offsite <restic command>` (deploy/offsite.sh does it)
   # sends the encrypted backup sets in $SOC_STATE_DIR/backups to the off-site restic
   # repository. Its own profile and `restart: no`, so `up -d` never starts it. It is on

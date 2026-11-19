@@ -47,6 +47,7 @@ select = ["E", "F", "I", "B", "S", "UP"]
 "tests/test_posture_db.py" = ["S608"]  # same
 "tests/test_posture.py" = ["S105"]  # fake tokens and keys for a fake server
 "tests/test_reconcile.py" = ["S105"]  # fake tokens and keys for a fake server
+"tests/test_rotate_*.py" = ["S105"]  # fake values that must never appear in any output
 "src/soc_api/migrations/**" = ["S608"]  # f-string SQL over fixed table names and one constant
 
 [tool.mypy]
