@@ -9,7 +9,8 @@ project only, so a value outside it cannot be reached however the call is made.
 import json
 import re
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from soc_api.rotate import net
@@ -24,6 +25,15 @@ NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 PATH_RE = re.compile(r"/[A-Za-z0-9/_-]{0,200}")
 MAX_VALUE = 4096
 JSON_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
+
+
+@contextmanager
+def _step(name: str) -> Iterator[None]:
+    """Prefix a failure with the step it happened in, so a code says where, not just what."""
+    try:
+        yield
+    except RotateError as exc:
+        raise RotateError(f"{name}_{exc.code}") from None
 
 
 def _json(raw: bytes) -> Any:
@@ -92,18 +102,20 @@ class SecretsManager:
         }
 
     def get(self, path: str, name: str) -> Secret:
-        if not NAME_RE.fullmatch(name):
-            raise RotateError("bad_name")
-        query = urllib.parse.urlencode(self._scope(path))
-        doc = self._call("GET", f"{self._base}/api/v3/secrets/raw/{name}?{query}")  # [C]
-        inner = doc.get("secret") if isinstance(doc, dict) else None
-        value = inner.get("secretValue") if isinstance(inner, dict) else None
-        if not (isinstance(value, str) and 0 < len(value) <= MAX_VALUE):
-            raise RotateError("bad_shape")
-        return Secret(value)
+        with _step("secrets_read"):
+            if not NAME_RE.fullmatch(name):
+                raise RotateError("bad_name")
+            query = urllib.parse.urlencode(self._scope(path))
+            doc = self._call("GET", f"{self._base}/api/v3/secrets/raw/{name}?{query}")  # [C]
+            inner = doc.get("secret") if isinstance(doc, dict) else None
+            value = inner.get("secretValue") if isinstance(inner, dict) else None
+            if not (isinstance(value, str) and 0 < len(value) <= MAX_VALUE):
+                raise RotateError("bad_shape")
+            return Secret(value)
 
     def set(self, path: str, name: str, value: Secret) -> None:
-        if not NAME_RE.fullmatch(name):
-            raise RotateError("bad_name")
-        body = {**self._scope(path), "secretValue": value.reveal()}
-        self._call("PATCH", f"{self._base}/api/v3/secrets/raw/{name}", body)  # [C]
+        with _step("secrets_write"):
+            if not NAME_RE.fullmatch(name):
+                raise RotateError("bad_name")
+            body = {**self._scope(path), "secretValue": value.reveal()}
+            self._call("PATCH", f"{self._base}/api/v3/secrets/raw/{name}", body)  # [C]

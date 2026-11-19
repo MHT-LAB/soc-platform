@@ -349,3 +349,30 @@ def test_an_address_that_is_not_a_plain_https_host_is_refused_before_any_call(ur
     with pytest.raises(RotateError, match="bad_url"):
         store.SecretsManager(rights(url), fetch=fake)
     assert fake.calls == []
+
+
+def test_every_failure_names_the_step_it_happened_in() -> None:
+    client, _ = vendor(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        client.list_keys()
+    assert exc.value.code == "vendor_list_http_403"
+    client, _ = vendor(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        client.create_key("x-20261118", ("dr.list",))
+    assert exc.value.code == "vendor_create_http_403"
+    client, _ = vendor(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        client.delete_key("oldkeyid0001")
+    assert exc.value.code == "vendor_delete_http_403"
+    secrets, _ = manager(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        secrets.get("/SOC", "A_KEY")
+    assert exc.value.code == "secrets_read_http_403"
+    secrets, _ = manager(RotateError("http_403"))
+    with pytest.raises(RotateError) as exc:
+        secrets.set("/SOC", "A_KEY", Secret(NEW_VALUE))
+    assert exc.value.code == "secrets_write_http_403"
+    secrets = store.SecretsManager(rights(), fetch=FakeNet(RotateError("http_403")))
+    with pytest.raises(RotateError) as exc:
+        secrets.get("/SOC", "A_KEY")
+    assert exc.value.code == "secrets_read_login_http_403"  # the login, inside the read

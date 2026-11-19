@@ -515,7 +515,7 @@ def test_preflight_reports_a_permission_mismatch(h: Harness) -> None:
 def test_preflight_reports_an_unreadable_secret(h: Harness) -> None:
     h.world.fail.add("get")
     assert h.preflight() == FAILED
-    assert "problem-fake_get" in h.text()
+    assert "problem-org_id_fake_get" in h.text()
 
 
 def test_preflight_with_bad_rights_is_refused(h: Harness) -> None:

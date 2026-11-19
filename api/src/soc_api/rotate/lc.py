@@ -12,7 +12,8 @@ the key value the vendor returns on creation goes straight into a `Secret`.
 import json
 import re
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -126,15 +127,27 @@ class LimaCharlieKeys:
         raise RotateError("http_401")  # not reached
 
     def list_keys(self) -> dict[str, VendorKey]:
-        return parse_keys(self._call("GET"))
+        with _step("vendor_list"):
+            return parse_keys(self._call("GET"))
 
     def create_key(self, name: str, perms: tuple[str, ...]) -> NewKey:
-        return parse_new_key(self._call("POST", {"key_name": name, "perms": ",".join(perms)}))
+        with _step("vendor_create"):
+            return parse_new_key(self._call("POST", {"key_name": name, "perms": ",".join(perms)}))
 
     def delete_key(self, key_id: str) -> None:
-        if not KEY_ID_RE.fullmatch(key_id):
-            raise RotateError("bad_key_id")
-        self._call("DELETE", {"key_hash": key_id})  # [C] the id is sent as `key_hash`
+        with _step("vendor_delete"):
+            if not KEY_ID_RE.fullmatch(key_id):
+                raise RotateError("bad_key_id")
+            self._call("DELETE", {"key_hash": key_id})  # [C] the id is sent as `key_hash`
+
+
+@contextmanager
+def _step(name: str) -> Iterator[None]:
+    """Prefix a failure with the step it happened in, so a code says where, not just what."""
+    try:
+        yield
+    except RotateError as exc:
+        raise RotateError(f"{name}_{exc.code}") from None
 
 
 def _json(raw: bytes) -> Any:

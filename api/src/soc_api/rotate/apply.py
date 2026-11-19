@@ -177,9 +177,12 @@ def _check_old(
 
 
 def _oid(session: Session, spec: ApplySpec) -> str:
-    value = session.deps.store.get(spec.path, spec.org_name).reveal()
+    try:
+        value = session.deps.store.get(spec.path, spec.org_name).reveal()
+    except RotateError as exc:
+        raise RotateError(f"org_id_{exc.code}") from None
     if not OID_RE.fullmatch(value):
-        raise RotateError("bad_oid")
+        raise RotateError("org_id_bad_oid")
     return value
 
 
