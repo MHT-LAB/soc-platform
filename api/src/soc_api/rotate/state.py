@@ -21,6 +21,7 @@ MAX_STATE_BYTES = 256 * 1024
 OUTCOMES = ("recorded", "rotated", "failed")
 APPROVAL_MAX_AGE = timedelta(minutes=30)
 HASH_RE = re.compile(r"[0-9a-f]{12}")
+VENDOR_ID_RE = re.compile(r"[A-Za-z0-9._-]{8,128}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -36,6 +37,8 @@ class KeyState:
     revoke_pending: bool = False  # the new key works but the old one is still live
     due_override: date | None = None  # when the tracker's date differs from last + period
     updated: str = ""
+    vendor_key_id: str = ""  # the vendor's id for the key now in use (an identifier, not a value)
+    old_key_id: str = ""  # the key that must still be revoked when revoke_pending is set
 
 
 @dataclass
@@ -88,12 +91,18 @@ def from_json(doc: Any) -> State:
         if outcome not in OUTCOMES or not isinstance(pending, bool):
             raise StateError("a key entry has a bad outcome or flag")
         override = item.get("due_override")
+        vendor_id, old_id = item.get("vendor_key_id", ""), item.get("old_key_id", "")
+        for ident in (vendor_id, old_id):
+            if not isinstance(ident, str) or (ident and not VENDOR_ID_RE.fullmatch(ident)):
+                raise StateError("a vendor key id is malformed")
         keys[key_id] = KeyState(
             last_rotated=_parse_day(item.get("last_rotated")),
             outcome=outcome,
             revoke_pending=pending,
             due_override=_parse_day(override) if override is not None else None,
             updated=str(item.get("updated", ""))[:20],
+            vendor_key_id=vendor_id,
+            old_key_id=old_id,
         )
     approval = None
     raw = doc.get("approval")
@@ -119,6 +128,8 @@ def to_json(state: State) -> dict[str, Any]:
                 "outcome": k.outcome,
                 "revoke_pending": k.revoke_pending,
                 **({"due_override": k.due_override.isoformat()} if k.due_override else {}),
+                **({"vendor_key_id": k.vendor_key_id} if k.vendor_key_id else {}),
+                **({"old_key_id": k.old_key_id} if k.old_key_id else {}),
                 "updated": k.updated,
             }
             for key_id, k in sorted(state.keys.items())
@@ -153,6 +164,11 @@ def write_json_atomic(path: Path, doc: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
+        if os.geteuid() == 0:
+            # The plan container reads these as its own user: a file written by root (the
+            # apply runs on the host) keeps the folder's owner instead of becoming root-only.
+            folder = path.parent.stat()
+            os.fchown(fd, folder.st_uid, folder.st_gid)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(doc, handle, indent=2, sort_keys=True)
             handle.write("\n")

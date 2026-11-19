@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
-# Plan and record key rotations. Run it as root on the host. This build changes no key anywhere.
+# Plan, record and apply key rotations. Run it as root on the host.
 #
 #   rotate.sh                     the plan, then a typed yes to approve it
 #   rotate.sh --plan [--quiet]    the plan only, nothing asked (the daily timer runs this)
 #   rotate.sh --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD]
 #                                 a key was rotated by hand: write it down (typed yes)
+#   rotate.sh --preflight         the read calls of an apply (logins, the vendor's key list,
+#                                 the stored value's name); changes nothing
+#   rotate.sh --apply <plan-hash> rotate the automatic keys of the plan that was approved
+#
+# The first three only plan and record: they run in a container with no network. --preflight
+# and --apply run as standard-library Python on this host (they must rewrite a consumer's env
+# file, recreate its service and run its check, which a hardened container cannot do without
+# the Docker socket). They read their rights (the vendor key that makes keys, the login to the
+# secrets manager) from STANDARD INPUT ONLY: `NAME=value` lines, then a blank line, piped in
+# from the operator's own machine. This script never reads stdin (every command but the last
+# gets /dev/null), never puts a right in the environment or on a command line, and the Python
+# it starts has an empty environment.
 #
 # 1. Bring the key register clone (default /opt/key-register) up to origin/main (fast-forward
 #    only, over its own read-only deploy key), then require: a clean tree, a head commit exactly
@@ -12,9 +24,9 @@
 #    Anything else is refused before anything is run.
 # 2. Check the host has been deployed (env/image.env). The service needs no settings file: it
 #    holds no key, has no network and cannot reach a vendor.
-# 3. Run the one-shot `rotate` service (python -m soc_api.rotate). deploy.sh never starts it;
-#    only this script does.
-# 4. Append the service's one-line record to rotate.log and print it, for the vault Build Log.
+# 3. Run the one-shot `rotate` service (python -m soc_api.rotate), or for --preflight and
+#    --apply the same module on the host. deploy.sh never starts it; only this script does.
+# 4. Append the record lines to rotate.log and print them, for the vault Build Log.
 #    The exit code is the service's: 0 done or nothing due, 1 could not write its files,
 #    2 refused before changing anything, 3 not confirmed, 4 (plan only) something is overdue,
 #    has no record, or has an old key still live.
@@ -35,6 +47,10 @@ if [[ "$EUID" -ne 0 && -z "${SOC_TEST_BIN:-}" ]]; then
   echo "FAILED: run as root" >&2
   exit 1
 fi
+# Standard input may carry the rights (--preflight, --apply). Save it on descriptor 3 and give
+# every command in between /dev/null instead, so nothing (git, ssh, gpg, a hook) can read it.
+# Only the final run below is handed descriptor 3 back, as its stdin.
+exec 3<&0 0</dev/null
 # Don't depend on how the shell was opened (pct enter gives a minimal PATH).
 export PATH="${SOC_TEST_BIN:+$SOC_TEST_BIN:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Never let the shell choose profiles or the commit: both come from this script.
@@ -48,7 +64,7 @@ OUT="$STATE/rotate"
 LOG="$STATE/rotate.log"
 
 usage() {
-  echo "usage: rotate.sh [--plan [--quiet] | --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD]]" >&2
+  echo "usage: rotate.sh [--plan [--quiet] | --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD] | --preflight | --apply <plan-hash>]" >&2
   exit 2
 }
 
@@ -57,8 +73,10 @@ usage() {
 # command line.
 ID_RE='^[a-z0-9][a-z0-9-]{1,48}$'
 DAY_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+HASH_RE='^[0-9a-f]{12}$'
 ARGS=()
 RUN_FLAGS=(--rm)
+HOST_MODE=""
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --plan)
@@ -67,6 +85,16 @@ if [[ $# -gt 0 ]]; then
       if [[ "${1:-}" == "--quiet" ]]; then ARGS+=(--quiet); shift; fi
       [[ $# -eq 0 ]] || usage
       RUN_FLAGS+=(-T) # the daily timer has no terminal
+      ;;
+    --preflight)
+      [[ $# -eq 1 ]] || usage
+      ARGS+=(--preflight)
+      HOST_MODE=1
+      ;;
+    --apply)
+      [[ $# -eq 2 && "$2" =~ $HASH_RE ]] || usage
+      ARGS+=(--apply "$2")
+      HOST_MODE=1
       ;;
     --record)
       shift
@@ -129,19 +157,49 @@ install -d -m 700 "$OUT"
 rm -f "$OUT/record.txt"
 export SOC_ROTATE_COMMIT="$COMMIT" SOC_KEYS_SRC="$REPO"
 set +e
-"$HERE/soc-compose.sh" --profile rotate run "${RUN_FLAGS[@]}" rotate ${ARGS[@]+"${ARGS[@]}"}
-rc=$?
+if [[ -n "$HOST_MODE" ]]; then
+  SRC="$HERE/../api/src"
+  [[ -f "$SRC/soc_api/rotate/cli.py" ]] || die "$SRC/soc_api/rotate is missing"
+  # The code about to hold the rights, as root, with the network, must be the reviewed code:
+  # this checkout clean (deploy.sh keeps it at origin/main) and its head commit signed.
+  PLATFORM="$(cd "$HERE/.." && pwd)"
+  if [[ -n "${SOC_TEST_BIN:-}" ]]; then
+    log "test mode: the soc-platform checkout's signature is not checked"
+  else
+    platform_state="$(git -C "$PLATFORM" status --porcelain)" \
+      || die "could not read the git status of $PLATFORM"
+    [[ -z "$platform_state" ]] \
+      || die "$PLATFORM has uncommitted or untracked files; the code that holds the rights must be the reviewed code"
+    PSIG="$(git -C "$PLATFORM" log -1 --format=%G? HEAD)" \
+      || die "could not read the signature status of $PLATFORM"
+    [[ "$PSIG" == G ]] \
+      || die "the soc-platform checkout's head commit signature does not verify (git status '$PSIG')"
+  fi
+  command -v python3 >/dev/null || die "python3 is needed on the host for --preflight and --apply"
+  # An empty environment on purpose, and -I so no PYTHON* variable or stray folder is read.
+  # Standard input is the saved original (descriptor 3): it carries the rights.
+  env -i PATH="$PATH" HOME="${HOME:-/root}" SOC_STATE_DIR="$STATE" \
+    SOC_ROTATE_COMMIT="$COMMIT" SOC_ROTATE_KEYS_DIR="$REPO/keys" SOC_ROTATE_STATE="$OUT" \
+    SOC_ROTATE_COMPOSE="$HERE/soc-compose.sh" \
+    python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from soc_api.rotate.cli import main; raise SystemExit(main(sys.argv[2:]))' \
+    "$SRC" ${ARGS[@]+"${ARGS[@]}"} <&3 3<&-
+  rc=$?
+else
+  "$HERE/soc-compose.sh" --profile rotate run "${RUN_FLAGS[@]}" rotate ${ARGS[@]+"${ARGS[@]}"} <&3 3<&-
+  rc=$?
+fi
 set -e
 
 # --- 4. the record ------------------------------------------------------------------------------
 if [[ -s "$OUT/record.txt" ]]; then
-  # Written inside the container: keep printable characters only, so nothing in it can
-  # drive root's terminal (escape sequences) or forge extra lines in the log.
-  record="$(head -c 1000 "$OUT/record.txt" | head -n 1 | LC_ALL=C tr -cd '[:print:]')"
-  printf '%s\n' "$record" >> "$LOG"
+  # Written by the service: keep printable characters only, so nothing in it can drive root's
+  # terminal (escape sequences) or forge extra lines in the log. An apply writes one line per
+  # key, so up to 20 lines are kept.
+  records="$(head -c 4000 "$OUT/record.txt" | head -n 20 | LC_ALL=C tr -cd '[:print:]\n')"
+  printf '%s\n' "$records" >> "$LOG"
   echo
   echo "Record for the vault Build Log:"
-  printf '  %s\n' "$record"
+  printf '%s\n' "$records" | sed 's/^/  /'
 else
   log "no record was written by the rotate service (exit code $rc)"
 fi

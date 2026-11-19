@@ -36,6 +36,31 @@ def key_text(
         lines.append(extra)
     if method == "manual":
         lines += ["", "[manual]", 'consumers = "somewhere"', f'check = "{check}"', 'how = "steps"']
+    if method == "automatic":
+        perms = "[]" if ready is False else '["sensor.list", "dr.list"]'
+        lines += [
+            "",
+            "[scope]",
+            f"perms = {perms}",
+            'forbidden_perms = ["output.*", "apikey.*"]',
+            'org_store_name = "SOC_LC_OID"',
+            "",
+            "[store]",
+            'kind = "secrets_manager"',
+            'project = "SOC-rotated"',
+            'path = "/SOC"',
+            'names = ["AUTO_KEY_VALUE"]',
+            "",
+            "[[consumer]]",
+            'kind = "env_file"',
+            'host = "ct110"',
+            'env_file = "env/auto.env"',
+            'restart = ["posture"]',
+            'check = "posture_check"',
+            "",
+            "[consumer.env_map]",
+            'AUTO_KEY_VALUE = "AUTO_KEY"',
+        ]
     return "\n".join(lines) + "\n"
 
 

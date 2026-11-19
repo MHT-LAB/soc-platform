@@ -137,3 +137,103 @@ def test_text_from_a_file_is_cut_to_printable_ascii() -> None:
         },
     )
     assert problems == [] and key is not None and "\x1b" not in key.name
+
+
+# ---- the apply details of an automatic key ----
+
+
+def parsed(tmp_path: Path, text: str, sub: str = "apply") -> Register:
+    return load(tmp_path, {"auto-key": text}, sub)
+
+
+def test_a_supported_automatic_key_carries_everything_apply_needs(tmp_path: Path) -> None:
+    reg = parsed(tmp_path, key_text("auto-key", method="automatic"))
+    assert reg.problems == []
+    spec = reg.keys["auto-key"].apply
+    assert spec is not None and reg.keys["auto-key"].apply_note == ""
+    assert (spec.console_name, spec.perms, spec.secret_name) == (
+        "x",
+        ("sensor.list", "dr.list"),
+        "AUTO_KEY_VALUE",
+    )
+    assert (spec.env_file, spec.env_var, spec.restart) == ("env/auto.env", "AUTO_KEY", ("posture",))
+    assert (spec.project, spec.path, spec.org_name, spec.grace_minutes) == (
+        "SOC-rotated",
+        "/SOC",
+        "SOC_LC_OID",
+        10,
+    )
+    assert spec.check == "posture_check"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "fragment"),
+    [
+        (
+            'forbidden_perms = ["output.*", "apikey.*"]',
+            'forbidden_perms = ["apikey.*"]',
+            "must refuse output",
+        ),
+        (
+            'forbidden_perms = ["output.*", "apikey.*"]',
+            'forbidden_perms = ["output.*"]',
+            "must refuse output",
+        ),
+        (
+            'perms = ["sensor.list", "dr.list"]',
+            'perms = ["sensor.list", "output.list"]',
+            "forbidden list refuses",
+        ),
+        (
+            'perms = ["sensor.list", "dr.list"]',
+            'perms = ["sensor.list", "apikey.ctrl"]',
+            "forbidden list refuses",
+        ),
+        ('perms = ["sensor.list", "dr.list"]', 'perms = ["Not A Perm"]', "not a permission"),
+        ('perms = ["sensor.list", "dr.list"]', "perms = []", "empty for a key marked ready"),
+    ],
+)
+def test_an_unsafe_permission_list_refuses_the_whole_register(
+    tmp_path: Path, old: str, new: str, fragment: str
+) -> None:
+    reg = parsed(tmp_path, key_text("auto-key", method="automatic").replace(old, new))
+    assert any(fragment in p for p in reg.problems), reg.problems
+    assert reg.keys == {}
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "why"),
+    [
+        ('check = "posture_check"', 'check = "reconcile_check"', "no such health check"),
+        ('project = "SOC-rotated"', 'project = "SOC"', "not in project SOC-rotated"),
+        ('kind = "secrets_manager"', 'kind = "nordpass"', "not in the secrets manager"),
+        (
+            'names = ["AUTO_KEY_VALUE"]',
+            'names = ["AUTO_KEY_VALUE", "OTHER_VALUE"]',
+            "one stored value",
+        ),
+        ('kind = "env_file"', 'kind = "github_actions_secret"', "env file on the host only"),
+        ('env_file = "env/auto.env"', 'env_file = "../x"', "malformed"),
+        ('org_store_name = "SOC_LC_OID"\n', "", "no org_store_name"),
+    ],
+)
+def test_what_this_build_cannot_do_yet_is_skipped_with_a_reason_not_refused(
+    tmp_path: Path, old: str, new: str, why: str
+) -> None:
+    reg = parsed(tmp_path, key_text("auto-key", method="automatic").replace(old, new))
+    assert reg.problems == []
+    key = reg.keys["auto-key"]
+    assert key.apply is None and why in key.apply_note
+
+
+def test_a_key_that_is_not_ready_or_not_a_detection_vendor_key_has_no_apply_details(
+    tmp_path: Path,
+) -> None:
+    reg = parsed(tmp_path, key_text("auto-key", method="automatic", ready=False))
+    assert reg.problems == [] and reg.keys["auto-key"].apply is None
+    assert reg.keys["auto-key"].apply_note == "not ready"
+    other = key_text("auto-key", method="automatic").replace(
+        'vendor = "limacharlie"', 'vendor = "self"'
+    )
+    reg2 = parsed(tmp_path, other, "other")
+    assert reg2.keys["auto-key"].apply is None
