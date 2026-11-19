@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from soc_api.rotate import net
-from soc_api.rotate.net import RotateError
+from soc_api.rotate.net import RotateError, described
 from soc_api.rotate.rights import Secret
 
 API_URL = "https://api.limacharlie.io/v1"
@@ -45,20 +45,39 @@ class NewKey:
     value: Secret
 
 
+def _first(entry: dict[str, Any], *names: str) -> Any:
+    return next((entry[n] for n in names if n in entry), None)
+
+
 def parse_keys(doc: Any) -> dict[str, VendorKey]:
-    """`[C]` A table of key id to {name, permissions}. Anything else is refused."""
-    if isinstance(doc, dict) and isinstance(doc.get("keys"), dict):
-        doc = doc["keys"]
+    """`[C]` The key list, in the shapes the vendor's own SDK accepts: wrapped in `api_keys`
+    (or `keys`) or not, a table keyed by the key's hash or a list of entries that carry it;
+    the name as `key_name` or `name`; the permissions as `priv`, `perms` or `permissions`
+    (a list, or one comma-separated string). Anything else is refused and described."""
+    original = doc
+    if isinstance(doc, dict):
+        for wrapper in ("api_keys", "keys"):
+            if isinstance(doc.get(wrapper), dict | list):
+                doc = doc[wrapper]
+                break
+    if isinstance(doc, list):
+        table: dict[str, Any] = {}
+        for entry in doc:
+            key_id = _first(entry, "key_hash", "hash") if isinstance(entry, dict) else None
+            if not isinstance(key_id, str):
+                raise RotateError("bad_shape", described(original))
+            table[key_id] = entry
+        doc = table
     if not isinstance(doc, dict) or len(doc) > MAX_KEYS:
-        raise RotateError("bad_shape")
+        raise RotateError("bad_shape", described(original))
     out: dict[str, VendorKey] = {}
     for key_id, entry in doc.items():
         if not (
             isinstance(key_id, str) and KEY_ID_RE.fullmatch(key_id) and isinstance(entry, dict)
         ):
-            raise RotateError("bad_shape")
-        name = entry.get("key_name", entry.get("name"))
-        perms = entry.get("priv", entry.get("perms", entry.get("permissions")))
+            raise RotateError("bad_shape", described(original))
+        name = _first(entry, "key_name", "name")
+        perms = _first(entry, "priv", "perms", "permissions")
         if isinstance(perms, str):
             perms = [p for p in perms.split(",") if p]
         if not (
@@ -66,19 +85,20 @@ def parse_keys(doc: Any) -> dict[str, VendorKey]:
             and isinstance(perms, list)
             and all(isinstance(p, str) for p in perms)
         ):
-            raise RotateError("bad_shape")
+            raise RotateError("bad_shape", described(original))
         out[key_id] = VendorKey(key_id, name[:128], frozenset(perms))
     return out
 
 
 def parse_new_key(doc: Any) -> NewKey:
-    """`[C]` The reply to a create: the new key's value and its id."""
-    value = doc.get("api_key") if isinstance(doc, dict) else None
-    key_id = doc.get("key_hash") if isinstance(doc, dict) else None
+    """`[C]` The reply to a create: the new key's value (`api_key`, else `key`) and its id
+    (`key_hash`, else `hash`). Anything else is refused and described (names, never values)."""
+    value = _first(doc, "api_key", "key") if isinstance(doc, dict) else None
+    key_id = _first(doc, "key_hash", "hash") if isinstance(doc, dict) else None
     if not (isinstance(value, str) and KEY_VALUE_RE.fullmatch(value)):
-        raise RotateError("bad_shape")
+        raise RotateError("bad_shape", described(doc))
     if not (isinstance(key_id, str) and KEY_ID_RE.fullmatch(key_id)):
-        raise RotateError("bad_shape")
+        raise RotateError("bad_shape", described(doc))
     return NewKey(key_id, Secret(value))
 
 
@@ -147,7 +167,7 @@ def _step(name: str) -> Iterator[None]:
     try:
         yield
     except RotateError as exc:
-        raise RotateError(f"{name}_{exc.code}") from None
+        raise RotateError(f"{name}_{exc.code}", exc.detail) from None
 
 
 def _json(raw: bytes) -> Any:

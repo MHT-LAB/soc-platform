@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from soc_api.rotate import net
-from soc_api.rotate.net import RotateError
+from soc_api.rotate.net import RotateError, described
 from soc_api.rotate.rights import Rights, Secret
 
 # The service address comes with the rights (SECRETS_URL), not from this file: a host name
@@ -33,7 +33,7 @@ def _step(name: str) -> Iterator[None]:
     try:
         yield
     except RotateError as exc:
-        raise RotateError(f"{name}_{exc.code}") from None
+        raise RotateError(f"{name}_{exc.code}", exc.detail) from None
 
 
 def _json(raw: bytes) -> Any:
@@ -110,7 +110,7 @@ class SecretsManager:
             inner = doc.get("secret") if isinstance(doc, dict) else None
             value = inner.get("secretValue") if isinstance(inner, dict) else None
             if not (isinstance(value, str) and 0 < len(value) <= MAX_VALUE):
-                raise RotateError("bad_shape")
+                raise RotateError("bad_shape", described(doc))
             return Secret(value)
 
     def set(self, path: str, name: str, value: Secret) -> None:

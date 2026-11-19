@@ -180,7 +180,7 @@ def _oid(session: Session, spec: ApplySpec) -> str:
     try:
         value = session.deps.store.get(spec.path, spec.org_name).reveal()
     except RotateError as exc:
-        raise RotateError(f"org_id_{exc.code}") from None
+        raise RotateError(f"org_id_{exc.code}", exc.detail) from None
     if not OID_RE.fullmatch(value):
         raise RotateError("org_id_bad_oid")
     return value
@@ -285,6 +285,8 @@ def _rotate(session: Session, row: Row, spec: ApplySpec, oid: str) -> bool:
             raise RotateError("check_failed_after_grace")
     except BaseException as exc:
         code = exc.code if isinstance(exc, RotateError) else "interrupted"
+        if isinstance(exc, RotateError) and exc.detail:
+            session.say(f"  {row.key.id}: the reply looked like {exc.detail}")
         undone = _rollback(
             session,
             vendor,
@@ -442,6 +444,8 @@ def _apply_rows(session: Session, plan: Plan, state_dir: Path) -> int:
             if ok and row.status in ACTIONABLE:
                 ok = _rotate(session, row, spec, oid)
         except RotateError as exc:
+            if exc.detail:
+                session.say(f"  {row.key.id}: the reply looked like {exc.detail}")
             ok = _fail(session, row, f"failed-{exc.code}")
         if not _save(state_dir, session.state, session.say):
             return FAILED
@@ -500,6 +504,8 @@ def run_preflight(
             )  # present and readable; the value is dropped
         except RotateError as exc:
             old, why = None, exc.code
+            if exc.detail:
+                say(f"  {row.key.id}: the reply looked like {exc.detail} (names and types only)")
         if old is None:
             bad += 1
             session.note("preflight", f"problem-{why}", id=row.key.id)
