@@ -9,7 +9,7 @@ import threading
 import urllib.parse
 from collections import deque
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -106,7 +106,7 @@ class FakeBackend:
 
 
 def deploy(
-    cfg: rd.Config, backend: FakeBackend, *, yes: bool = True
+    cfg: rd.Config, backend: FakeBackend, *, yes: bool = True, at: datetime = NOW
 ) -> tuple[int, list[str], list[str]]:
     lines: list[str] = []
     asked: list[str] = []
@@ -115,7 +115,7 @@ def deploy(
         asked.append(prompt)
         return yes
 
-    code = rd.run(cfg, backend, confirm, lines.append, lambda: NOW)
+    code = rd.run(cfg, backend, confirm, lines.append, lambda: at)
     return code, lines, asked
 
 
@@ -196,8 +196,14 @@ def test_a_first_deploy_adds_every_rule_stamps_it_and_writes_the_manifest(tmp_pa
     manifest = backend.live["soc-manifest"]
     assert manifest.enabled is False
     comment = json.loads(manifest.usr_mtd["comment"].removeprefix("soc-manifest "))
-    assert comment["names"] == ["T - One", "T - Two"]
-    assert comment["mac"] == stamp.manifest_mac(STAMP_KEY, ["T - One", "T - Two"])
+    stamps = {"T - One": one.tags[0], "T - Two": two.tags[0]}
+    assert comment["v"] == 2 and comment["rules"] == stamps
+    assert comment["at"] == int(NOW.timestamp())
+    assert comment["mac"] == stamp.manifest_mac(STAMP_KEY, stamps, int(NOW.timestamp()))
+    assert stamp.parse_manifest_comment(STAMP_KEY, manifest.usr_mtd["comment"]) == (
+        stamps,
+        int(NOW.timestamp()),
+    )
     assert any("added=2" in x and "result=applied" in x for x in lines)
 
 
@@ -422,6 +428,51 @@ def test_a_changed_rule_list_rewrites_the_manifest_and_only_then(tmp_path: Path)
     deploy(cfg, backend)
     second = backend.live["soc-manifest"].usr_mtd["comment"]
     assert first != second and "T - Two" in second
+
+
+def test_a_later_run_with_nothing_changed_keeps_the_manifest_and_its_time(tmp_path: Path) -> None:
+    write_rules(tmp_path, org_rule("T - One"))
+    cfg = make_cfg(tmp_path)
+    backend = FakeBackend()
+    deploy(cfg, backend)
+    first = backend.live["soc-manifest"].usr_mtd["comment"]
+    calls = list(backend.calls)
+    code, lines, asked = deploy(cfg, backend, at=NOW + timedelta(days=3))
+    assert code == rd.OK and asked == [] and backend.calls == calls
+    assert backend.live["soc-manifest"].usr_mtd["comment"] == first
+    assert any(x.startswith("Nothing to do") for x in lines)
+
+
+def test_a_changed_rule_body_gets_a_new_stamp_in_a_newer_manifest(tmp_path: Path) -> None:
+    write_rules(tmp_path, org_rule("T - One"))
+    cfg = make_cfg(tmp_path)
+    backend = FakeBackend()
+    deploy(cfg, backend)
+    old_tag = backend.live["T - One"].tags[0]
+    changed = org_rule("T - One")
+    changed["description"] = "edited"
+    changed["respond"] = [{"action": "report", "name": "T_One_v2", "priority": 2}]
+    write_rules(tmp_path, changed)
+    later = NOW + timedelta(hours=1)
+    deploy(cfg, backend, at=later)
+    new_tag = backend.live["T - One"].tags[0]
+    parsed = stamp.parse_manifest_comment(
+        STAMP_KEY, backend.live["soc-manifest"].usr_mtd["comment"]
+    )
+    assert new_tag != old_tag
+    assert parsed == ({"T - One": new_tag}, int(later.timestamp()))
+
+
+def test_a_manifest_of_the_old_format_is_replaced(tmp_path: Path) -> None:
+    write_rules(tmp_path, org_rule("T - One"))
+    cfg = make_cfg(tmp_path)
+    backend = FakeBackend()
+    deploy(cfg, backend)
+    m = backend.live["soc-manifest"]
+    m.usr_mtd["comment"] = 'soc-manifest {"v":1,"names":["T - One"],"mac":"000000000000"}'
+    code, _, asked = deploy(cfg, backend)
+    assert code == rd.OK and asked
+    assert stamp.parse_manifest_comment(STAMP_KEY, backend.live["soc-manifest"].usr_mtd["comment"])
 
 
 def test_a_manifest_deleted_or_edited_live_is_written_again(tmp_path: Path) -> None:

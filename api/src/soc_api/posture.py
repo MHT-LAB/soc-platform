@@ -99,7 +99,8 @@ class Drift:
     """Checks the general namespace against the stamps the deploy wrote.
 
     Fed one rule at a time while the listing is parsed (`feed`); it keeps a verdict per rule
-    name and, for the manifest, the list of managed names it vouches for. Rule bodies, tags
+    name and, for the manifest, the managed names and the stamp it vouches for, and its deploy
+    time. Rule bodies, tags
     and comments are used on the spot and never kept. With no stamp key, `Drift` is not
     built and nothing is stored (drift unchecked, never "no drift")."""
 
@@ -108,7 +109,8 @@ class Drift:
         self._prefixes = prefixes
         self._pending: list[tuple[str, Any, Any, bool, Any]] = []
         self.manifest: str = MANIFEST_NONE
-        self._listed: frozenset[str] = frozenset()
+        self._listed: dict[str, str] = {}
+        self._at: int | None = None
         self.verdicts: dict[str, str] = {}
         self._seen: set[str] = set()
 
@@ -121,10 +123,9 @@ class Drift:
         detect, respond = data.get("detect"), data.get("respond")
         tags = meta.get("tags")
         if name == MANIFEST_NAME:
-            self.manifest, listed = check_manifest(
+            self.manifest, self._listed, self._at = check_manifest(
                 self._key, detect, respond, enabled, tags, meta.get("comment")
             )
-            self._listed = frozenset(listed)
             return
         # The verdict needs the manifest's list, which may come later in the listing.
         self._pending.append((name, detect, respond, enabled, tags))
@@ -152,6 +153,9 @@ class Drift:
             "manifest": self.manifest,
             "missing_count": len(missing),
             "missing": missing[:MAX_MISSING],
+            # The deploy time a good manifest carries; the database refuses one older than the
+            # newest it has seen (a whole older deploy put back).
+            "manifest_at": self._at if self.manifest == MANIFEST_OK else None,
         }
         return self.verdicts, doc
 

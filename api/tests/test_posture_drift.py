@@ -43,14 +43,28 @@ def deployed(
     }
 
 
-def manifest_rule(names: list[str], *, key: str = STAMP_KEY) -> dict[str, Any]:
-    body = {"v": 1, "names": sorted(names), "mac": st.manifest_mac(key, names)}
+AT = 1795190000  # the deploy time the test manifests carry
+
+
+def manifest_rule(
+    names: list[str],
+    *,
+    key: str = STAMP_KEY,
+    at: int = AT,
+    stamps: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """The manifest as the deploy writes it: each name with the stamp of the body it deployed."""
+    listed = (
+        stamps
+        if stamps is not None
+        else {n: st.stamp_tag(STAMP_KEY, DETECT, RESPOND, True) for n in names}
+    )
     return {
         "data": {"detect": st.MANIFEST_DETECT, "respond": st.MANIFEST_RESPOND},
         "usr_mtd": {
             "enabled": False,
             "tags": [st.stamp_tag(key, st.MANIFEST_DETECT, st.MANIFEST_RESPOND, False)],
-            "comment": "soc-manifest " + json.dumps(body, separators=(",", ":")),
+            "comment": st.manifest_comment(key, listed, at),
         },
     }
 
@@ -133,7 +147,7 @@ def test_any_change_to_the_body_the_flag_or_the_stamp_is_changed(what: str) -> N
 def test_a_rule_that_lost_its_stamp_is_changed_only_if_a_valid_manifest_lists_it() -> None:
     args = (STAMP_KEY, PREFIXES, "Plain", DETECT, RESPOND, True, ["other"])
     assert st.classify_rule(*args) is None
-    assert st.classify_rule(*args, managed_names=frozenset({"Plain"})) == "changed"
+    assert st.classify_rule(*args, listed={"Plain": "git:000000000000"}) == "changed"
 
 
 def test_a_hand_made_rule_with_a_managed_prefix_is_unmanaged_and_other_rules_are_not_ours() -> None:
@@ -153,18 +167,36 @@ def test_a_manifest_is_good_only_for_the_key_that_made_it_and_with_its_own_body_
     good = manifest_rule(["a", "b"])
     meta = good["usr_mtd"]
     args = (good["data"]["detect"], good["data"]["respond"], False, meta["tags"], meta["comment"])
-    assert st.check_manifest(STAMP_KEY, *args) == ("ok", ["a", "b"])
-    assert st.check_manifest(OTHER_KEY, *args) == ("bad", [])
+    tag = st.stamp_tag(STAMP_KEY, DETECT, RESPOND, True)
+    assert st.check_manifest(STAMP_KEY, *args) == ("ok", {"a": tag, "b": tag}, AT)
+    assert st.check_manifest(OTHER_KEY, *args) == ("bad", {}, None)
     for broken in (
         (st.MANIFEST_DETECT | {"value": "x"}, args[1], False, args[3], args[4]),
         (args[0], [], False, args[3], args[4]),
         (args[0], args[1], True, args[3], args[4]),
         (args[0], args[1], False, [], args[4]),
         (args[0], args[1], False, args[3], args[4].replace('"a"', '"z"')),
+        (args[0], args[1], False, args[3], args[4].replace(f'"at":{AT}', f'"at":{AT + 1}')),
+        (args[0], args[1], False, args[3], args[4].replace(tag, "git:000000000000", 1)),
+        (args[0], args[1], False, args[3], args[4].replace('"v":2', '"v":1')),
         (args[0], args[1], False, args[3], "soc-manifest not-json"),
         (args[0], args[1], False, args[3], None),
     ):
-        assert st.check_manifest(STAMP_KEY, *broken) == ("bad", []), broken
+        assert st.check_manifest(STAMP_KEY, *broken) == ("bad", {}, None), broken
+
+
+@pytest.mark.parametrize("at", [0, -5, st.MAX_AT + 1])
+def test_a_manifest_time_out_of_range_is_not_accepted_even_with_a_good_check(at: int) -> None:
+    tag = st.stamp_tag(STAMP_KEY, DETECT, RESPOND, True)
+    body = {
+        "v": 2,
+        "rules": {"a": tag},
+        "at": at,
+        "mac": st.manifest_mac(STAMP_KEY, {"a": tag}, at),
+    }
+    comment = st.MANIFEST_COMMENT_PREFIX + json.dumps(body, separators=(",", ":"))
+    assert st.parse_manifest_comment(STAMP_KEY, comment) is None
+    assert st.parse_manifest_comment(STAMP_KEY, st.manifest_comment(STAMP_KEY, {"a": tag}, AT))
 
 
 # ---- the collector ----
@@ -173,7 +205,7 @@ def test_a_manifest_is_good_only_for_the_key_that_made_it_and_with_its_own_body_
 def test_a_deployed_org_has_no_drift(lc: FakeLc) -> None:
     doc, counts = run(lc)
     assert verdicts(doc) == {"T - One": "ok", "T - Two": "ok", "soc-manifest": None}
-    assert doc["drift"] == {"manifest": "ok", "missing_count": 0, "missing": []}
+    assert doc["drift"] == {"manifest": "ok", "missing_count": 0, "missing": [], "manifest_at": AT}
     assert counts.drifted == 0
     # Only the general namespace carries a verdict.
     assert {r["drift"] for r in doc["rules"] if r["namespace"] != "general"} == {None}
@@ -225,7 +257,12 @@ def test_a_rule_made_by_hand_under_a_managed_prefix_is_unmanaged(lc: FakeLc) -> 
 def test_a_rule_deleted_in_the_web_app_is_reported_missing(lc: FakeLc) -> None:
     del lc.rules["dr-general"]["T - Two"]
     doc, counts = run(lc)
-    assert doc["drift"] == {"manifest": "ok", "missing_count": 1, "missing": ["T - Two"]}
+    assert doc["drift"] == {
+        "manifest": "ok",
+        "missing_count": 1,
+        "missing": ["T - Two"],
+        "manifest_at": AT,
+    }
     assert counts.drifted == 1
 
 
@@ -248,6 +285,26 @@ def test_a_forged_manifest_is_bad_and_cannot_hide_a_deleted_rule(lc: FakeLc) -> 
     del lc.rules["dr-general"]["T - Two"]
     doc, counts = run(lc)
     assert doc["drift"]["manifest"] == "bad" and counts.drifted == 1
+
+
+def test_a_rule_put_back_to_an_older_deployed_version_is_changed(lc: FakeLc) -> None:
+    # The live rule is an older deployed body with that body's own valid stamp; the manifest
+    # of the current deploy lists the newer body's stamp for the name.
+    newer = dict(DETECT, value="newer.exe")
+    stamps = {
+        "T - One": st.stamp_tag(STAMP_KEY, newer, RESPOND, True),
+        "T - Two": st.stamp_tag(STAMP_KEY, DETECT, RESPOND, True),
+    }
+    lc.rules["dr-general"][st.MANIFEST_NAME] = manifest_rule([], stamps=stamps)
+    doc, counts = run(lc)
+    assert verdicts(doc)["T - One"] == "changed" and verdicts(doc)["T - Two"] == "ok"
+    assert counts.drifted == 1
+
+
+def test_a_bad_manifest_sends_no_deploy_time(lc: FakeLc) -> None:
+    lc.rules["dr-general"][st.MANIFEST_NAME]["usr_mtd"]["enabled"] = True
+    doc, _ = run(lc)
+    assert doc["drift"]["manifest"] == "bad" and doc["drift"]["manifest_at"] is None
 
 
 def test_a_good_stamp_on_a_name_the_manifest_does_not_list_is_unmanaged(lc: FakeLc) -> None:
@@ -464,6 +521,23 @@ def test_the_swaps_can_be_undone_exactly() -> None:
     assert back == source
 
 
+def test_every_text_swap_of_0019_matches_the_definitions_0018_left_exactly_once() -> None:
+    m18, m19 = _module("0018"), _module("0019")
+    record = (next(VERSIONS.glob("0011_*.py"))).read_text()
+    for old, new in m18.RECORD_SWAPS:
+        record = record.replace(old, new)
+    for old, _ in m19.RECORD_SWAPS:
+        assert record.count(old) == 1, old
+    overview = _module("0012").OPS_OVERVIEW.replace(_module("0016").ANCHOR, _module("0016").ADDED)
+    for old, new in m18.OVERVIEW_SWAPS:
+        overview = overview.replace(old, new)
+    health = (next(VERSIONS.glob("0018_*.py"))).read_text()
+    for old, _ in m19.COUNT_SWAPS:
+        assert overview.count(old) == 1, old
+        assert m18.WRONG_COUNT.count(old) == 1, old
+        assert health.count("rules_drift_health") >= 1
+
+
 # ---- the database (skipped without Postgres) ----
 
 
@@ -568,6 +642,58 @@ def test_deleting_the_manifest_and_every_managed_rule_stays_absent_not_none(
 def test_a_first_check_with_nothing_deployed_is_none(fx: Fixture, posture_db: p.PostureDb) -> None:
     posture_db.record(base_doc({"manifest": "none", "missing_count": 0, "missing": []}))
     assert fx.one("SELECT checked, wrong FROM rules_drift_health()") == (True, 0)
+
+
+def manifest_doc(state: str = "ok", at: int | None = AT) -> dict[str, Any]:
+    return {"manifest": state, "missing_count": 0, "missing": [], "manifest_at": at}
+
+
+def test_a_whole_older_deploy_put_back_is_stale_until_a_newer_one(
+    fx: Fixture, posture_db: p.PostureDb
+) -> None:
+    posture_db.record(base_doc(manifest_doc(at=AT), A="ok"))
+    posture_db.record(base_doc(manifest_doc(at=AT + 3600), A="ok"))
+    assert fx.rows("SELECT manifest, manifest_at, manifest_at_max FROM rules_drift") == [
+        ("ok", AT + 3600, AT + 3600)
+    ]
+    for _ in range(2):  # the older manifest, with the rules it listed, put back
+        posture_db.record(base_doc(manifest_doc(at=AT), A="ok"))
+        assert fx.rows("SELECT manifest, manifest_at_max FROM rules_drift") == [
+            ("stale", AT + 3600)
+        ]
+        assert fx.one("SELECT checked, wrong FROM rules_drift_health()") == (True, 1)
+    posture_db.record(base_doc(manifest_doc(at=AT + 7200), A="ok"))
+    assert fx.rows("SELECT manifest, manifest_at_max FROM rules_drift") == [("ok", AT + 7200)]
+    assert fx.one("SELECT checked, wrong FROM rules_drift_health()") == (True, 0)
+
+
+def test_the_same_deploy_seen_again_is_not_stale(fx: Fixture, posture_db: p.PostureDb) -> None:
+    for _ in range(3):
+        posture_db.record(base_doc(manifest_doc(at=AT), A="ok"))
+    assert fx.rows("SELECT manifest FROM rules_drift") == [("ok",)]
+
+
+def test_the_console_counts_and_names_a_stale_manifest(
+    fx: Fixture, posture_db: p.PostureDb
+) -> None:
+    posture_db.record(base_doc(manifest_doc(at=AT + 60), A="ok"))
+    posture_db.record(base_doc(manifest_doc(at=AT), A="ok"))
+    with fx.db.connect("soc_console") as c:
+        row = c.execute("SELECT ops_overview(7, 'all')").fetchone()
+    assert row is not None
+    data = dict(row[0])
+    assert data["health"]["rules_drift"] == 1 and data["rules_drift"]["manifest"] == "stale"
+    block = ov.rules_drift(data)
+    assert block is not None and block["wrong"] == 1 and "put back" in block["manifest_text"]
+
+
+@pytest.mark.parametrize("at", [-1, 1.5, "x", 10**11, True])
+def test_a_bad_manifest_time_is_refused(fx: Fixture, posture_db: p.PostureDb, at: Any) -> None:
+    import psycopg
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        posture_db.record(base_doc(manifest_doc(at=at), A="ok"))
+    assert fx.rows("SELECT * FROM rules_drift") == []
 
 
 def test_an_old_collector_document_without_the_new_fields_still_records(

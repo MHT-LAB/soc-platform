@@ -50,10 +50,14 @@ def stamp_tag(key: str, detect: Any, respond: Any, enabled: bool) -> str:
     return TAG_PREFIX + _mac(key, b"rule", canonical(detect, respond, enabled))
 
 
-def manifest_mac(key: str, names: list[str]) -> str:
-    """12 hex over the sorted list of managed rule names (the manifest's own check)."""
-    payload = json.dumps(sorted(names), separators=(",", ":"), ensure_ascii=False).encode()
-    return _mac(key, b"manifest", payload)
+def manifest_mac(key: str, rules: dict[str, str], at: int) -> str:
+    """12 hex over the managed names with each one's stamp, and the deploy time: the
+    manifest's own check. Binding the stamps catches one rule put back to an older deployed
+    body (its old stamp is still valid for that body); binding the time lets the database
+    refuse a whole older manifest put back with the rules it listed."""
+    pairs = sorted(rules.items())
+    payload = json.dumps([pairs, at], separators=(",", ":"), ensure_ascii=False).encode()
+    return _mac(key, b"manifest2", payload)
 
 
 def stamp_of(tags: Any) -> str | None:
@@ -73,6 +77,8 @@ def has_stamp_tag(tags: Any) -> bool:
 
 # What the collector says about one rule (stored with the inventory) and about the manifest.
 RULE_OK, RULE_CHANGED, RULE_UNMANAGED = "ok", "changed", "unmanaged"
+MANIFEST_VERSION = 2
+MAX_AT = 4102444800  # 2100-01-01: a deploy time beyond this is not one we wrote
 MANIFEST_OK, MANIFEST_BAD, MANIFEST_ABSENT, MANIFEST_NONE = "ok", "bad", "absent", "none"
 MANIFEST_COMMENT_PREFIX = "soc-manifest "
 
@@ -85,13 +91,15 @@ def classify_rule(
     respond: Any,
     enabled: bool,
     tags: Any,
-    managed_names: frozenset[str] = frozenset(),
+    listed: dict[str, str] | None = None,
 ) -> str | None:
     """`ok`, `changed` or `unmanaged` for a rule the deploy manages, None for one it does not.
 
     * a rule that carries a stamp is managed: `ok` when exactly one stamp is present and it is
       the one this body and flag produce, otherwise `changed` (edited, re-tagged, or given a
       second stamp);
+    * a stamped rule is also `changed` when the (verified) manifest lists a different stamp for
+      its name: an older deployed version was put back;
     * a rule without a stamp is `changed` when the (verified) manifest lists it, because its
       stamp was removed; `unmanaged` when its name starts with a managed prefix (made by hand
       where the deploy owns the names); and otherwise not ours.
@@ -102,34 +110,53 @@ def classify_rule(
         except (TypeError, ValueError):
             return RULE_CHANGED
         got = stamp_of(tags)
-        return RULE_OK if got is not None and hmac.compare_digest(got, want) else RULE_CHANGED
-    if name in managed_names:
+        if got is None or not hmac.compare_digest(got, want):
+            return RULE_CHANGED
+        # A valid stamp, but not the one the manifest lists for this name: an older deployed
+        # version of the rule was put back.
+        if listed is not None and name in listed and not hmac.compare_digest(got, listed[name]):
+            return RULE_CHANGED
+        return RULE_OK
+    if listed is not None and name in listed:
         return RULE_CHANGED
     if prefixes and name.startswith(prefixes):
         return RULE_UNMANAGED
     return None
 
 
-def parse_manifest_comment(key: str, comment: Any) -> list[str] | None:
-    """The managed names a manifest comment lists, or None when it is not one this key made."""
+def parse_manifest_comment(key: str, comment: Any) -> tuple[dict[str, str], int] | None:
+    """({managed name: its stamp}, deploy time) of a manifest comment, or None when it is not
+    one this key made."""
     if not isinstance(comment, str) or not comment.startswith(MANIFEST_COMMENT_PREFIX):
         return None
     try:
         body = json.loads(comment[len(MANIFEST_COMMENT_PREFIX) :])
     except ValueError:
         return None
-    if not isinstance(body, dict) or body.get("v") != 1:
+    if not isinstance(body, dict) or body.get("v") != MANIFEST_VERSION:
         return None
-    names, mac = body.get("names"), body.get("mac")
-    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+    rules, at, mac = body.get("rules"), body.get("at"), body.get("mac")
+    if not isinstance(rules, dict) or not all(
+        isinstance(n, str) and isinstance(t, str) and t.startswith(TAG_PREFIX)
+        for n, t in rules.items()
+    ):
+        return None
+    if not isinstance(at, int) or isinstance(at, bool) or not 0 < at <= MAX_AT:
         return None
     if not isinstance(mac, str):
         return None
     try:
-        want = manifest_mac(key, names)
+        want = manifest_mac(key, rules, at)
     except ValueError:
         return None
-    return list(names) if hmac.compare_digest(mac, want) else None
+    return (dict(rules), at) if hmac.compare_digest(mac, want) else None
+
+
+def manifest_comment(key: str, rules: dict[str, str], at: int) -> str:
+    """The manifest rule's comment: what the deploy writes and `parse_manifest_comment` reads."""
+    body = {"v": MANIFEST_VERSION, "rules": dict(sorted(rules.items())), "at": at}
+    body["mac"] = manifest_mac(key, rules, at)
+    return MANIFEST_COMMENT_PREFIX + json.dumps(body, separators=(",", ":"), ensure_ascii=False)
 
 
 def check_manifest(
@@ -139,17 +166,17 @@ def check_manifest(
     enabled: bool,
     tags: Any,
     comment: Any,
-) -> tuple[str, list[str]]:
-    """(`ok` or `bad`, the names it lists). `bad` when the comment is not a valid one for this
-    key, or the rule's own body, flag or stamp is not what the deploy writes (the manifest
-    can never fire, so a manifest that changed was changed by hand)."""
-    names = parse_manifest_comment(key, comment)
+) -> tuple[str, dict[str, str], int | None]:
+    """(`ok` or `bad`, {name: stamp} it lists, its deploy time). `bad` when the comment is not
+    a valid one for this key, or the rule's own body, flag or stamp is not what the deploy
+    writes (the manifest can never fire, so a manifest that changed was changed by hand)."""
+    parsed = parse_manifest_comment(key, comment)
     body_ok = (
         detect == MANIFEST_DETECT
         and respond == MANIFEST_RESPOND
         and enabled is False
         and classify_rule(key, (), MANIFEST_NAME, detect, respond, enabled, tags) == RULE_OK
     )
-    if names is None or not body_ok:
-        return MANIFEST_BAD, []
-    return MANIFEST_OK, names
+    if parsed is None or not body_ok:
+        return MANIFEST_BAD, {}, None
+    return MANIFEST_OK, parsed[0], parsed[1]

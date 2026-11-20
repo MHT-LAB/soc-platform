@@ -752,6 +752,7 @@ MANIFEST_WORDS = {
     "none": "none yet (nothing has been deployed from git)",
     "bad": "changed by hand or not made with this key",
     "absent": "missing, though stamped rules exist",
+    "stale": "older than one already seen: an earlier deploy was put back by hand",
 }
 DRIFT_WORDS = {"changed": "changed outside git", "unmanaged": "made by hand, not deployed"}
 
@@ -773,7 +774,7 @@ def rules_drift(data: dict[str, Any]) -> dict[str, Any] | None:
     names = d.get("missing")
     missing = [str(n) for n in names if isinstance(n, str)] if isinstance(names, list) else []
     missing_count = max(count(d.get("missing_count")), len(missing))
-    wrong = len(changed) + missing_count + int(manifest in ("bad", "absent"))
+    wrong = len(changed) + missing_count + int(manifest in ("bad", "absent", "stale"))
     return {
         "manifest": manifest,
         "manifest_text": MANIFEST_WORDS[manifest],
