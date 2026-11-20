@@ -27,11 +27,31 @@ read-only.
 
 | Command | Runs | What it does |
 |---|---|---|
-| `deploy/rotate.sh` | container, no network | the plan, then a typed `yes`. Approving writes the plan's short hash and the register commit to `state.json`, good for 30 minutes and for one apply. |
+| `deploy/rotate.sh` | container, no network | the plan, then a typed `yes` (**needs a terminal**, see below). Approving writes the plan's short hash and the register commit to `state.json`, good for 30 minutes and for one apply. |
 | `deploy/rotate.sh --plan [--quiet]` | container, no network | the plan only, asks nothing (the daily timer runs `--plan --quiet`) |
-| `deploy/rotate.sh --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD]` | container, no network | a person rotated this key by hand: write it down after a typed `yes`. The date defaults to today (New York time) and cannot be in the future. `--due` is for a key whose due date was set by hand. Makes no vendor call. |
+| `deploy/rotate.sh --record <id> [<id> ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]` | container, no network | a person rotated these keys by hand: write them down after one typed `yes` (**needs a terminal**). Up to 20 ids, one register fetch, one record line per key; the same `--date` and `--due` apply to all of them. An id that is unknown, replaced on exposure only, or listed twice refuses the whole run before anything is asked. The date defaults to today (New York time) and cannot be in the future. `--due` is for a key whose due date was set by hand. Makes no vendor call. |
 | `deploy/rotate.sh --preflight` | **host**, rights on stdin | the read calls of an apply: log in to both services, list the vendor's keys, check each automatic key's live permissions and that its stored value can be read. **Changes nothing**, needs no approval. |
 | `deploy/rotate.sh --apply <plan-hash>` | **host**, rights on stdin | rotate the automatic keys of the plan that was approved (below). |
+
+## Where each step runs
+
+| Step | Run it | Why |
+|---|---|---|
+| `--plan` | the daily timer, or by hand on the container | needs no terminal |
+| approve (`deploy/rotate.sh`) and `--record` | **on the container, from a real terminal:** `ssh -t <host> pct enter <container>`, then `cd /opt/soc-platform && deploy/rotate.sh` | they wait for a typed `yes`. Through `ssh <host> pct exec <container> -- ...` there is no terminal, so the script refuses at once (exit `2`) instead of waiting for input that can never come. |
+| `--preflight` and `--apply <hash>` | **from the operator's own machine**, with the rights piped in (a small script there that reads them from the password manager and pipes them in, as under "The rights, on standard input") | the rights are never stored on the container, only on that one run's standard input |
+
+An apply starts by saying how long it will take (the grace wait of every key it rotates, plus
+two minutes) and prints each step as it happens, so the operator sees "new key created" and
+"waiting 10 min" while the run is going.
+
+**Ctrl-C on the operator's machine does not stop an apply.** It closes the connection; the run
+on the container keeps going and finishes, or undoes itself, on its own. (A dropped connection or a
+terminate signal that does reach the run is handled as an interrupt: the work is undone and the
+record is written.) To see what happened after an interrupted terminal, on the container run
+`deploy/rotate.sh --plan`: a rotated key shows its new last-rotated date and next due date. The
+LimaCharlie audit log (`add_api_key` and `remove_api_key`, by `soc-rotator`) shows the same.
+Do not approve and apply the same key again to "retry" before looking: it would rotate twice.
 
 Exit codes: `0` done or nothing due, `1` failed (see the record), `2` refused before changing
 anything, `3` not confirmed, `4` something is overdue, has no record, has an old key still
@@ -175,7 +195,8 @@ keep that owner), written whole and renamed into place:
 4. **Seed the dates.** With an empty state every key shows "no record", the plan exits `4`, and
    the daily unit shows as failed. For each tracked key, take its last rotation date from the
    rotation register (kept outside this repository) and run
-   `deploy/rotate.sh --record <id> --date <last rotated> [--due <date>]`.
+   `deploy/rotate.sh --record <id> [<id> ...] --date <last rotated> [--due <date>]` (keys that
+   share a date go in one run), from `pct enter`, not `pct exec`.
 5. Install the daily plan (as for the backup timers, see `database.md`):
    `cp deploy/systemd/soc-rotate-plan.* /etc/systemd/system/ && systemctl daemon-reload &&
    systemctl enable --now soc-rotate-plan.timer`
