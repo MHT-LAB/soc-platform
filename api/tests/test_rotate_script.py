@@ -128,8 +128,8 @@ class Host:
     def push(self) -> None:
         self.git("push", "-q", "origin", "main")
 
-    def run(self, *args: str, stdin: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
-        env = {
+    def script_env(self, **extra: str) -> dict[str, str]:
+        return {
             **self.env,
             "SOC_STATE_DIR": str(self.state),
             "SOC_KEYS_REPO": str(self.repo),
@@ -137,9 +137,11 @@ class Host:
             "FAKE_LOG": str(self.log),
             **extra,
         }
+
+    def run(self, *args: str, stdin: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [BASH, str(SCRIPT), *args],
-            env=env,
+            env=self.script_env(**extra),
             capture_output=True,
             text=True,
             timeout=60,
@@ -203,6 +205,11 @@ def test_a_record_passes_its_id_and_dates(host: Host) -> None:
         ["--record", "a-key", "--date", "2026-11-14\n"],
         ["--record", "a-key", "--when", "2026-11-14"],
         ["--record", "a-key", "--date"],
+        ["--record", "--date", "2026-11-14"],  # no id at all
+        ["--record", "a-key", "--date", "2026-11-14", "b-key"],  # ids come before the options
+        ["--record", "a-key", "Bad Id"],
+        ["--record", "a-key", "$(id)"],
+        ["--record", *[f"key-{n:02d}" for n in range(21)]],  # one more than the record keeps
         ["anything"],
     ],
 )
@@ -214,6 +221,23 @@ def test_arguments_the_script_does_not_know_are_refused_before_anything_runs(
     assert host.docker_calls() == ""
     assert not (host.state / "rotate").exists()
     assert host.rotate_log() == ""
+
+
+def test_several_ids_are_passed_on_in_one_run(host: Host) -> None:
+    r = host.run(
+        "--record", "key-a", "key-b", "key-c", "--due", "2026-12-15", "--date", "2026-10-24"
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = host.docker_calls()
+    assert "rotate --record key-a key-b key-c --due 2026-12-15 --date 2026-10-24" in calls
+    assert calls.count("run --rm rotate") == 1  # one container, so one register fetch and one yes
+
+
+def test_the_most_ids_one_run_takes_are_passed_on(host: Host) -> None:
+    ids = [f"key-{n:02d}" for n in range(20)]
+    r = host.run("--record", *ids)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"rotate --record {' '.join(ids)}" in host.docker_calls()
 
 
 def test_the_services_exit_code_is_the_scripts_and_its_record_is_still_kept(host: Host) -> None:
@@ -474,3 +498,67 @@ def test_a_multi_line_record_is_kept_printable_and_capped(host: Host) -> None:
     assert r.returncode == 0
     assert host.rotate_log().count("apply id=k") == 20  # at most 20 lines
     assert "\x1b" not in host.rotate_log() and "\x1b" not in r.stdout
+
+
+# ---- a typed yes needs a terminal: refuse at once, over `pct exec`, instead of waiting ----
+
+NO_TERMINAL = "needs a terminal"
+
+
+@pytest.mark.parametrize("args", [[], ["--record", "key-a"], ["--record", "key-a", "key-b"]])
+def test_approve_and_record_refuse_at_once_without_a_terminal(host: Host, args: list[str]) -> None:
+    r = host.run(*args, SOC_TEST_ENFORCE_TTY="1")  # stdin is a pipe here, as over pct exec
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert (
+        NO_TERMINAL in r.stderr and "pct enter" in r.stderr and "not through 'pct exec'" in r.stderr
+    )
+    assert host.docker_calls() == ""  # the container was never started
+    assert not (host.state / "rotate").exists() and host.rotate_log() == ""
+    assert not host.py_args.exists()
+
+
+def test_the_plan_preflight_and_apply_never_need_a_terminal(host: Host) -> None:
+    for args in (["--plan", "--quiet"], ["--preflight"], ["--apply", PLAN_HASH]):
+        r = host.run(*args, stdin=RIGHTS, SOC_TEST_ENFORCE_TTY="1")
+        assert NO_TERMINAL not in r.stdout + r.stderr, r.stdout + r.stderr  # not refused for it
+    assert "run --rm -T rotate --plan --quiet" in host.docker_calls()  # the timer: no terminal
+    assert host.py_args.read_text().count("-I -c") == 2
+
+
+def test_with_a_terminal_approve_and_record_run(host: Host) -> None:
+    import pty
+
+    for args in ([], ["--record", "key-a", "key-b"]):
+        try:
+            master, slave = pty.openpty()
+        except OSError:
+            pytest.skip("no pseudo-terminal can be opened here (a sandbox)")
+        try:
+            r = subprocess.run(
+                [BASH, str(SCRIPT), *args],
+                env=host.script_env(SOC_TEST_ENFORCE_TTY="1"),
+                stdin=slave,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            os.close(master)
+            os.close(slave)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert NO_TERMINAL not in r.stderr
+    calls = host.docker_calls()
+    assert "run --rm rotate" in calls and " -T " not in calls
+    assert "rotate --record key-a key-b" in calls
+
+
+def test_in_test_mode_the_terminal_check_is_off_unless_asked_for(host: Host) -> None:
+    # every other test here runs the approve and record modes from a pipe
+    assert host.run().returncode == 0
+    assert NO_TERMINAL not in host.run("--record", "key-a").stderr
+
+
+def test_the_terminal_check_comes_before_the_register_is_touched() -> None:
+    text = SCRIPT.read_text()
+    check, fetch = text.index("needs a terminal"), text.index("fetch -q origin main")
+    assert check < fetch and "! -t 3" in text  # the saved original input, not /dev/null

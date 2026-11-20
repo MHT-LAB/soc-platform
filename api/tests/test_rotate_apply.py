@@ -543,3 +543,53 @@ def test_preflight_with_bad_rights_is_refused(h: Harness) -> None:
         now=lambda: h.moment,
     )
     assert rc == REFUSED and h.world.log == []
+
+
+# ---- the operator is told how long it takes, and that Ctrl-C does not stop it ----
+
+NOTICE = (
+    "Interrupting this terminal does not stop it on the host; it finishes or undoes itself there."
+)
+
+
+def test_an_apply_says_up_front_how_long_it_takes_and_that_ctrl_c_does_not_stop_it(
+    h: Harness,
+) -> None:
+    h.approve()
+    assert h.apply() == OK
+    notice = [line for line in h.said if line.startswith("This takes about")]
+    assert notice == [f"This takes about 12 min. {NOTICE}"]  # the 10 minute grace wait plus 2
+    # once, and before anything is created: it is the first thing the operator sees
+    assert h.said.index(notice[0]) < next(i for i, line in enumerate(h.said) if "new key" in line)
+
+
+def test_the_notice_adds_every_keys_grace_wait(tmp_path: Path) -> None:
+    from soc_api.rotate.keys import load_register
+    from soc_api.rotate.plan import build_plan
+
+    files = {
+        "auto-a": key_text("auto-a", method="automatic", extra="grace_minutes = 3"),
+        "auto-b": key_text("auto-b", method="automatic", extra="grace_minutes = 5"),
+        "hand-key": key_text("hand-key"),  # a manual key adds no wait
+    }
+    h = Harness(tmp_path, files=files)
+    plan = build_plan(load_register(h.keys_dir), h.state_or_empty(), date(2026, 11, 18), "ab" * 20)
+    assert ap.expected_minutes(plan) == 3 + 5 + 2
+
+
+def test_there_is_no_notice_when_nothing_will_be_rotated(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    nothing = Harness(tmp_path / "a", files={"hand-key": key_text("hand-key")})
+    nothing.approve()
+    assert nothing.apply() == OK
+    other = key_text("auto-key", method="automatic").replace("posture_check", "reconcile_check")
+    skipped = Harness(tmp_path / "b", files={"auto-key": other})
+    skipped.approve()
+    assert skipped.apply() == ATTENTION
+    assert "This takes about" not in nothing.text() + skipped.text()
+
+
+def test_a_refused_apply_prints_no_notice(h: Harness) -> None:
+    assert h.apply("0" * 12) == REFUSED
+    assert "This takes about" not in h.text()

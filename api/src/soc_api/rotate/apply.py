@@ -356,6 +356,17 @@ def _save(state_dir: Path, state: st.State, say: Callable[[str], None]) -> bool:
     return True
 
 
+def expected_minutes(plan: Plan) -> int | None:
+    """About how long an apply of this plan takes: the grace wait of every key it will rotate,
+    plus two minutes for the calls. None when no key will be rotated (nothing to wait for)."""
+    waits = [
+        r.key.apply.grace_minutes
+        for r in plan.automatic_actions
+        if r.key.apply is not None and r.status in ACTIONABLE
+    ]
+    return sum(waits) + 2 if waits else None
+
+
 def run_apply(
     *,
     keys_dir: Path,
@@ -403,6 +414,12 @@ def run_apply(
         state.approval = None  # an approval is good for one apply, however it ends
         if not _save(state_dir, state, say):
             return FAILED
+        minutes = expected_minutes(plan)
+        if minutes is not None:
+            say(
+                f"This takes about {minutes} min. Interrupting this terminal does not stop it "
+                "on the host; it finishes or undoes itself there."
+            )
         try:
             code = _apply_rows(session, plan, state_dir)
         finally:
