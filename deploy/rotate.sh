@@ -3,13 +3,15 @@
 #
 #   rotate.sh                     the plan, then a typed yes to approve it
 #   rotate.sh --plan [--quiet]    the plan only, nothing asked (the daily timer runs this)
-#   rotate.sh --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD]
-#                                 a key was rotated by hand: write it down (typed yes)
+#   rotate.sh --record <id> [<id> ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]
+#                                 keys were rotated by hand: write them down (one typed yes)
 #   rotate.sh --preflight         the read calls of an apply (logins, the vendor's key list,
 #                                 the stored value's name); changes nothing
 #   rotate.sh --apply <plan-hash> rotate the automatic keys of the plan that was approved
 #
-# The first three only plan and record: they run in a container with no network. --preflight
+# The first three only plan and record: they run in a container with no network. The approve and
+# --record modes ask for a typed yes, so they refuse at once without a terminal (run them from
+# `pct enter`, not `pct exec`); --plan (the timer), --preflight and --apply never need one. --preflight
 # and --apply run as standard-library Python on this host (they must rewrite a consumer's env
 # file, recreate its service and run its check, which a hardened container cannot do without
 # the Docker socket). They read their rights (the vendor key that makes keys, the login to the
@@ -36,7 +38,8 @@
 #   SOC_KEYS_REPO      the key register clone                        /opt/key-register
 #   SOC_KEYS_SSH_KEY   the clone's read-only deploy key, if git does not already know it
 #   SOC_TEST_BIN       TESTS ONLY: directory searched first for docker. Refused for root, so
-#                      nothing in the environment can swap a tool on a host.
+#                      nothing in the environment can swap a tool on a host. In this mode the
+#                      terminal check is skipped unless SOC_TEST_ENFORCE_TTY is also set.
 set -euo pipefail
 
 if [[ -n "${SOC_TEST_BIN:-}" && "$EUID" -eq 0 ]]; then
@@ -64,7 +67,7 @@ OUT="$STATE/rotate"
 LOG="$STATE/rotate.log"
 
 usage() {
-  echo "usage: rotate.sh [--plan [--quiet] | --record <id> [--date YYYY-MM-DD] [--due YYYY-MM-DD] | --preflight | --apply <plan-hash>]" >&2
+  echo "usage: rotate.sh [--plan [--quiet] | --record <id> [<id> ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD] | --preflight | --apply <plan-hash>]" >&2
   exit 2
 }
 
@@ -74,10 +77,14 @@ usage() {
 ID_RE='^[a-z0-9][a-z0-9-]{1,48}$'
 DAY_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
 HASH_RE='^[0-9a-f]{12}$'
+MAX_IDS=20 # one record line each, and the record keeps 20 lines
 ARGS=()
 RUN_FLAGS=(--rm)
 HOST_MODE=""
-if [[ $# -gt 0 ]]; then
+NEEDS_TTY=""
+if [[ $# -eq 0 ]]; then
+  NEEDS_TTY=1 # the plan, then a typed yes
+else
   case "$1" in
     --plan)
       ARGS+=(--plan)
@@ -99,8 +106,14 @@ if [[ $# -gt 0 ]]; then
     --record)
       shift
       [[ $# -ge 1 && "$1" =~ $ID_RE ]] || usage
-      ARGS+=(--record "$1")
-      shift
+      ARGS+=(--record)
+      ids=0
+      while [[ $# -gt 0 && "$1" =~ $ID_RE ]]; do
+        ARGS+=("$1")
+        shift
+        ids=$((ids + 1))
+      done
+      [[ "$ids" -le "$MAX_IDS" ]] || usage
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --date | --due)
@@ -111,9 +124,17 @@ if [[ $# -gt 0 ]]; then
           *) usage ;;
         esac
       done
+      NEEDS_TTY=1
       ;;
     *) usage ;;
   esac
+fi
+
+# A typed yes needs a terminal. Over `ssh host pct exec` there is none, and the container would
+# start without one and wait for input that can never arrive. Say so at once, changing nothing.
+if [[ -n "$NEEDS_TTY" && ( -z "${SOC_TEST_BIN:-}" || -n "${SOC_TEST_ENFORCE_TTY:-}" ) && ! -t 3 ]]; then
+  echo "refused: this asks for a typed yes and needs a terminal. Run it from 'ssh -t pve pct enter 110', not through 'pct exec'. Nothing was changed." >&2
+  exit 2
 fi
 
 mkdir -p "$STATE"

@@ -2,8 +2,8 @@
 
     python -m soc_api.rotate                     plan, then a typed `yes` to approve it
     python -m soc_api.rotate --plan [--quiet]    the plan only; asks nothing (the daily timer)
-    python -m soc_api.rotate --record ID [--date YYYY-MM-DD] [--due YYYY-MM-DD]
-                                                 a person did this key by hand: write it down
+    python -m soc_api.rotate --record ID [ID ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]
+                                                 a person did these keys by hand: write them down
     python -m soc_api.rotate --apply HASH        rotate the automatic keys of the approved plan
     python -m soc_api.rotate --preflight         the read calls of an apply, nothing changed
 
@@ -33,12 +33,15 @@ from pathlib import Path
 from soc_api.rotate import state as st
 from soc_api.rotate.codes import ATTENTION, DECLINED, FAILED, OK, REFUSED
 from soc_api.rotate.keys import ID_RE, load_register
-from soc_api.rotate.plan import Plan, build_plan, local_today, render
+from soc_api.rotate.plan import Plan, Row, build_plan, local_today, render
 from soc_api.rotate.records import record_line
 
 DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MAX_PROBLEMS_SHOWN = 20
-USAGE = "usage: rotate [--plan [--quiet] | --record ID [--date YYYY-MM-DD] [--due YYYY-MM-DD]]"
+MAX_RECORD_IDS = 20  # one record line each, and rotate.sh keeps 20 lines
+USAGE = (
+    "usage: rotate [--plan [--quiet] | --record ID [ID ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]]"
+)
 
 
 class ConfigError(Exception):
@@ -72,7 +75,7 @@ class Args:
     mode: str  # approve | plan | record | apply | preflight
     quiet: bool = False
     plan_hash: str = ""
-    key_id: str = ""
+    key_ids: tuple[str, ...] = ()
     on: date | None = None
     due: date | None = None
 
@@ -100,10 +103,14 @@ def parse_args(argv: list[str]) -> Args:
     if argv == ["--preflight"]:
         return Args("preflight")
     if argv[0] == "--record":
-        if len(argv) < 2 or not ID_RE.fullmatch(argv[1]):
+        ids: list[str] = []
+        rest = argv[1:]
+        while rest and ID_RE.fullmatch(rest[0]):
+            ids.append(rest[0])
+            rest = rest[1:]
+        if not ids or len(ids) > MAX_RECORD_IDS:
             raise UsageError(USAGE)
         on = due = None
-        rest = argv[2:]
         while rest:
             if len(rest) < 2 or rest[0] not in ("--date", "--due"):
                 raise UsageError(USAGE)
@@ -114,7 +121,7 @@ def parse_args(argv: list[str]) -> Args:
             else:
                 raise UsageError(USAGE)
             rest = rest[2:]
-        return Args("record", key_id=argv[1], on=on, due=due)
+        return Args("record", key_ids=tuple(ids), on=on, due=due)
     raise UsageError(USAGE)
 
 
@@ -143,12 +150,24 @@ def _write_status(cfg: Config, plan: Plan, now: datetime) -> None:
     )
 
 
-def _finish(cfg: Config, say: Callable[[str], None], line: str) -> None:
+def say_now(line: str) -> None:
+    """Print one line and push it out at once. Over `ssh ... pct exec` there is no terminal, so
+    Python would hold its output in a block buffer and the operator would see nothing for the
+    whole grace wait of a rotation."""
+    print(line, flush=True)
+
+
+def _finish_lines(cfg: Config, say: Callable[[str], None], lines: list[str]) -> None:
     try:
-        (cfg.state_dir / "record.txt").write_text(line + "\n", encoding="utf-8")
+        (cfg.state_dir / "record.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     except OSError:
-        say("warning: could not write the record file; the line below is the record")
-    say(line)
+        say("warning: could not write the record file; the lines below are the record")
+    for line in lines:
+        say(line)
+
+
+def _finish(cfg: Config, say: Callable[[str], None], line: str) -> None:
+    _finish_lines(cfg, say, [line])
 
 
 def run(
@@ -279,52 +298,79 @@ def _record(
     today: date,
 ) -> int:
     commit12 = cfg.commit[:12]
-    row = next((r for r in plan.rows if r.key.id == args.key_id), None)
-    if row is None:
-        say("refused: that id is not a tracked key in the register; nothing was changed")
+    if len(set(args.key_ids)) != len(args.key_ids):
+        say("refused: an id is listed twice; nothing was changed")
+        _finish(
+            cfg, say, record_line(moment, run_id, "record", "refused-duplicate", commit=commit12)
+        )
+        return REFUSED
+    by_id = {r.key.id: r for r in plan.rows}
+    rows: list[Row] = [by_id[i] for i in args.key_ids if i in by_id]
+    if len(rows) != len(args.key_ids):
+        say("refused: an id is not a tracked key in the register; nothing was changed")
         _finish(cfg, say, record_line(moment, run_id, "record", "refused-id", commit=commit12))
         return REFUSED
     on = args.on or today
     if on > today or (args.due is not None and args.due < on):
         say("refused: the date is in the future, or the due date is before it; nothing was changed")
-        _finish(cfg, say, record_line(moment, run_id, "record", "refused-date", id=row.key.id))
+        _finish_lines(
+            cfg,
+            say,
+            [record_line(moment, run_id, "record", "refused-date", id=r.key.id) for r in rows],
+        )
         return REFUSED
-    due_text = args.due.isoformat() if args.due else f"last + {row.key.period_days} days"
-    say(f"{row.key.id}: rotated by hand on {on}, next due {due_text}. This makes no vendor call.")
-    if not confirm(f"Write down that {row.key.id} was rotated on {on}? Type yes: "):
+    for row in rows:
+        due_text = args.due.isoformat() if args.due else f"last + {row.key.period_days} days"
+        say(
+            f"{row.key.id}: rotated by hand on {on}, next due {due_text}. "
+            "This makes no vendor call."
+        )
+    if len(rows) == 1:
+        question = f"Write down that {rows[0].key.id} was rotated on {on}? Type yes: "
+    else:
+        question = f"Write down that these {len(rows)} keys were rotated on {on}? Type yes: "
+    if not confirm(question):
         say("Not confirmed: nothing was changed.")
-        _finish(cfg, say, record_line(moment, run_id, "record", "declined", id=row.key.id))
+        _finish_lines(
+            cfg,
+            say,
+            [record_line(moment, run_id, "record", "declined", id=r.key.id) for r in rows],
+        )
         return DECLINED
-    state.keys[row.key.id] = st.KeyState(
-        last_rotated=on,
-        outcome="recorded",
-        revoke_pending=False,
-        due_override=args.due,
-        updated=st.stamp(moment),
-    )
+    for row in rows:
+        state.keys[row.key.id] = st.KeyState(
+            last_rotated=on,
+            outcome="recorded",
+            revoke_pending=False,
+            due_override=args.due,
+            updated=st.stamp(moment),
+        )
     try:
         st.save(cfg.state_dir / "state.json", state)
     except OSError:
         say("FAILED: could not write state.json")
         return FAILED
     fresh = build_plan(load_register(cfg.keys_dir), state, today, cfg.commit)
-    next_due = next((r.due for r in fresh.rows if r.key.id == row.key.id), None)
+    next_due = {r.key.id: r.due for r in fresh.rows}
     try:
         _write_status(cfg, fresh, moment)
     except OSError:
         say("warning: could not refresh status.json")
-    _finish(
+    _finish_lines(
         cfg,
         say,
-        record_line(
-            moment,
-            run_id,
-            "record",
-            "recorded",
-            id=row.key.id,
-            date=on.isoformat(),
-            next_due=next_due.isoformat() if next_due else "unknown",
-        ),
+        [
+            record_line(
+                moment,
+                run_id,
+                "record",
+                "recorded",
+                id=r.key.id,
+                date=on.isoformat(),
+                next_due=d.isoformat() if (d := next_due.get(r.key.id)) else "unknown",
+            )
+            for r in rows
+        ],
     )
     return OK
 
@@ -375,7 +421,7 @@ def _host_run(cfg: Config, args: Args) -> int:
         "commit": cfg.commit,
         "read": lambda: read_rights(sys.stdin),
         "build": build,
-        "say": print,
+        "say": say_now,
         "now": lambda: datetime.now(UTC),
     }
     ap.stop_on_hangup()
