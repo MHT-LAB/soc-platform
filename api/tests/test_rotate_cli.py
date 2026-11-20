@@ -513,3 +513,46 @@ def test_the_host_modes_print_through_say_now_so_a_pipe_sees_each_line_as_it_hap
     assert cli._host_run(cfg, args) == OK
     assert held_after_first_line == [False]
     assert "waiting 10 min" in pipe.getvalue()
+
+
+class BrokenPipe(Pipe):
+    """The operator pressed Ctrl-C on their machine: the pipe is gone after the first line."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines = 0
+
+    def flush(self) -> None:
+        self.lines += 1
+        if self.lines > 1:
+            raise BrokenPipeError(32, "Broken pipe")
+        super().flush()
+
+
+def test_a_closed_connection_never_changes_what_an_apply_does(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from rotate_fakes import Harness
+
+    from soc_api.rotate import apply as ap
+    from soc_api.rotate.cli import say_now
+
+    pipe = BrokenPipe()
+    monkeypatch.setattr(sys, "stdout", pipe)
+    h = Harness(tmp_path)
+    h.approve()
+    code = ap.run_apply(
+        keys_dir=h.keys_dir,
+        state_dir=h.state_dir,
+        commit=COMMIT,
+        plan_hash=h.plan_hash(),
+        read=h.read,
+        build=lambda _r: h.world.deps(),
+        say=say_now,
+        now=lambda: h.moment,
+    )
+    assert code == OK  # rotated, not rolled back because a print failed
+    assert "delete old" in h.world.log and "restore" not in h.world.log
+    assert pipe.lines > 1  # the pipe really did break during the run
+    assert "result=rotated" in (h.state_dir / "record.txt").read_text()
+    assert h.state().keys["auto-key"].outcome == "rotated"

@@ -21,6 +21,7 @@ anything, 3 not confirmed, 4 (plan only) something is overdue, has no record, or
 key still live.
 """
 
+import io
 import os
 import re
 import sys
@@ -150,11 +151,26 @@ def _write_status(cfg: Config, plan: Plan, now: datetime) -> None:
     )
 
 
+class _Gone(io.TextIOBase):
+    """Standard output after the operator's connection went away: accepts and drops text."""
+
+    def write(self, text: str, /) -> int:
+        return len(text)
+
+
 def say_now(line: str) -> None:
     """Print one line and push it out at once. Over `ssh ... pct exec` there is no terminal, so
     Python would hold its output in a block buffer and the operator would see nothing for the
-    whole grace wait of a rotation."""
-    print(line, flush=True)
+    whole grace wait of a rotation.
+
+    If the operator's side has gone (Ctrl-C on their machine closes the pipe), a write fails.
+    That must never change what the run does: a failed print inside a rotation would otherwise
+    roll back a healthy key. So printing stops quietly and the run finishes, or undoes itself,
+    as it would have; every line still reaches record.txt, and rotate.sh appends it to the log."""
+    try:
+        print(line, flush=True)
+    except (OSError, ValueError):  # BrokenPipeError is an OSError; ValueError: stdout closed
+        sys.stdout = _Gone()
 
 
 def _finish_lines(cfg: Config, say: Callable[[str], None], lines: list[str]) -> None:

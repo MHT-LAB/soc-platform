@@ -11,8 +11,8 @@
 #
 # The first three only plan and record: they run in a container with no network. The approve and
 # --record modes ask for a typed yes, so they refuse at once without a terminal (run them from
-# `pct enter`, not `pct exec`); --plan (the timer), --preflight and --apply never need one. --preflight
-# and --apply run as standard-library Python on this host (they must rewrite a consumer's env
+# `pct enter`, not `pct exec`); --plan (the timer), --preflight and --apply never need one.
+# --preflight and --apply run as standard-library Python on this host (they must rewrite a consumer's env
 # file, recreate its service and run its check, which a hardened container cannot do without
 # the Docker socket). They read their rights (the vendor key that makes keys, the login to the
 # secrets manager) from STANDARD INPUT ONLY: `NAME=value` lines, then a blank line, piped in
@@ -133,7 +133,7 @@ fi
 # A typed yes needs a terminal. Over `ssh host pct exec` there is none, and the container would
 # start without one and wait for input that can never arrive. Say so at once, changing nothing.
 if [[ -n "$NEEDS_TTY" && ( -z "${SOC_TEST_BIN:-}" || -n "${SOC_TEST_ENFORCE_TTY:-}" ) && ! -t 3 ]]; then
-  echo "refused: this asks for a typed yes and needs a terminal. Run it from 'ssh -t pve pct enter 110', not through 'pct exec'. Nothing was changed." >&2
+  echo "refused: this asks for a typed yes and needs a terminal. Run it from a real terminal (for a container: 'ssh -t <host> pct enter <id>'), not through 'pct exec'. Nothing was changed." >&2
   exit 2
 fi
 
