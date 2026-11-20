@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -49,7 +50,8 @@ from soc_api.rules.stamp import (
     MIN_KEY_CHARS,
     TAG_PREFIX,
     has_stamp_tag,
-    manifest_mac,
+    manifest_comment,
+    parse_manifest_comment,
     stamp_tag,
 )
 from soc_api.rules.validate import check_tree, replay_tree
@@ -279,12 +281,11 @@ class Plan:
         return sum(1 for c in self.changes if c.kind == kind)
 
 
-def _manifest_comment(cfg: Config, names: list[str]) -> str:
-    body = {"v": 1, "names": sorted(names), "mac": manifest_mac(cfg.stamp_key, names)}
-    return "soc-manifest " + json.dumps(body, separators=(",", ":"), ensure_ascii=False)
-
-
-def make_plan(cfg: Config, wanted: dict[str, Desired], live: dict[str, LiveRule]) -> Plan:
+def make_plan(
+    cfg: Config, wanted: dict[str, Desired], live: dict[str, LiveRule], at: int = 0
+) -> Plan:
+    """`at` (epoch seconds) is the deploy time a NEW manifest carries; a manifest that already
+    lists exactly these names and stamps is left alone, so a second run has nothing to do."""
     changes: list[Change] = []
     unchanged = 0
     for name in sorted(wanted):
@@ -316,17 +317,25 @@ def make_plan(cfg: Config, wanted: dict[str, Desired], live: dict[str, LiveRule]
     order = {"add": 0, "change": 1, "remove": 2}
     changes.sort(key=lambda c: (order[c.kind], c.name))
 
-    comment = _manifest_comment(cfg, list(wanted))
+    stamps_wanted = {
+        name: stamp_tag(cfg.stamp_key, w.detect, w.respond, w.enabled) for name, w in wanted.items()
+    }
     old = live.get(MANIFEST_NAME)
     m_tag = stamp_tag(cfg.stamp_key, MANIFEST_DETECT, MANIFEST_RESPOND, False)
+    parsed = parse_manifest_comment(cfg.stamp_key, old.usr_mtd.get("comment")) if old else None
     fresh = (
         old is not None
         and old.detect == MANIFEST_DETECT
         and old.respond == MANIFEST_RESPOND
         and old.enabled is False
         and old.tags == [m_tag]
-        and old.usr_mtd.get("comment") == comment
+        and parsed is not None
+        and parsed[0] == stamps_wanted
     )
+    if fresh and old is not None:
+        comment = str(old.usr_mtd.get("comment"))
+    else:
+        comment = manifest_comment(cfg.stamp_key, stamps_wanted, at or int(time.time()))
     return Plan(changes, unchanged, unmanaged, comment, not fresh, old)
 
 
@@ -465,7 +474,7 @@ def run(
         say(f"refused: could not read the live rules ({exc.code}); nothing was changed")
         _write_record(cfg, record_line(cfg, None, f"refused-{exc.code}", now()), say)
         return REFUSED
-    plan = make_plan(cfg, wanted, live)
+    plan = make_plan(cfg, wanted, live, int(now().timestamp()))
     if plan.nothing:
         say(
             f"Nothing to do: {plan.unchanged} managed rules already match git at {cfg.commit[:12]}."

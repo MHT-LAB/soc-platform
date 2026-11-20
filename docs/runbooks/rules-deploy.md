@@ -63,8 +63,10 @@ print the file. Per general rule the collector stores one word: `ok`; `changed` 
 flag no longer matches the stamp, the stamp is missing or doubled, or the rule is listed in a
 valid manifest but its stamp was removed); or `unmanaged` (a managed prefix, no stamp). It also
 stores the manifest state (`ok`; `bad`: the comment is not one this key made, or the manifest
-itself was edited; `absent`: stamped rules exist but no manifest; `none`: nothing deployed yet)
-and the names of listed rules that are no longer live. Rule bodies are compared and dropped.
+itself was edited; `absent`: stamped rules exist but no manifest, or a manifest was seen before
+and is gone; `stale`: a good manifest older than one already seen; `none`: nothing deployed
+yet) and the names of listed rules that are no longer live. A stamped rule whose stamp is not
+the one the manifest lists for its name is `changed` (an older version put back). Rule bodies are compared and dropped.
 
 Any change, unmanaged or missing rule, or a bad or absent manifest makes the pager push
 "SOC STALE: N detection rule changes outside git" (a count, never a name; repeats every 6 hours
@@ -73,9 +75,19 @@ a deploy that adopts old rules shows them as `changed` until the deploy has stam
 
 ## The manifest rule
 
-A disabled rule named `soc-manifest` that can never fire. Its comment holds the sorted list of
-managed rule names with a keyed check on the list, so a managed rule deleted in the web app is
-found missing.
+A disabled rule named `soc-manifest` that can never fire. Its comment (format version 2) holds
+each managed rule name with the stamp it was deployed with, and the deploy time, all under one
+keyed check. So:
+
+- a managed rule deleted in the web app is found missing;
+- a rule put back to an older deployed version (its old stamp is valid for that old body) does
+  not match the stamp the manifest lists for it, and shows as `changed`;
+- a whole older deploy put back by hand, with that deploy's own manifest, carries an older
+  deploy time than one already seen, and the manifest shows as `stale` until a newer deploy.
+
+A run with nothing to change keeps the existing manifest and its time; the manifest is
+rewritten, with a new time, only when the set of managed rules or their stamps changes. A
+manifest in the old format is replaced on the next run.
 
 ## Not done by this tool
 
