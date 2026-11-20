@@ -50,6 +50,27 @@ but not the stamp key, can change a rule but cannot make a matching stamp, so th
 as drift (checked by the posture collector, Sprint 4 E4). The vendor never sees the stamp key.
 `soc_api.rules.stamp` is the one place the stamp is computed.
 
+### Drift checking on the host (E4)
+
+The posture collector checks stamps when `env/posture-rules.env` (mode 600, read by the
+`posture` service only) holds two lines:
+
+    SOC_POSTURE_STAMP_KEY=<the same value as SOC_RULES_STAMP_KEY in rules-lc.env>
+    SOC_POSTURE_RULES_PREFIXES=<the managed name prefixes, separated by |>
+
+Without the file the collector runs as before and the Rules tab says "Not checked". Never
+print the file. Per general rule the collector stores one word: `ok`; `changed` (the body or
+flag no longer matches the stamp, the stamp is missing or doubled, or the rule is listed in a
+valid manifest but its stamp was removed); or `unmanaged` (a managed prefix, no stamp). It also
+stores the manifest state (`ok`; `bad`: the comment is not one this key made, or the manifest
+itself was edited; `absent`: stamped rules exist but no manifest; `none`: nothing deployed yet)
+and the names of listed rules that are no longer live. Rule bodies are compared and dropped.
+
+Any change, unmanaged or missing rule, or a bad or absent manifest makes the pager push
+"SOC STALE: N detection rule changes outside git" (a count, never a name; repeats every 6 hours
+while it holds). The Rules tab and the System page's posture row name them. The first run after
+a deploy that adopts old rules shows them as `changed` until the deploy has stamped them.
+
 ## The manifest rule
 
 A disabled rule named `soc-manifest` that can never fire. Its comment holds the sorted list of

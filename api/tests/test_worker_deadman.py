@@ -242,6 +242,9 @@ class StubDb:
     def posture_health(self) -> tuple[int, float | None]:
         return 0, None
 
+    def rules_drift_health(self) -> int:
+        return 0
+
 
 def worker(db: StubDb, deadman: w.Deadman | None) -> w.Worker:
     ntfy = w.Ntfy("http://127.0.0.1:1", TOPIC, allow_http=True)  # never used by an idle pass

@@ -265,6 +265,11 @@ services:
         required: true
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/posture-lc.env
         required: true
+      # Optional (mode 600): the rules stamp key and the managed name prefixes. With it the
+      # collector checks every general rule's stamp and reports drift; without it, drift is
+      # shown as "not checked", never as "no drift".
+      - path: ${SOC_STATE_DIR:-/srv/soc}/env/posture-rules.env
+        required: false
       # Optional, not secret: SOC_POSTURE_INTERVAL_SECONDS and the like.
       - path: ${SOC_STATE_DIR:-/srv/soc}/env/policy.env
         required: false

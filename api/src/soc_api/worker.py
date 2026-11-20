@@ -405,6 +405,13 @@ class Db:
         quiet = rows[0][1]
         return int(rows[0][0]), None if quiet is None else float(quiet)
 
+    def rules_drift_health(self) -> int:
+        """How many rules are changed, unmanaged or missing (or the manifest is wrong): 0 when
+        drift is not being checked, which is never a reason to push."""
+        _, rows = self._run("SELECT checked, wrong FROM rules_drift_health()")
+        checked, wrong = rows[0]
+        return int(wrong or 0) if checked else 0
+
     def backup_health(self) -> tuple[float, int | None]:
         """(seconds since the last good dump or since the migration, size of that dump or None)."""
         _, rows = self._run("SELECT age_s, bytes FROM backup_health()")
@@ -469,7 +476,17 @@ STALE_TEXT = {
     "reconcile_quiet": "The catch-up worker has not completed a run in over 30 minutes.",
     "posture_quiet": "The posture collector has not completed a run in over 30 minutes.",
     "backup_old": "The last good database backup is over 13 hours old.",
+    "rules_drift": "Detection rules differ from what was deployed from git.",
 }
+
+
+def stale_text(reason: str, rules_drift: int = 0) -> str:
+    """The push text for a reason. Counts and fixed words only: never a rule name, which is
+    the push-server rule (the Rules tab names them)."""
+    if reason == "rules_drift" and rules_drift > 0:
+        what = "change" if rules_drift == 1 else "changes"
+        return f"{rules_drift} detection rule {what} outside git. Open the Rules tab."
+    return STALE_TEXT[reason]
 
 
 def stale_reasons(
@@ -480,6 +497,7 @@ def stale_reasons(
     limits: Limits,
     posture_runs: int = 0,
     posture_quiet: float | None = None,
+    rules_drift: int = 0,
 ) -> dict[str, bool]:
     """Which STALE conditions hold right now. The worker pushes on these; the console's
     banner shows the same ones, so both read the thresholds from here."""
@@ -491,6 +509,7 @@ def stale_reasons(
         "reconcile_quiet": sources > 0 and (quiet or 0) > limits.reconcile_stale_s,
         "posture_quiet": posture_runs > 0 and (posture_quiet or 0) > limits.posture_stale_s,
         "backup_old": backup_age > limits.backup_stale_s,
+        "rules_drift": rules_drift > 0,
     }
 
 
@@ -741,8 +760,9 @@ class Worker:
         sources, quiet = self.db.reconcile_health()
         backup_age, _ = self.db.backup_health()
         posture_runs, posture_quiet = self.db.posture_health()
+        drifted = self.db.rules_drift_health()
         firing = stale_reasons(
-            c, sources, quiet, backup_age, self.limits, posture_runs, posture_quiet
+            c, sources, quiet, backup_age, self.limits, posture_runs, posture_quiet, drifted
         )
         for reason, is_firing in firing.items():
             if not is_firing:
@@ -756,7 +776,9 @@ class Worker:
                 continue
             if not self._may_try(f"stale_{reason}", now):
                 continue
-            delivery = self.ntfy.publish(title="SOC STALE", message=STALE_TEXT[reason], priority=5)
+            delivery = self.ntfy.publish(
+                title="SOC STALE", message=stale_text(reason, drifted), priority=5
+            )
             log.warning(
                 "heartbeat kind=stale reason=%s outcome=%s code=%s",
                 reason,

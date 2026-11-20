@@ -327,11 +327,13 @@ def test_the_posture_files_go_to_the_collector_and_the_login_password_to_migrate
     assert env_files("posture") == {
         "posture-db.env": True,
         "posture-lc.env": True,
+        "posture-rules.env": False,
         "policy.env": False,
     }
     for name, expected in (
         ("posture-db.env", {"posture"}),
         ("posture-lc.env", {"posture"}),
+        ("posture-rules.env", {"posture"}),
         ("posture-owner.env", {"migrate"}),
     ):
         assert {n for n in SERVICES if name in env_files(n)} == expected, name

@@ -12,6 +12,9 @@ Every few minutes it reads, with a read-only key (`soc-posture`), three things:
 * the detection-and-response rule inventory: namespace, name and enabled, for the general,
   managed and service namespaces (the `dr-*` hives). The reply carries the rule bodies; they
   are parsed and dropped on the spot, never stored, logged or returned;
+* with the stamp key (optional), whether each general rule is still what the deploy wrote:
+  the stamp is recomputed from the body just read, compared, and the body is dropped (see
+  `Drift`);
 * the organization's errors (GET errors/{oid}): how many, and the newest one's component name.
   The messages are never read into anything that is kept.
 
@@ -40,7 +43,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,6 +53,19 @@ import psycopg
 from soc_api.config import Settings, get_settings
 from soc_api.logs import configure_logging
 from soc_api.reconcile import OID_RE, LcClient, LcError, _service_url
+from soc_api.rules.stamp import (
+    MANIFEST_ABSENT,
+    MANIFEST_BAD,
+    MANIFEST_NAME,
+    MANIFEST_NONE,
+    MANIFEST_OK,
+    MIN_KEY_CHARS,
+    RULE_CHANGED,
+    RULE_OK,
+    RULE_UNMANAGED,
+    check_manifest,
+    classify_rule,
+)
 from soc_api.status import platform_name
 from soc_api.worker import Db
 
@@ -70,6 +86,74 @@ class Limits:
     max_rules: int = 5000  # per namespace
     max_errors: int = 100000  # the count we are willing to store
     max_hostname: int = 253
+
+
+# ---- drift: is each rule still what the deploy wrote? ----
+
+PREFIX_RE = re.compile(r"[A-Za-z0-9 ._-]{3,64}")
+STAMP_KEY_RE = re.compile(rf"[A-Za-z0-9._-]{{{MIN_KEY_CHARS},255}}")
+MAX_MISSING = 200  # names kept for the Rules tab; the count is exact below this
+
+
+class Drift:
+    """Checks the general namespace against the stamps the deploy wrote.
+
+    Fed one rule at a time while the listing is parsed (`feed`); it keeps a verdict per rule
+    name and, for the manifest, the list of managed names it vouches for. Rule bodies, tags
+    and comments are used on the spot and never kept. With no stamp key, `Drift` is not
+    built and nothing is stored (drift unchecked, never "no drift")."""
+
+    def __init__(self, key: str, prefixes: tuple[str, ...]) -> None:
+        self._key = key
+        self._prefixes = prefixes
+        self._pending: list[tuple[str, Any, Any, bool, Any]] = []
+        self.manifest: str = MANIFEST_NONE
+        self._listed: frozenset[str] = frozenset()
+        self.verdicts: dict[str, str] = {}
+        self._seen: set[str] = set()
+
+    def feed(self, name: str, enabled: bool, record: dict[str, Any]) -> None:
+        self._seen.add(name)
+        meta = record.get("usr_mtd")
+        meta = meta if isinstance(meta, dict) else {}
+        data = record.get("data")
+        data = data if isinstance(data, dict) else {}
+        detect, respond = data.get("detect"), data.get("respond")
+        tags = meta.get("tags")
+        if name == MANIFEST_NAME:
+            self.manifest, listed = check_manifest(
+                self._key, detect, respond, enabled, tags, meta.get("comment")
+            )
+            self._listed = frozenset(listed)
+            return
+        # The verdict needs the manifest's list, which may come later in the listing.
+        self._pending.append((name, detect, respond, enabled, tags))
+
+    def finish(self) -> tuple[dict[str, str], dict[str, Any]]:
+        """({rule name: ok|changed|unmanaged} for the managed rules, the manifest document)."""
+        for name, detect, respond, enabled, tags in self._pending:
+            verdict = classify_rule(
+                self._key, self._prefixes, name, detect, respond, enabled, tags, self._listed
+            )
+            if verdict == RULE_OK and self.manifest == MANIFEST_OK and name not in self._listed:
+                # A good stamp on a name git does not list: a deployed body copied under a
+                # new name, or a rule the deploy left behind. Not what git says is there.
+                verdict = RULE_UNMANAGED
+            if verdict is not None:
+                self.verdicts[name] = verdict
+        self._pending = []
+        if self.manifest == MANIFEST_NONE and any(
+            v in (RULE_OK, RULE_CHANGED) for v in self.verdicts.values()
+        ):
+            # Stamped rules but no manifest: the manifest was deleted (or never written).
+            self.manifest = MANIFEST_ABSENT
+        missing = sorted(n for n in self._listed if n not in self._seen)
+        doc = {
+            "manifest": self.manifest,
+            "missing_count": len(missing),
+            "missing": missing[:MAX_MISSING],
+        }
+        return self.verdicts, doc
 
 
 # ---- the vendor API ----
@@ -105,8 +189,14 @@ class PostureClient(LcClient):
             query = {**query, "continuation_token": token}
         raise LcError("too_many_pages")
 
-    def list_rules(self, namespace: str, limits: Limits | None = None) -> list[tuple[str, bool]]:
-        """(name, enabled) of every rule of one namespace. Bodies are dropped here."""
+    def list_rules(
+        self,
+        namespace: str,
+        limits: Limits | None = None,
+        inspect: Callable[[str, bool, dict[str, Any]], None] | None = None,
+    ) -> list[tuple[str, bool]]:
+        """(name, enabled) of every rule of one namespace. Bodies are dropped here; `inspect`
+        (drift) sees each record on the way and must not keep it."""
         lim = limits or Limits()
         resp = self._get(f"hive/{RULE_HIVES[namespace]}/{self.oid}", {})
         if not isinstance(resp, dict):
@@ -125,7 +215,10 @@ class PostureClient(LcClient):
                 raise LcError("bad_shape")
             if not 1 <= len(name) <= 255:
                 raise LcError("bad_shape")
-            out.append((name, True if enabled is None else enabled))
+            flag = True if enabled is None else enabled
+            if inspect is not None:
+                inspect(name, flag, record)
+            out.append((name, flag))
         del resp
         return out
 
@@ -253,6 +346,8 @@ class Config:
     allow_http: bool
     interval_s: float
     health_file: str
+    stamp_key: str = field(default="", repr=False)
+    prefixes: tuple[str, ...] = ()
 
     @staticmethod
     def from_settings(s: Settings, *, need_db: bool = True) -> "Config":
@@ -266,6 +361,14 @@ class Config:
         if need_db and not db_url:
             raise ValueError("SOC_POSTURE_DATABASE_URL is missing (env/posture-db.env)")
         allow_http = s.env == "dev"
+        stamp_key = s.posture_stamp_key.get_secret_value()
+        prefixes: tuple[str, ...] = ()
+        if stamp_key:
+            if not STAMP_KEY_RE.fullmatch(stamp_key):
+                raise ValueError("SOC_POSTURE_STAMP_KEY is malformed (env/posture-rules.env)")
+            prefixes = tuple(p for p in s.posture_rules_prefixes.split("|") if p)
+            if not all(PREFIX_RE.fullmatch(p) for p in prefixes):
+                raise ValueError("SOC_POSTURE_RULES_PREFIXES is malformed (env/posture-rules.env)")
         return Config(
             oid=s.posture_lc_oid,
             key=key,
@@ -275,6 +378,8 @@ class Config:
             allow_http=allow_http,
             interval_s=s.posture_interval_seconds,
             health_file=s.posture_health_file,
+            stamp_key=stamp_key,
+            prefixes=prefixes,
         )
 
     def client(self) -> PostureClient:
@@ -298,9 +403,16 @@ class Counts:
     errors: int | None = 0  # None: the key cannot read the organization's errors
     skipped: int = 0
     namespaces_unavailable: int = 0
+    drifted: int | None = None  # None: drift not checked (no stamp key)
 
     def line(self) -> str:
-        return " ".join(f"{k}={'unavailable' if v is None else v}" for k, v in vars(self).items())
+        """`key=value` pairs; drift is left out when it is not checked (no stamp key), so the
+        line reads exactly as it did before drift existed."""
+        return " ".join(
+            f"{k}={'unavailable' if v is None else v}"
+            for k, v in vars(self).items()
+            if not (k == "drifted" and v is None)
+        )
 
 
 # A rules namespace the organization does not have (no managed rule sets, say) answers one
@@ -313,14 +425,15 @@ ERRORS_UNREADABLE = frozenset({"http_401", "http_403"})
 
 
 def rules_by_namespace(
-    lc: PostureClient, limits: Limits
+    lc: PostureClient, limits: Limits, drift: Drift | None = None
 ) -> tuple[dict[str, list[tuple[str, bool]]], list[str]]:
-    """The rules of every namespace that answered, and the namespaces that are not there."""
+    """The rules of every namespace that answered, and the namespaces that are not there.
+    `drift`, when given, looks at the general namespace's rules as they are read."""
     found: dict[str, list[tuple[str, bool]]] = {}
     missing: list[str] = []
     for ns in RULE_HIVES:
         try:
-            found[ns] = lc.list_rules(ns, limits)
+            found[ns] = lc.list_rules(ns, limits, drift.feed if drift and ns == "general" else None)
         except LcError as exc:
             if exc.code not in NAMESPACE_UNAVAILABLE:
                 raise
@@ -337,14 +450,36 @@ def errors_or_unknown(lc: PostureClient, limits: Limits) -> tuple[int | None, st
         return None, None
 
 
-def collect(lc: PostureClient, limits: Limits) -> tuple[dict[str, Any], Counts]:
-    """One whole snapshot from the vendor, or an LcError. Nothing is stored here."""
+def _drifted(verdicts: dict[str, str], doc: dict[str, Any] | None) -> int | None:
+    """How many things are wrong: rules changed or unmanaged, rules missing, a bad manifest."""
+    if doc is None:
+        return None
+    wrong = sum(1 for v in verdicts.values() if v != RULE_OK)
+    return (
+        wrong + int(doc["missing_count"]) + int(doc["manifest"] in (MANIFEST_BAD, MANIFEST_ABSENT))
+    )
+
+
+def collect(
+    lc: PostureClient, limits: Limits, drift: Drift | None = None
+) -> tuple[dict[str, Any], Counts]:
+    """One whole snapshot from the vendor, or an LcError. Nothing is stored here.
+    With `drift`, each general rule carries its verdict and the document a `drift` block."""
     everyone = lc.list_sensors(online_only=False, limits=limits)
     online = lc.list_sensors(online_only=True, limits=limits)
     sensors, skipped = shape_sensors(everyone, online)
-    found, missing = rules_by_namespace(lc, limits)
+    found, missing = rules_by_namespace(lc, limits, drift)
+    verdicts: dict[str, str] = {}
+    drift_doc: dict[str, Any] | None = None
+    if drift is not None and "general" in found:
+        verdicts, drift_doc = drift.finish()
     rules = [
-        {"namespace": ns, "name": name, "enabled": enabled}
+        {
+            "namespace": ns,
+            "name": name,
+            "enabled": enabled,
+            "drift": verdicts.get(name) if ns == "general" else None,
+        }
         for ns, listed in found.items()
         for name, enabled in listed
     ]
@@ -356,8 +491,15 @@ def collect(lc: PostureClient, limits: Limits) -> tuple[dict[str, Any], Counts]:
         errors=count,
         skipped=skipped,
         namespaces_unavailable=len(missing),
+        drifted=_drifted(verdicts, drift_doc),
     )
-    doc = {"sensors": sensors, "rules": rules, "org_errors": {"count": count, "newest": newest}}
+    doc: dict[str, Any] = {
+        "sensors": sensors,
+        "rules": rules,
+        "org_errors": {"count": count, "newest": newest},
+    }
+    if drift_doc is not None:
+        doc["drift"] = drift_doc
     return doc, counts
 
 
@@ -370,7 +512,11 @@ class Collector:
         interval_s: float = 300.0,
         limits: Limits | None = None,
         health_file: str | None = None,
+        stamp_key: str = "",
+        prefixes: tuple[str, ...] = (),
     ) -> None:
+        self.stamp_key = stamp_key
+        self.prefixes = prefixes
         self.lc = lc
         self.db = db
         self.interval_s = interval_s
@@ -380,7 +526,8 @@ class Collector:
 
     def run_once(self) -> Counts:
         self.counts = Counts()
-        doc, counts = collect(self.lc, self.limits)
+        drift = Drift(self.stamp_key, self.prefixes) if self.stamp_key else None
+        doc, counts = collect(self.lc, self.limits, drift)
         self.counts = counts
         self.db.record(doc)
         return counts
@@ -498,7 +645,14 @@ def main(argv: list[str]) -> int:
         return check(cfg)
 
     db = PostureDb(cfg.db_url)
-    collector = Collector(cfg.client(), db, interval_s=cfg.interval_s, health_file=cfg.health_file)
+    collector = Collector(
+        cfg.client(),
+        db,
+        interval_s=cfg.interval_s,
+        health_file=cfg.health_file,
+        stamp_key=cfg.stamp_key,
+        prefixes=cfg.prefixes,
+    )
     try:
         if args.command == "once":
             return 0 if collector.cycle() else 1

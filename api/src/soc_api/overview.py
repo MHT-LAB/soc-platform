@@ -347,6 +347,7 @@ def stale_firing(data: dict[str, Any]) -> dict[str, bool]:
         LIMITS,
         count(h["posture_runs"]),
         number(h["posture_quiet_s"]),
+        count(h.get("rules_drift")),
     )
 
 
@@ -463,6 +464,9 @@ def health(data: dict[str, Any]) -> list[dict[str, str]]:
         posture = ("idle", "not set up")
     elif firing["posture_quiet"]:
         posture = ("down", f"no good run for {dur(h['posture_quiet_s'])}")
+    elif firing["rules_drift"]:
+        n = count(h.get("rules_drift"))
+        posture = ("down", f"{n} detection rule {'change' if n == 1 else 'changes'} outside git")
     elif org is None:
         posture = ("up", "sensors and rules every 5 minutes; org errors not readable with this key")
     elif count(org):
@@ -741,6 +745,44 @@ def rules(data: dict[str, Any]) -> list[dict[str, Any]]:
         }
         for r in data["rules"]
     ]
+
+
+MANIFEST_WORDS = {
+    "ok": "intact",
+    "none": "none yet (nothing has been deployed from git)",
+    "bad": "changed by hand or not made with this key",
+    "absent": "missing, though stamped rules exist",
+}
+DRIFT_WORDS = {"changed": "changed outside git", "unmanaged": "made by hand, not deployed"}
+
+
+def rules_drift(data: dict[str, Any]) -> dict[str, Any] | None:
+    """The drift block for the Rules tab, or None when the collector is not checking drift
+    (no stamp key): not checking is shown as such, never as "no drift"."""
+    d = data.get("rules_drift")
+    if not isinstance(d, dict):
+        return None
+    raw = d.get("manifest")
+    manifest = raw if isinstance(raw, str) and raw in MANIFEST_WORDS else "bad"
+    listed = d.get("rules")
+    changed = [
+        {"name": str(r.get("name", "")), "what": DRIFT_WORDS.get(str(r.get("state")), "changed")}
+        for r in (listed if isinstance(listed, list) else [])
+        if isinstance(r, dict)
+    ]
+    names = d.get("missing")
+    missing = [str(n) for n in names if isinstance(n, str)] if isinstance(names, list) else []
+    missing_count = max(count(d.get("missing_count")), len(missing))
+    wrong = len(changed) + missing_count + int(manifest in ("bad", "absent"))
+    return {
+        "manifest": manifest,
+        "manifest_text": MANIFEST_WORDS[manifest],
+        "changed": changed,
+        "missing": missing,
+        "missing_count": missing_count,
+        "ok": count(d.get("ok")),
+        "wrong": wrong,
+    }
 
 
 def clock(epoch: float | None = None, tz_name: str = "America/New_York") -> dict[str, str]:

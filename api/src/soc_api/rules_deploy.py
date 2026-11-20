@@ -43,7 +43,9 @@ from soc_api.reconcile import OID_RE, TOKEN_REFRESH_S, LcClient, LcError
 from soc_api.reconcile import _json as parse_json
 from soc_api.rules.loader import RuleFile, load_tree
 from soc_api.rules.stamp import (
+    MANIFEST_DETECT,
     MANIFEST_NAME,
+    MANIFEST_RESPOND,
     MIN_KEY_CHARS,
     TAG_PREFIX,
     has_stamp_tag,
@@ -64,16 +66,6 @@ PREFIX_RE = re.compile(r"[A-Za-z0-9 ._-]{3,64}")
 MAX_PROBLEMS_SHOWN = 20
 
 OK, FAILED, DECLINED, REFUSED = 0, 1, 3, 2
-
-# The manifest is a rule that can never fire: it exists so its comment can hold the list of
-# managed names (a rule deleted live is then found missing). Disabled, reports only.
-MANIFEST_DETECT: dict[str, Any] = {
-    "event": "NEW_PROCESS",
-    "op": "is",
-    "path": "event/COMMAND_LINE",
-    "value": "soc-manifest-this-rule-never-fires",
-}
-MANIFEST_RESPOND: list[dict[str, Any]] = [{"action": "report", "name": "soc-manifest"}]
 
 
 class ConfigError(Exception):

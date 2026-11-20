@@ -126,7 +126,7 @@ def test_the_writer_reads_only_the_columns_the_overview_needs(fx: Fixture) -> No
     for table, columns in (
         ("source", ("id", "client_id", "type", "enabled")),
         ("sensor_state", ("hostname", "online", "last_seen", "updated_at")),
-        ("rule_inventory", ("namespace", "name", "enabled")),
+        ("rule_inventory", ("namespace", "name", "enabled", "drift")),
         ("deploy_event", ("at", "sha")),
         ("reconcile_cursor", ("source_id", "last_error", "last_success")),
         ("posture_run", ("at", "ok", "org_error_count")),

@@ -6,6 +6,27 @@
 {% block lede %}The noisiest detection rules in the period, which is where tuning starts.{% endblock %}
 {% block body %}
   <section class="card">
+    <div class="card-head"><h2>Deployed from git</h2><span class="meta">each rule's stamp, checked by the posture collector</span></div>
+    {% if drift %}
+      {% if drift.wrong %}
+      <p><span class="chip down">{{ drift.wrong }} to look at</span> {{ drift.ok }} rule{{ '' if drift.ok == 1 else 's' }} match what was deployed. Manifest: {{ drift.manifest_text }}.</p>
+      <div class="scroll"><table>
+        <thead><tr><th>Rule</th><th>What is wrong</th></tr></thead>
+        <tbody>
+        {% for r in drift.changed %}<tr><td class="mono">{{ r.name | vis(255) }}</td><td>{{ r.what }}</td></tr>{% endfor %}
+        {% for n in drift.missing %}<tr><td class="mono">{{ n | vis(255) }}</td><td>in git, not in the platform</td></tr>{% endfor %}
+        {% if drift.missing_count > drift.missing | length %}<tr><td colspan="2" class="dim">and {{ drift.missing_count - drift.missing | length }} more missing</td></tr>{% endif %}
+        </tbody>
+      </table></div>
+      {% else %}
+      <p><span class="chip up">no drift</span> {{ drift.ok }} rule{{ '' if drift.ok == 1 else 's' }} match what was deployed. Manifest: {{ drift.manifest_text }}.</p>
+      {% endif %}
+    {% else %}
+    <div class="empty"><p>Not checked: the posture collector has no stamp key.</p></div>
+    {% endif %}
+  </section>
+
+  <section class="card">
     <div class="card-head"><h2>Top noisy rules · {{ period_label | lower }}</h2><span class="meta">up to 25, by alert count</span></div>
     {% if rows %}
     <div class="scroll"><table>
