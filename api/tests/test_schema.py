@@ -122,6 +122,7 @@ def test_migrations_apply_and_create_every_table(db: TestDb) -> None:
         "sensor_state",
         "sensor_count",
         "rule_inventory",
+        "rules_drift",
         "deploy_event",
     }
 

@@ -17,6 +17,7 @@ from conftest import ROLE_PASSWORD, TestDb
 from test_posture import OID, FakeLc, client, settings
 from test_worker_db import Fixture
 
+from soc_api import db as soc_db
 from soc_api import overview as ov
 from soc_api import posture as p
 from soc_api import worker as w
@@ -178,6 +179,13 @@ def test_a_deployed_org_has_no_drift(lc: FakeLc) -> None:
     assert {r["drift"] for r in doc["rules"] if r["namespace"] != "general"} == {None}
 
 
+def test_the_log_line_gives_the_drift_count_only_when_drift_is_checked(lc: FakeLc) -> None:
+    _, checked = run(lc)
+    _, unchecked = run(lc, key="")
+    assert checked.line().endswith(" drifted=0")
+    assert "drifted=" not in unchecked.line()
+
+
 def test_a_rule_edited_in_the_web_app_is_changed(lc: FakeLc) -> None:
     lc.rules["dr-general"]["T - One"]["data"]["detect"] = dict(DETECT, value="evil.exe")
     doc, counts = run(lc)
@@ -240,6 +248,13 @@ def test_a_forged_manifest_is_bad_and_cannot_hide_a_deleted_rule(lc: FakeLc) -> 
     del lc.rules["dr-general"]["T - Two"]
     doc, counts = run(lc)
     assert doc["drift"]["manifest"] == "bad" and counts.drifted == 1
+
+
+def test_a_good_stamp_on_a_name_the_manifest_does_not_list_is_unmanaged(lc: FakeLc) -> None:
+    # A deployed body copied under a new name carries a valid stamp, but git never named it.
+    lc.rules["dr-general"]["Copy Of One"] = deployed("Copy Of One")
+    doc, counts = run(lc)
+    assert verdicts(doc)["Copy Of One"] == "unmanaged" and counts.drifted == 1
 
 
 def test_an_edited_manifest_body_is_bad(lc: FakeLc) -> None:
@@ -537,6 +552,24 @@ def test_a_bad_drift_field_is_refused_and_nothing_is_written(
     )
 
 
+def test_deleting_the_manifest_and_every_managed_rule_stays_absent_not_none(
+    fx: Fixture, posture_db: p.PostureDb
+) -> None:
+    posture_db.record(base_doc(CLEAN, A="ok"))
+    none = {"manifest": "none", "missing_count": 0, "missing": []}
+    for _ in range(2):  # and it stays so on the next runs
+        posture_db.record(base_doc(none, Lab=None))
+        assert fx.rows("SELECT manifest FROM rules_drift") == [("absent",)]
+        assert fx.one("SELECT checked, wrong FROM rules_drift_health()") == (True, 1)
+    posture_db.record(base_doc(CLEAN, A="ok"))
+    assert fx.rows("SELECT manifest FROM rules_drift") == [("ok",)]
+
+
+def test_a_first_check_with_nothing_deployed_is_none(fx: Fixture, posture_db: p.PostureDb) -> None:
+    posture_db.record(base_doc({"manifest": "none", "missing_count": 0, "missing": []}))
+    assert fx.one("SELECT checked, wrong FROM rules_drift_health()") == (True, 0)
+
+
 def test_an_old_collector_document_without_the_new_fields_still_records(
     fx: Fixture, posture_db: p.PostureDb
 ) -> None:
@@ -620,3 +653,38 @@ def test_the_console_overview_carries_the_count_and_the_names(
     # The page builder reads the same data.
     assert ov.rules_drift(data) is not None
     assert ov.stale_firing(data)["rules_drift"] is True
+
+
+def drift_snapshot(fx: Fixture) -> dict[str, Any]:
+    return {
+        "functions": fx.rows(
+            "SELECT p.proname, pg_get_functiondef(p.oid) FROM pg_proc p "
+            "WHERE p.proname IN ('posture_record', 'ops_overview', 'rules_drift_health') "
+            "ORDER BY 1"
+        ),
+        "columns": fx.rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'rule_inventory' ORDER BY 1"
+        ),
+        "tables": fx.rows("SELECT to_regclass('rules_drift')::text"),
+        "policies": fx.rows(
+            "SELECT tablename, policyname FROM pg_policies "
+            "WHERE tablename IN ('rule_inventory', 'rules_drift') ORDER BY 1, 2"
+        ),
+    }
+
+
+def test_downgrade_restores_the_0017_definitions_exactly(fx: Fixture) -> None:
+    url = fx.db.sqlalchemy_url()
+    head = drift_snapshot(fx)
+    assert head["tables"] == [("rules_drift",)]
+    soc_db.downgrade(url, "0017")
+    after_down = drift_snapshot(fx)
+    assert after_down["tables"] == [(None,)]
+    assert [n for n, _ in after_down["functions"]] == ["ops_overview", "posture_record"]
+    # the 0017 definitions are what the earlier migrations themselves build
+    soc_db.downgrade(url, "0010")
+    soc_db.upgrade(url, "0017")
+    assert drift_snapshot(fx) == after_down
+    soc_db.upgrade(url)
+    assert drift_snapshot(fx) == head

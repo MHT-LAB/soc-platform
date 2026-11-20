@@ -58,9 +58,11 @@ from soc_api.rules.stamp import (
     MANIFEST_BAD,
     MANIFEST_NAME,
     MANIFEST_NONE,
+    MANIFEST_OK,
     MIN_KEY_CHARS,
     RULE_CHANGED,
     RULE_OK,
+    RULE_UNMANAGED,
     check_manifest,
     classify_rule,
 )
@@ -133,6 +135,10 @@ class Drift:
             verdict = classify_rule(
                 self._key, self._prefixes, name, detect, respond, enabled, tags, self._listed
             )
+            if verdict == RULE_OK and self.manifest == MANIFEST_OK and name not in self._listed:
+                # A good stamp on a name git does not list: a deployed body copied under a
+                # new name, or a rule the deploy left behind. Not what git says is there.
+                verdict = RULE_UNMANAGED
             if verdict is not None:
                 self.verdicts[name] = verdict
         self._pending = []
@@ -400,7 +406,13 @@ class Counts:
     drifted: int | None = None  # None: drift not checked (no stamp key)
 
     def line(self) -> str:
-        return " ".join(f"{k}={'unavailable' if v is None else v}" for k, v in vars(self).items())
+        """`key=value` pairs; drift is left out when it is not checked (no stamp key), so the
+        line reads exactly as it did before drift existed."""
+        return " ".join(
+            f"{k}={'unavailable' if v is None else v}"
+            for k, v in vars(self).items()
+            if not (k == "drifted" and v is None)
+        )
 
 
 # A rules namespace the organization does not have (no managed rule sets, say) answers one

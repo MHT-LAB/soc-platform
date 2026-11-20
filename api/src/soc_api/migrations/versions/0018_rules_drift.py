@@ -75,8 +75,13 @@ REC_STATE_NEW = """-- drift: manifest state and the listed rules that are gone. 
                        ARRAY(SELECT m #>> '{}'
                              FROM jsonb_array_elements(p_doc -> 'drift' -> 'missing') m),
                        now()
+                -- Once a manifest has been seen, "none" (no manifest, no stamped rule) can
+                -- only mean both were deleted: it is kept as "absent" until a manifest is back.
                 ON CONFLICT (singleton) DO UPDATE SET
-                    manifest = EXCLUDED.manifest, missing_count = EXCLUDED.missing_count,
+                    manifest = CASE WHEN EXCLUDED.manifest = 'none'
+                                         AND rules_drift.manifest <> 'none'
+                                    THEN 'absent' ELSE EXCLUDED.manifest END,
+                    missing_count = EXCLUDED.missing_count,
                     missing = EXCLUDED.missing, updated_at = now();
             ELSE
                 DELETE FROM rules_drift;
