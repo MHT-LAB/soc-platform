@@ -127,17 +127,23 @@ OV_BLOCK_NEW = """'rule_inventory', v_inventory,
 OVERVIEW_SWAPS = [(OV_HEALTH_OLD, OV_HEALTH_NEW), (OV_BLOCK_OLD, OV_BLOCK_NEW)]
 
 
+# The two roles whose functions are rewritten, as fixed statements (no SQL is built from text).
+GRANTS = {
+    "soc_posture_writer": text("GRANT soc_posture_writer TO current_user"),
+    "soc_console_writer": text("GRANT soc_console_writer TO current_user"),
+}
+DEFINITION = text("SELECT pg_get_functiondef(CAST(:signature AS regprocedure))")
+
+
 def _swap(signature: str, role: str, swaps: list[tuple[str, str]], *, reverse: bool) -> None:
     conn = op.get_bind()
-    definition = conn.execute(
-        text(f"SELECT pg_get_functiondef('{signature}'::regprocedure)")
-    ).scalar_one()
+    definition = conn.execute(DEFINITION, {"signature": signature}).scalar_one()
     for old, new in swaps:
         a, b = (new, old) if reverse else (old, new)
         if definition.count(a) != 1:
             raise RuntimeError(f"{signature} is not the definition this migration expects")
         definition = definition.replace(a, b)
-    conn.execute(text(f"GRANT {role} TO current_user"))
+    conn.execute(GRANTS[role])
     conn.exec_driver_sql(definition)
 
 
