@@ -162,6 +162,11 @@ class Settings(BaseSettings):
     posture_database_url: SecretStr = SecretStr("")
     posture_lc_key: SecretStr = SecretStr("")
     posture_lc_oid: str = ""
+    # Drift (E4), optional: with the stamp key (env/posture-rules.env, the same value the
+    # rules deploy stamps with) the collector checks every general rule's stamp. The prefixes
+    # are the managed name prefixes, separated by "|". Neither is ever logged or stored.
+    posture_stamp_key: SecretStr = SecretStr("")
+    posture_rules_prefixes: str = ""
     # Capped so the container's health check (15 minutes) always holds.
     posture_interval_seconds: float = Field(default=300.0, ge=60.0, le=600.0)
     posture_health_file: str = "/tmp/posture-health"  # noqa: S108 - the container's tmpfs

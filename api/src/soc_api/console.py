@@ -614,7 +614,11 @@ def ov_context(page: str, data: dict[str, Any]) -> dict[str, Any]:
         }
     if page == "sources":
         return {"rows": ov.sources(data)}
-    return {"rows": ov.rules(data), "inventory": data["rule_inventory"]}
+    return {
+        "rows": ov.rules(data),
+        "inventory": data["rule_inventory"],
+        "drift": ov.rules_drift(data),
+    }
 
 
 async def render_overview(
