@@ -618,6 +618,7 @@ def ov_context(page: str, data: dict[str, Any]) -> dict[str, Any]:
         "rows": ov.rules(data),
         "inventory": data["rule_inventory"],
         "drift": ov.rules_drift(data),
+        "metrics": ov.rules_metrics(data.get("rules_metrics")),
     }
 
 
@@ -642,6 +643,12 @@ async def render_overview(
         raise HTTPException(status_code=400, detail="unknown client") from None
     except CasesUnavailable:
         return unavailable(request, user, configured=True)
+    if page == "rules":
+        # a separate read: if only it fails, the rest of the page still shows
+        try:
+            data["rules_metrics"] = await run_in_threadpool(db.rules_metrics, client)
+        except (BadFilter, CasesUnavailable):
+            data["rules_metrics"] = None
     context: dict[str, Any] = {
         "user": user,
         "nav_on": page,

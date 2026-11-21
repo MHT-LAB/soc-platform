@@ -130,6 +130,19 @@ class CaseDb:
             raise CasesUnavailable
         return row[0]
 
+    def rules_metrics(self, client: str) -> dict[str, Any]:
+        """The Rules tab's per-rule numbers (migration 0020). Same refusals as ops_overview."""
+        try:
+            with psycopg.connect(**self._params) as conn:
+                row = conn.execute("SELECT rules_metrics(%s)", (client,)).fetchone()
+        except psycopg.errors.RaiseException as exc:
+            raise BadFilter from exc
+        except psycopg.Error as exc:
+            raise CasesUnavailable from exc
+        if row is None or not isinstance(row[0], dict):
+            raise CasesUnavailable
+        return row[0]
+
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         doc = self._one("SELECT get_case(%s)", (case_id,))
         return doc if isinstance(doc, dict) else None

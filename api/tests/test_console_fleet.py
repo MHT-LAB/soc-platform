@@ -60,6 +60,9 @@ class FakeDb:
         health: dict[str, Any] = self.data["health"]
         return health
 
+    def rules_metrics(self, client: str) -> dict[str, Any]:
+        return {"rules": [], "tactics": [], "deployed_at": None}
+
     def ops_overview(self, days: int, client: str) -> dict[str, Any]:
         self.overview_calls.append((days, client))
         if self.error:

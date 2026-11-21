@@ -747,6 +747,62 @@ def rules(data: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def share(part: int, whole: int) -> str:
+    """A percentage in whole numbers, or an en dash when there is nothing to divide by."""
+    return f"{round(part / whole * 100)}%" if whole > 0 else "\u2013"
+
+
+def rules_metrics(doc: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What the Rules tab's quality card shows, from rules_metrics(). None when the numbers
+    could not be read (the card says so; the rest of the page still shows)."""
+    if not isinstance(doc, dict):
+        return None
+    rows = []
+    for r in doc.get("rules") or []:
+        if not isinstance(r, dict):
+            continue
+        a7, a30 = count(r.get("alerts_7")), count(r.get("alerts_30"))
+        judged, noise = count(r.get("judged")), min(count(r.get("noise")), count(r.get("judged")))
+        rows.append(
+            {
+                "rule": str(r.get("rule") or "(no rule name)"),
+                "alerts_7": a7,
+                "alerts_30": a30,
+                "per_day_7": f1(a7 / 7),
+                "per_day_30": f1(a30 / 30),
+                "judged": judged,
+                "noise": noise,
+                "fp_share": share(noise, judged),
+                "hot": judged >= 3 and noise * 2 > judged,
+            }
+        )
+    alerts: dict[str, int] = {}
+    rules: dict[str, set[str]] = {}
+    for t in doc.get("tactics") or []:
+        if not isinstance(t, dict):
+            continue
+        name = TACTIC_BY_KEY.get(tactic_key(str(t.get("tactic", ""))), "Other")
+        alerts[name] = alerts.get(name, 0) + count(t.get("alerts"))
+        rules.setdefault(name, set()).add(str(t.get("rule", "")))
+    coverage = [
+        {"name": name, "alerts": alerts.get(name, 0), "rules": len(rules.get(name, ()))}
+        for name in (*TACTICS, "Other")
+        if name != "Other" or name in alerts
+    ]
+    deployed = doc.get("deployed_at")
+    return {
+        "rows": rows,
+        "coverage": coverage,
+        "covered": sum(1 for c in coverage if c["rules"] and c["name"] != "Other"),
+        "tactic_total": len(TACTICS),
+        "deployed": (
+            datetime.fromtimestamp(deployed, UTC).strftime("%Y-%m-%d %H:%M UTC")
+            if isinstance(deployed, int) and not isinstance(deployed, bool) and deployed > 0
+            else None
+        ),
+    }
+
+
 MANIFEST_WORDS = {
     "ok": "intact",
     "none": "none yet (nothing has been deployed from git)",

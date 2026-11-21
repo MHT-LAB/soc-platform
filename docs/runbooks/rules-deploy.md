@@ -95,3 +95,17 @@ Only rules of kind `rule` in the organization's own folder are deployed. False-p
 and file-integrity lists are other hives; they are checked in CI but not deployed here yet.
 Rules in the baseline and draft folders are not deployed: a rule reaches the platform by being
 in the organization's folder, with an explicit `enabled`.
+
+## Rule quality on the Rules tab
+
+The "Rule quality" card reads migration 0020's `rules_metrics()` and always covers the last 7
+and 30 days, whatever period the tab is set to. Per rule: alerts and alerts per day, the
+cases it raised that were closed with a verdict (duplicates left out), how many of those were
+closed as our test, our admin work or a false positive, and that share. A rule is marked when
+three or more of its cases were judged and more than half were noise. A share needs closed
+cases: with none it shows a dash, not 0%.
+
+"ATT&CK tactics seen" counts the tactic carried by each alert, so it shows what the rules have
+raised, not what they could catch. It is not coverage of the rules in git: the platform does
+not hold each rule's `mitre` field, so a rule that never fired is not counted. The deploy time
+shown is the newest manifest on record, not a per-rule change time (stamps carry no time).
