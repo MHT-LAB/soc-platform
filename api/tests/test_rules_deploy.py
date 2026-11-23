@@ -745,6 +745,25 @@ def real_client(fake: FakeLc) -> rd.RulesClient:
     )
 
 
+def test_a_rule_with_null_tags_is_read_as_no_tags(lc: FakeLc) -> None:
+    # The shape the platform really sends for every rule (seen on the live org, 2026-11-23).
+    lc.rules = {
+        "Rule A": {
+            "data": {"detect": {"op": "exists"}, "respond": []},
+            "usr_mtd": {
+                "comment": "",
+                "enabled": True,
+                "expiry": 0,
+                "tags": None,
+                "ui_actions": None,
+            },
+            "sys_mtd": {"etag": "abc"},
+        }
+    }
+    got = real_client(lc).list_rules()["Rule A"]
+    assert got.tags == [] and got.enabled is True and got.etag == "abc"
+
+
 def test_the_client_reads_rules_with_their_bodies_tags_and_etags(lc: FakeLc) -> None:
     lc.rules = {
         "Rule A": {
@@ -776,6 +795,8 @@ def test_the_client_reads_rules_with_their_bodies_tags_and_etags(lc: FakeLc) -> 
         {"R": {"data": {}, "usr_mtd": {"enabled": "yes"}}},
         {"R": {"data": {}, "usr_mtd": {"tags": "x"}}},
         {"R": {"data": {}, "usr_mtd": {"tags": [1]}}},
+        {"R": {"data": {}, "usr_mtd": {"tags": ""}}},  # only null means no tags
+        {"R": {"data": {}, "usr_mtd": {"tags": False}}},
     ],
 )
 def test_the_client_refuses_shapes_it_does_not_know(lc: FakeLc, body: Any) -> None:
