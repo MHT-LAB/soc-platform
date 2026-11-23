@@ -29,6 +29,14 @@ ENV_FILE_RE = re.compile(r"env/[a-z0-9-]+\.env")
 SERVICE_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
 # Health checks the apply step knows how to run, by name. A key file can never carry a command.
 SUPPORTED_CHECKS = ("posture_check",)
+# Creating a first key also knows the rules service's login check, and "none" for a file that no
+# running service reads: "none" is allowed only when nothing is restarted, so a restarted
+# service always gets a real check.
+PROVISION_CHECKS = (*SUPPORTED_CHECKS, "rules_plan")
+NO_CHECK = "none"
+SELF_VENDOR = "self"
+GENERATED_CHARSET = "A-Za-z0-9._-"
+MIN_GENERATED, MAX_GENERATED = 32, 128
 ROTATOR_PROJECT = "SOC-rotated"
 
 
@@ -56,6 +64,32 @@ class ApplySpec:
 
 
 @dataclass(frozen=True)
+class ConsumerSpec:
+    """One env file that holds the stored value, and what to run once it does."""
+
+    env_file: str
+    env_var: str
+    restart: tuple[str, ...]
+    check: str  # a name from PROVISION_CHECKS, or NO_CHECK when nothing is restarted
+
+
+@dataclass(frozen=True)
+class ProvisionSpec:
+    """What creating a first key needs. For a vendor key: its console name and exact
+    permissions. For a `self` key (a random value, no vendor call): its length. Both: where the
+    value is stored and which env files get it. Built only for a key marked not ready."""
+
+    vendor: str  # limacharlie | self
+    console_name: str  # "" for a self key
+    perms: tuple[str, ...]  # () for a self key
+    org_name: str  # the secret that holds the organization id; "" for a self key
+    length: int  # 0 for a vendor key
+    path: str
+    secret_name: str
+    consumers: tuple[ConsumerSpec, ...]
+
+
+@dataclass(frozen=True)
 class KeyFile:
     id: str
     name: str
@@ -67,6 +101,7 @@ class KeyFile:
     check: str  # manual keys: how a person proves the new key works (shown in the plan)
     apply: ApplySpec | None = None  # set for an automatic key this build can rotate
     apply_note: str = ""  # why not, for an automatic key this build cannot rotate yet
+    provision: ProvisionSpec | None = None  # set for a not-ready key this build can create
 
 
 @dataclass(frozen=True)
@@ -173,6 +208,80 @@ def parse_apply(doc: dict[str, Any], ready: bool) -> tuple[ApplySpec | None, str
     )
 
 
+def _consumers(doc: dict[str, Any], secret_name: str) -> tuple[tuple[ConsumerSpec, ...], str]:
+    """The env files that get the value: (consumers, why-not). One or two files, each mapping
+    the stored value to one variable, none with a follow-up step."""
+    raw = doc.get("consumer")
+    if not (isinstance(raw, list) and 1 <= len(raw) <= 2 and all(isinstance(c, dict) for c in raw)):
+        return (), "this build creates a key for one or two env files"
+    out: list[ConsumerSpec] = []
+    for c in raw:
+        if c.get("kind") != "env_file" or c.get("host") != "ct110":
+            return (), "this build handles an env file on the host only"
+        if c.get("post_step", "none") != "none":
+            return (), "this build has no follow-up step"
+        env_file, restart, env_map = c.get("env_file"), _strings(c.get("restart")), c.get("env_map")
+        if not (isinstance(env_file, str) and ENV_FILE_RE.fullmatch(env_file)) or restart is None:
+            return (), "a consumer's file or services are malformed"
+        if not all(SERVICE_RE.fullmatch(x) for x in restart):
+            return (), "a consumer's services are malformed"
+        if not (isinstance(env_map, dict) and list(env_map) == [secret_name]):
+            return (), "each consumer must map the stored value to one variable"
+        var, check = env_map[secret_name], c.get("check")
+        if not (isinstance(var, str) and ENV_RE.fullmatch(var)):
+            return (), "a consumer's variable name is malformed"
+        if check not in (*PROVISION_CHECKS, NO_CHECK) or (check == NO_CHECK and restart):
+            return (
+                (),
+                "a consumer needs a health check this build knows"
+                " (none only if it restarts nothing)",
+            )
+        out.append(ConsumerSpec(env_file, var, restart, str(check)))
+    if len({c.env_file for c in out}) != len(out):
+        return (), "two consumers name the same file"
+    return tuple(out), ""
+
+
+def parse_provision(doc: dict[str, Any], vendor: str) -> tuple[ProvisionSpec | None, str]:
+    """The details for creating a first key (spec, why-not). Only called for a key marked not
+    ready: a ready key is rotated, never created. A wrong or missing detail is a why-not, so the
+    key is listed as not creatable yet instead of the register being refused."""
+    store = doc.get("store")
+    if not isinstance(store, dict) or store.get("kind") != "secrets_manager":
+        return None, "the value is not in the secrets manager"
+    names = _strings(store.get("names"))
+    if names is None or len(names) != 1 or not NAME_RE.fullmatch(names[0]):
+        return None, "this build stores one value per key"
+    project, path = store.get("project"), store.get("path")
+    if project != ROTATOR_PROJECT or not (isinstance(path, str) and path.startswith("/")):
+        return None, f"the value is not in project {ROTATOR_PROJECT}"
+    consumers, why = _consumers(doc, names[0])
+    if not consumers:
+        return None, why
+    if vendor == SELF_VENDOR:
+        gen = doc.get("generate")
+        length = gen.get("length") if isinstance(gen, dict) else None
+        if not (
+            isinstance(gen, dict)
+            and gen.get("kind") == "random"
+            and gen.get("charset") == GENERATED_CHARSET
+            and isinstance(length, int)
+            and not isinstance(length, bool)
+            and MIN_GENERATED <= length <= MAX_GENERATED
+        ):
+            return None, "generate must be a random value of 32 to 128 of A-Za-z0-9._-"
+        return ProvisionSpec(vendor, "", (), "", length, path, names[0], consumers), ""
+    scope = doc.get("scope")
+    perms = _strings(scope.get("perms")) if isinstance(scope, dict) else None
+    org_name = scope.get("org_store_name") if isinstance(scope, dict) else None
+    console = _text(doc, "console_name", limit=64)
+    if not perms or console is None or not NAME_RE.fullmatch(console):
+        return None, "perms and console_name are required to create a vendor key"
+    if not (isinstance(org_name, str) and NAME_RE.fullmatch(org_name)):
+        return None, "no org_store_name"
+    return ProvisionSpec(vendor, console, perms, org_name, 0, path, names[0], consumers), ""
+
+
 def parse_key(file_name: str, stem: str, doc: dict[str, Any]) -> tuple[KeyFile | None, list[str]]:
     """One file's document: the key, or the problems (field names only, never values)."""
     problems: list[str] = []
@@ -211,13 +320,15 @@ def parse_key(file_name: str, stem: str, doc: dict[str, Any]) -> tuple[KeyFile |
     manual = doc.get("manual")
     if isinstance(manual, dict):
         check = _text(manual, "check") or ""
-    spec, why_not = None, ""
+    spec, why_not, prov = None, "", None
     if method == "automatic" and vendor == "limacharlie" and isinstance(ready, bool):
         spec, why_not, unsafe = parse_apply(doc, ready)
         for message in unsafe:
             bad(message)
     elif method == "automatic":
         why_not = "this build rotates detection-vendor keys only"
+    if method == "automatic" and ready is False and vendor in ("limacharlie", SELF_VENDOR):
+        prov, _ = parse_provision(doc, vendor)
     if problems:
         return None, problems
     assert isinstance(key_id, str) and isinstance(name, str)  # noqa: S101 - narrowed above
@@ -235,6 +346,7 @@ def parse_key(file_name: str, stem: str, doc: dict[str, Any]) -> tuple[KeyFile |
             check=printable(check, 120),
             apply=spec,
             apply_note=why_not,
+            provision=prov,
         ),
         [],
     )

@@ -376,6 +376,13 @@ RIGHTS = (
         ["--apply", PLAN_HASH, "extra"],
         ["--preflight", "extra"],
         ["--preflight", "--apply", PLAN_HASH],
+        ["--provision"],
+        ["--provision", "ABCDEF123456"],
+        ["--provision", "abc"],
+        ["--provision", "0123456789abc"],
+        ["--provision", "$(id)"],
+        ["--provision", PLAN_HASH, "extra"],
+        ["--provision", PLAN_HASH, "--apply", PLAN_HASH],
     ],
 )
 def test_host_mode_arguments_are_checked_before_anything_runs(host: Host, args: list[str]) -> None:
@@ -385,13 +392,14 @@ def test_host_mode_arguments_are_checked_before_anything_runs(host: Host, args: 
 
 
 def test_the_host_modes_run_python_on_the_host_never_the_container(host: Host) -> None:
-    for args in (["--preflight"], ["--apply", PLAN_HASH]):
+    for args in (["--preflight"], ["--apply", PLAN_HASH], ["--provision", PLAN_HASH]):
         host.run(*args, stdin=RIGHTS)
     assert host.docker_calls() == ""  # no compose, no container
-    assert host.py_args.read_text().count("-I -c") == 2  # python in isolated mode, twice
+    assert host.py_args.read_text().count("-I -c") == 3  # python in isolated mode, three times
     assert (
         "--preflight" in host.py_args.read_text()
         and f"--apply {PLAN_HASH}" in host.py_args.read_text()
+        and f"--provision {PLAN_HASH}" in host.py_args.read_text()
     )
 
 
@@ -440,7 +448,9 @@ def test_the_python_exit_code_and_its_record_come_back_through_the_script(host: 
     assert "refused-register" in host.rotate_log() and "refused-register" in r.stdout
 
 
-@pytest.mark.parametrize("mode", [["--preflight"], ["--apply", PLAN_HASH]])
+@pytest.mark.parametrize(
+    "mode", [["--preflight"], ["--apply", PLAN_HASH], ["--provision", PLAN_HASH]]
+)
 def test_an_unsigned_or_dirty_clone_stops_the_host_modes_before_python_runs(
     host: Host, mode: list[str]
 ) -> None:

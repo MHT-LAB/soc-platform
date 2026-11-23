@@ -13,6 +13,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "init-rules-lc.sh"
 BASH = shutil.which("bash") or "/bin/bash"
 FILE = "env/rules-lc.env"
+POSTURE = "env/posture-rules.env"
 KEY = "test-only-vendor-key-not-real"
 STAMP = "test-only-stamp-key-0123456789abcdef-not-real"
 OID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -205,3 +206,138 @@ def test_the_test_switch_is_refused_for_root_and_needed_otherwise(tmp_path: Path
         r = run(tmp_path, stdin=answers(), test_mode=False)
         assert r.returncode == 1 and "run as root" in r.stderr
         assert tree(tmp_path) == {"env"}
+
+
+# ---- --static: the three settings that are not secret, for use with `rotate.sh --provision` ----
+
+
+def static_answers(oid: str = OID, org: str = ORG, prefixes: str = PREFIXES) -> str:
+    return f"{oid}\n{org}\n{prefixes}\n"
+
+
+STATIC_LINES = [
+    f"SOC_RULES_LC_OID={OID}",
+    f"SOC_RULES_ORG={ORG}",
+    f'SOC_RULES_PREFIXES="{PREFIXES}"',
+]
+
+
+@not_root
+def test_static_creates_the_file_with_the_three_settings_and_no_key(tmp_path: Path) -> None:
+    host(tmp_path)
+    r = run(tmp_path, "--static", stdin=static_answers())
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / FILE).read_text().splitlines() == STATIC_LINES
+    assert stat.S_IMODE((tmp_path / FILE).stat().st_mode) == 0o600
+    assert tree(tmp_path) == {"env", FILE, POSTURE}  # no temporary folder left behind
+    assert "KEY" not in (tmp_path / FILE).read_text()
+    # the posture collector gets the same prefixes, and nothing else, from this script
+    assert (tmp_path / POSTURE).read_text().splitlines() == [
+        f'SOC_POSTURE_RULES_PREFIXES="{PREFIXES}"'
+    ]
+    assert stat.S_IMODE((tmp_path / POSTURE).stat().st_mode) == 0o600
+
+
+@not_root
+def test_static_adds_to_a_file_the_rotator_made_and_keeps_its_lines(tmp_path: Path) -> None:
+    host(tmp_path)
+    (tmp_path / FILE).write_text("SOC_RULES_LC_KEY=made-by-the-rotator-0123456789")  # no newline
+    (tmp_path / FILE).chmod(0o600)
+    r = run(tmp_path, "--static", stdin=static_answers())
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / FILE).read_text().splitlines() == [
+        "SOC_RULES_LC_KEY=made-by-the-rotator-0123456789",
+        *STATIC_LINES,
+    ]
+    assert stat.S_IMODE((tmp_path / FILE).stat().st_mode) == 0o600
+
+
+@not_root
+@pytest.mark.parametrize("var", ["SOC_RULES_LC_OID", "SOC_RULES_ORG", "SOC_RULES_PREFIXES"])
+def test_static_never_overwrites_a_setting_that_is_there(tmp_path: Path, var: str) -> None:
+    host(tmp_path)
+    (tmp_path / FILE).write_text(f"{var}=hand-made\n")
+    r = run(tmp_path, "--static", stdin=static_answers())
+    assert r.returncode == 1 and f"already has {var}" in r.stderr
+    assert (tmp_path / FILE).read_text() == f"{var}=hand-made\n"
+    assert tree(tmp_path) == {"env", FILE}  # and the posture file was not made either
+
+
+@not_root
+def test_static_refuses_before_touching_either_file_when_the_posture_line_is_there(
+    tmp_path: Path,
+) -> None:
+    host(tmp_path)
+    (tmp_path / POSTURE).write_text("SOC_POSTURE_RULES_PREFIXES=hand-made\n")
+    r = run(tmp_path, "--static", stdin=static_answers())
+    assert r.returncode == 1 and "SOC_POSTURE_RULES_PREFIXES" in r.stderr
+    assert tree(tmp_path) == {"env", POSTURE}  # rules-lc.env was not created
+    assert (tmp_path / POSTURE).read_text() == "SOC_POSTURE_RULES_PREFIXES=hand-made\n"
+
+
+@not_root
+def test_static_adds_the_prefixes_to_a_posture_file_the_rotator_made(tmp_path: Path) -> None:
+    host(tmp_path)
+    (tmp_path / POSTURE).write_text("SOC_POSTURE_STAMP_KEY=made-by-the-rotator-0123456789abcdef")
+    (tmp_path / POSTURE).chmod(0o600)
+    assert run(tmp_path, "--static", stdin=static_answers()).returncode == 0
+    assert (tmp_path / POSTURE).read_text().splitlines() == [
+        "SOC_POSTURE_STAMP_KEY=made-by-the-rotator-0123456789abcdef",
+        f'SOC_POSTURE_RULES_PREFIXES="{PREFIXES}"',
+    ]
+
+
+@not_root
+@pytest.mark.parametrize(
+    "stdin",
+    [
+        "",
+        static_answers(oid="not-a-uuid"),
+        static_answers(org="Bad Org"),
+        static_answers(prefixes="x"),
+        static_answers(oid="AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"),
+    ],
+)
+def test_static_bad_or_missing_answers_write_nothing(tmp_path: Path, stdin: str) -> None:
+    host(tmp_path)
+    r = run(tmp_path, "--static", stdin=stdin)
+    assert r.returncode == 1 and tree(tmp_path) == {"env"}
+
+
+@not_root
+def test_static_needs_the_env_folder_first(tmp_path: Path) -> None:
+    r = run(tmp_path, "--static", stdin=static_answers())
+    assert r.returncode == 1 and "init-secrets.sh" in r.stderr
+    assert tree(tmp_path) == set()
+
+
+@not_root
+def test_static_refuses_extra_arguments(tmp_path: Path) -> None:
+    host(tmp_path)
+    r = run(tmp_path, "--static", "x", stdin=static_answers())
+    assert r.returncode == 1 and "usage" in r.stderr and tree(tmp_path) == {"env"}
+
+
+@not_root
+def test_the_rules_service_reads_the_file_the_rotator_and_the_script_build_between_them(
+    tmp_path: Path,
+) -> None:
+    """The stamp line and the key line come from the rotator (add), the other three from
+    --static; together they are what the rules service needs, in either order."""
+    from soc_api.rotate.consumer import HostConsumer
+    from soc_api.rotate.rights import Secret
+    from soc_api.rules_deploy import Config
+
+    host(tmp_path)
+    consumer = HostConsumer(tmp_path, Path("/bin/true"), environ={})
+    consumer.add(FILE, "SOC_RULES_STAMP_KEY", Secret(STAMP))
+    assert run(tmp_path, "--static", stdin=static_answers()).returncode == 0
+    consumer.add(FILE, "SOC_RULES_LC_KEY", Secret("rotator-made-key-0123456789abcdef"))
+    env = {}
+    for line in (tmp_path / FILE).read_text().splitlines():
+        name, _, value = line.partition("=")
+        env[name] = value.strip('"')  # compose strips the quotes
+    env["SOC_RULES_COMMIT"] = "ab" * 20
+    cfg = Config.from_env(env)
+    assert cfg.oid == OID and cfg.org == ORG and cfg.prefixes == tuple(PREFIXES.split("|"))
+    assert cfg.stamp_key == STAMP

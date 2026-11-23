@@ -32,6 +32,7 @@ read-only.
 | `deploy/rotate.sh --record <id> [<id> ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]` | container, no network | a person rotated these keys by hand: write them down after one typed `yes` (**needs a terminal**). Up to 20 ids, one register fetch, one record line per key; the same `--date` and `--due` apply to all of them. An id that is unknown, replaced on exposure only, or listed twice refuses the whole run before anything is asked. The date defaults to today (New York time) and cannot be in the future. `--due` is for a key whose due date was set by hand. Makes no vendor call. |
 | `deploy/rotate.sh --preflight` | **host**, rights on stdin | the read calls of an apply: log in to both services, list the vendor's keys, check each automatic key's live permissions and that its stored value can be read. **Changes nothing**, needs no approval. |
 | `deploy/rotate.sh --apply <plan-hash>` | **host**, rights on stdin | rotate the automatic keys of the plan that was approved (below). |
+| `deploy/rotate.sh --provision <plan-hash>` | **host**, rights on stdin | create the keys the approved plan lists "to create" for the first time ("Creating a first key", below). |
 
 ## Where each step runs
 
@@ -166,7 +167,8 @@ unexpected rather than guess. So:
    and a write that fails is undone before the old key is touched.
 3. If it reports `problem-bad_shape` (or similar), stop: the source needs a small fix before an
    apply, and nothing was touched.
-4. Then a normal run: plan, approve, apply, attended, for one key.
+4. Then a normal run: plan, approve, apply, attended, for one key. (Keys that do not exist yet:
+   plan, approve, `--provision`, see "Creating a first key".)
 
 ## Files
 
@@ -214,12 +216,57 @@ keep that owner), written whole and renamed into place:
 | `refused: the state file cannot be read as JSON` (or similar) | `state.json` is damaged. Look at it, then move it aside; the next `--record` run rebuilds it |
 | `refused: that id is not a tracked key` | the id is not in the register, or the key is replaced only on exposure |
 
+## Creating a first key (provision)
+
+`--apply` replaces a key that exists. `rotate.sh --provision <plan-hash>` makes the first one,
+so the value of a new key (the rules deploy key, the stamp key) is never seen or pasted by a
+person: it goes from the vendor, or from the random generator, into the secrets manager and the
+env files.
+
+A key is **creatable** when its register file says `method = "automatic"`, `ready = false`, and
+carries a complete spec: where the value is stored, the env files that get it (one or two, each
+mapping the stored name to one variable) and, for a vendor key, its exact permissions and
+console name; for a `vendor = "self"` key, a `[generate]` table (random, 32 to 128 characters of
+`A-Za-z0-9._-`). A consumer that restarts a service needs a health check; `none` is allowed only
+when nothing is restarted. The checks are `posture_check` and `rules_plan` (signs in with the new
+rules key and lists the rules; changes nothing).
+
+How it runs, attended, like an apply:
+
+1. `rotate.sh` (a terminal): the plan lists "Keys to create for the first time". Type `yes` to
+   approve it. The approval is tied to that exact list, expires in 30 minutes and is used up by
+   one run (an apply and a provision each need their own approval).
+2. `rotate.sh --provision <hash>` with the rights on standard input, as for `--apply`.
+
+Per key, in order (a random key is made before a vendor key): refuse if a live vendor key
+already has the console name, the secret already exists, or an env file already has the variable
+(a first creation never overwrites anything); create the vendor key; **read the vendor's list
+again and refuse unless the new key's permissions equal the file's** (a wider key is deleted
+again); store the value; add each env file's line (a file that does not exist is created, mode
+600); recreate the services and run each named check. Any failure undoes what was done, newest
+first (files, services, secret, vendor key). If an undo step itself fails the key is recorded
+`failed` with its id, the plan stops offering to create it, and a person must look.
+
+On success the state records `provisioned` and the vendor key's id. Then a register change sets
+`ready = true` and the normal rotation takes over (30 days for a sensitive key).
+
+**The non-secret lines.** `env/rules-lc.env` also holds the organization id, folder name and
+managed prefixes, and `env/posture-rules.env` the prefixes. `init-rules-lc.sh --static` (root,
+on the host) asks for those three settings only and adds them to the right files, whichever
+order the files are built in; it never overwrites a line and never asks for a key.
+
+**Not covered:** rotating the stamp key later (it needs a re-stamp of every rule: attended, with
+the rules deploy), and a register file that still names `rules_restamp` or a `post_step`: such
+a key is listed as not creatable until its file is changed to the shape above.
+
 ## What this build can rotate
 
 Automatic keys from the detection vendor whose single stored value goes into one env file on
 this host and whose health check is one this build knows (today: the posture collector's).
-Any other automatic key is **named and skipped** by an apply (exit `4`), not guessed at. Later
-builds add the rules deploy key and its follow-up step, the catch-up worker's key, the signing
+Any other automatic key is **named and skipped** by an apply (exit `4`), not guessed at. A key
+that does not exist yet is created with `--provision` (above); later rotation of the rules deploy
+key needs its `rules_plan` check added to the rotation's own list. Later builds add the stamp
+key's follow-up step, the catch-up worker's key, the signing
 key, and the CI keys.
 
 ## Not built yet

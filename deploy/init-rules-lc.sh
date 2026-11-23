@@ -7,6 +7,13 @@
 #   init-rules-lc.sh
 #       asks for: the vendor key (hidden), the organization id, the stamp key (hidden), the
 #       organization's folder name in the rules repository, and the managed name prefixes
+#   init-rules-lc.sh --static
+#       asks only for the three settings that are not secret (organization id, folder name,
+#       name prefixes) and adds them to env/rules-lc.env (and the prefixes to
+#       env/posture-rules.env, where the posture collector wants them), creating a file that
+#       is not there yet and leaving every other line alone. For use with `rotate.sh --provision`, which
+#       creates the key lines itself so nobody ever handles the keys. Refuses, before changing
+#       anything, if any of these settings is already in its file.
 #   init-rules-lc.sh --restore
 #       rebuild the file from SOC_LC_RULES_DEPLOY_KEY, SOC_LC_OID, SOC_RULES_STAMP_KEY,
 #       SOC_RULES_ORG and SOC_RULES_PREFIXES in the environment (from the secrets manager)
@@ -52,11 +59,61 @@ die() { echo "FAILED: $*" >&2; exit 1; }
 MODE=new
 case "${1:-}" in
   --restore)
-    [[ $# -eq 1 ]] || die "usage: init-rules-lc.sh [--restore]"
+    [[ $# -eq 1 ]] || die "usage: init-rules-lc.sh [--restore | --static]"
     MODE=restore ;;
+  --static)
+    [[ $# -eq 1 ]] || die "usage: init-rules-lc.sh [--restore | --static]"
+    MODE=static ;;
   "") ;;
-  *) die "usage: init-rules-lc.sh [--restore]" ;;
+  *) die "usage: init-rules-lc.sh [--restore | --static]" ;;
 esac
+
+if [[ "$MODE" == static ]]; then
+  printf 'Organization id: ' >&2
+  IFS= read -r LC_OID || die "no organization id given"
+  printf "The organization's folder name in the rules repository (orgs/<name>): " >&2
+  IFS= read -r ORG || die "no folder name given"
+  printf 'Managed name prefixes, separated by | (a trailing space counts): ' >&2
+  IFS= read -r PREFIXES || die "no prefixes given"
+  [[ "$LC_OID" =~ $OID_RE ]] || die "the organization id is missing or not a lower-case UUID"
+  [[ "$ORG" =~ $ORG_RE ]] || die "the folder name is missing or not 1-32 lower-case letters, digits or dashes"
+  [[ "$PREFIXES" =~ $PREFIXES_RE ]] || die "the prefixes are missing or malformed (3-64 letters, digits, spaces, dots, dashes or underscores each, separated by |)"
+  [[ -d "$ENV_DIR" ]] || die "$ENV_DIR is missing: run init-secrets.sh first"
+  POSTURE_ENV="$ENV_DIR/posture-rules.env"
+  # Refuse before changing either file: never overwrite a setting that is already there.
+  refuse_if_present() { # file var...
+    local file="$1" var
+    shift
+    [[ -e "$file" ]] || return 0
+    for var in "$@"; do
+      if grep -q "^${var}=" "$file"; then die "$file already has $var; this never overwrites"; fi
+    done
+  }
+  refuse_if_present "$RULES_ENV" SOC_RULES_LC_OID SOC_RULES_ORG SOC_RULES_PREFIXES
+  refuse_if_present "$POSTURE_ENV" SOC_POSTURE_RULES_PREFIXES
+  umask 077
+  TMP="$(mktemp -d "$ENV_DIR/.init.XXXXXX")"
+  trap 'rm -rf "$TMP"' EXIT
+  # stage_add <file> <staged name> <lines...>: the file's current content (if any) plus lines
+  stage_add() {
+    local file="$1" staged="$TMP/$2"
+    shift 2
+    if [[ -e "$file" ]]; then
+      cp -p "$file" "$staged"
+      # a last line with no newline would run its value into the first new line
+      if [[ -s "$staged" && -n "$(tail -c1 "$staged")" ]]; then printf '\n' >> "$staged"; fi
+    fi
+    printf '%s\n' "$@" >> "$staged"
+  }
+  stage_add "$RULES_ENV" rules-lc.env \
+    "SOC_RULES_LC_OID=$LC_OID" "SOC_RULES_ORG=$ORG" "SOC_RULES_PREFIXES=\"$PREFIXES\""
+  stage_add "$POSTURE_ENV" posture-rules.env "SOC_POSTURE_RULES_PREFIXES=\"$PREFIXES\""
+  mv "$TMP/rules-lc.env" "$RULES_ENV"
+  mv "$TMP/posture-rules.env" "$POSTURE_ENV"
+  chmod 600 "$RULES_ENV" "$POSTURE_ENV"
+  echo "Added the organization id, folder name and prefixes to $RULES_ENV, and the prefixes to $POSTURE_ENV (mode 600). No key was asked for or written." >&2
+  exit 0
+fi
 
 if [[ "$MODE" == restore ]]; then
   LC_KEY="${SOC_LC_RULES_DEPLOY_KEY:-}"

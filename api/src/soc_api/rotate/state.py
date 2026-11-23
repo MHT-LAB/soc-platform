@@ -18,7 +18,7 @@ from soc_api.rotate.keys import ID_RE
 
 STATE_VERSION = 1
 MAX_STATE_BYTES = 256 * 1024
-OUTCOMES = ("recorded", "rotated", "failed")
+OUTCOMES = ("recorded", "rotated", "failed", "provisioned")
 APPROVAL_MAX_AGE = timedelta(minutes=30)
 HASH_RE = re.compile(r"[0-9a-f]{12}")
 VENDOR_ID_RE = re.compile(r"[A-Za-z0-9._-]{8,128}")
@@ -33,7 +33,7 @@ class StateError(Exception):
 @dataclass
 class KeyState:
     last_rotated: date
-    outcome: str  # recorded (a person did it and said so) | rotated | failed
+    outcome: str  # recorded (a person did it and said so) | rotated | failed | provisioned
     revoke_pending: bool = False  # the new key works but the old one is still live
     due_override: date | None = None  # when the tracker's date differs from last + period
     updated: str = ""
