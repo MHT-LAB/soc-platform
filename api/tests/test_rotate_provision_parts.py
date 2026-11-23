@@ -515,6 +515,9 @@ def test_a_file_that_does_not_hold_the_new_line_after_the_write_is_not_trusted(
     with pytest.raises(RotateError) as err:
         c.add("env/a.env", "SOC_X", Secret(VALUE))
     assert err.value.code == "env_readback_failed"
+    # and the file is exactly as it was, with no copy left: the caller never saw it touched
+    assert (root / "env" / "a.env").read_text() == "A=1\n"
+    assert not (root / "env" / "a.env.prev").exists()
 
 
 # ---- approving a plan that only creates keys ----

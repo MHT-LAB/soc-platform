@@ -180,6 +180,11 @@ class HostConsumer:
             prev.unlink(missing_ok=True)
             raise RotateError("env_write_failed") from None
         if not self.has_var(env_file, var):
+            # Put the file back as it was: the caller never learns this file was touched.
+            try:
+                os.replace(prev, path)
+            except OSError:
+                pass  # the .prev file stays for a person to look at
             raise RotateError("env_readback_failed")
         return False
 

@@ -85,6 +85,7 @@ def _undo(
     spec: ProvisionSpec,
     *,
     created: NewKey | None,
+    attempted: bool,
     stored: bool,
     added: list[tuple[str, bool]],
     restarted: list[tuple[str, ...]],
@@ -109,12 +110,20 @@ def _undo(
         try:
             d.store.delete(spec.path, spec.secret_name)
         except RotateError as exc:
-            undone.append(f"secret_{exc.code}")
+            if exc.code != "secrets_delete_http_404":  # never stored: nothing to take back
+                undone.append(f"secret_{exc.code}")
         except Exception:  # noqa: BLE001
             undone.append("secret_unexpected_error")
-    if created is not None and vendor is not None:
+    if vendor is not None and (created is not None or attempted):
         try:
-            vendor.delete_key(created.id)
+            if created is not None:
+                vendor.delete_key(created.id)
+            else:
+                # The create's reply was lost: the key may exist anyway. No key had this name a
+                # moment ago (checked above), so any key with it now is the one just made.
+                for key in vendor.list_keys().values():
+                    if key.name == spec.console_name:
+                        vendor.delete_key(key.id)
         except RotateError as exc:
             undone.append(f"new_key_{exc.code}")
         except Exception:  # noqa: BLE001
@@ -144,11 +153,12 @@ def _provision(session: Session, row: Row, spec: ProvisionSpec) -> bool:
     if why:
         return _refuse(session, row, why)
     created: NewKey | None = None
-    stored = False
+    attempted = stored = False
     added: list[tuple[str, bool]] = []
     restarted: list[tuple[str, ...]] = []
     try:
         if vendor is not None:
+            attempted = True
             created = vendor.create_key(spec.console_name, spec.perms)
             session.say(f"  {row.key.id}: key created (ends {last4(created.id)})")
             live = vendor.list_keys().get(created.id)
@@ -161,8 +171,10 @@ def _provision(session: Session, row: Row, spec: ProvisionSpec) -> bool:
             value = created.value
         else:
             value = generate(spec.length)
-        d.store.create(spec.path, spec.secret_name, value)
+        # Set before the call: a create whose reply is lost may still have stored the value,
+        # and the secret did not exist a moment ago (checked above), so deleting it is safe.
         stored = True
+        d.store.create(spec.path, spec.secret_name, value)
         for c in spec.consumers:
             added.append((c.env_file, d.consumer.add(c.env_file, c.env_var, value)))
         for c in spec.consumers:
@@ -177,7 +189,14 @@ def _provision(session: Session, row: Row, spec: ProvisionSpec) -> bool:
         if isinstance(exc, RotateError) and exc.detail:
             session.say(f"  {row.key.id}: the reply looked like {exc.detail}")
         undone = _undo(
-            session, vendor, spec, created=created, stored=stored, added=added, restarted=restarted
+            session,
+            vendor,
+            spec,
+            created=created,
+            attempted=attempted,
+            stored=stored,
+            added=added,
+            restarted=restarted,
         )
         fields: dict[str, str | int] = {"new": last4(created.id)} if created else {}
         ks = session.state.keys.get(row.key.id)

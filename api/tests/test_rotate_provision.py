@@ -399,6 +399,58 @@ def test_a_failed_key_creation_leaves_nothing_behind(tmp_path: Path) -> None:
     assert "rules-key" not in run.state().keys
 
 
+def test_a_secret_stored_but_whose_reply_was_lost_is_deleted_again(tmp_path: Path) -> None:
+    run = vendor_run(tmp_path)
+    w = run.world
+
+    def stored_then_timeout(path: str, name: str, value: Secret) -> None:
+        w.secrets[name] = value.reveal()
+        raise RotateError("timeout")
+
+    w.create = stored_then_timeout  # type: ignore[method-assign]
+    assert run.go() == 1
+    assert "RULES_KEY" not in w.secrets and w.keys == {}
+    assert "rolled-back" in run.text() and "ROLLBACK-INCOMPLETE" not in run.text()
+
+
+def test_a_key_made_but_whose_reply_was_lost_is_found_by_name_and_deleted(tmp_path: Path) -> None:
+    run = vendor_run(tmp_path)
+    w = run.world
+
+    def made_then_timeout(name: str, perms: tuple[str, ...]) -> NewKey:
+        w.keys["lostreply01"] = VendorKey("lostreply01", name, frozenset(perms))
+        raise RotateError("timeout")
+
+    w.create_key = made_then_timeout  # type: ignore[method-assign]
+    w.keys["unrelated01"] = VendorKey("unrelated01", "someone-else", frozenset(PERMS))
+    assert run.go() == 1
+    assert set(w.keys) == {"unrelated01"}  # only the key with this exact name was taken back
+    assert "rolled-back" in run.text()
+
+
+def test_a_secret_that_was_never_stored_is_not_an_undo_failure(tmp_path: Path) -> None:
+    run = vendor_run(tmp_path, fail={"store_create"})
+
+    def not_found(path: str, name: str) -> None:
+        raise RotateError("secrets_delete_http_404")
+
+    run.world.delete = not_found  # type: ignore[method-assign,assignment]
+    assert run.go() == 1
+    assert "rolled-back" in run.text() and "ROLLBACK-INCOMPLETE" not in run.text()
+    assert run.world.keys == {} and "rules-key" not in run.state().keys
+
+
+def test_any_other_error_deleting_the_secret_is_an_incomplete_undo(tmp_path: Path) -> None:
+    run = vendor_run(tmp_path, checks=[False])
+
+    def forbidden(path: str, name: str) -> None:
+        raise RotateError("secrets_delete_http_403")
+
+    run.world.delete = forbidden  # type: ignore[method-assign,assignment]
+    assert run.go() == 1 and "ROLLBACK-INCOMPLETE" in run.text()
+    assert run.state().keys["rules-key"].outcome == "failed"
+
+
 def test_a_vendor_failure_after_the_key_exists_deletes_the_key_and_the_secret(
     tmp_path: Path,
 ) -> None:
