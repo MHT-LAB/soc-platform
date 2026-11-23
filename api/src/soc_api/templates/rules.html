@@ -27,6 +27,45 @@
   </section>
 
   <section class="card">
+    <div class="card-head"><h2>Rule quality</h2><span class="meta">last 7 and 30 days, whatever the period above{% if metrics and metrics.deployed %} · last deploy from git {{ metrics.deployed }}{% endif %}</span></div>
+    {% if metrics is none %}
+    <div class="empty"><p>The rule numbers could not be read just now.</p></div>
+    {% elif metrics.rows %}
+    <p class="dim">False-positive share is the part of a rule's closed cases that were closed as our test, our admin work or a false positive. Duplicates are left out. It needs closed cases to mean anything.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Rule</th><th class="r">Alerts 7 days</th><th class="r">Per day</th><th class="r">Alerts 30 days</th><th class="r">Per day</th><th class="r">Closed cases</th><th class="r">Noise</th><th class="r">False-positive share</th></tr></thead>
+      <tbody>
+      {% for r in metrics.rows %}
+        <tr>
+          <td class="mono">{{ r.rule | vis(200) }}</td>
+          <td class="r mono">{{ r.alerts_7 }}</td>
+          <td class="r mono dim">{{ r.per_day_7 }}</td>
+          <td class="r mono">{{ r.alerts_30 }}</td>
+          <td class="r mono dim">{{ r.per_day_30 }}</td>
+          <td class="r mono">{{ r.judged }}</td>
+          <td class="r mono">{{ r.noise }}</td>
+          <td class="r mono">{% if r.hot %}<span class="chip down">{{ r.fp_share }}</span>{% else %}{{ r.fp_share }}{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><p>No alerts in the last 30 days.</p></div>
+    {% endif %}
+  </section>
+
+  {% if metrics %}
+  <section class="card">
+    <div class="card-head"><h2>ATT&amp;CK tactics seen</h2><span class="meta">{{ metrics.covered }} of {{ metrics.tactic_total }} tactics have fired in 30 days</span></div>
+    <p class="dim">Counted from the tactic on each alert, so it shows what the rules have raised, not what they could catch. A tactic with no rules is a gap only if you expect to see it.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Tactic</th><th class="r">Rules</th><th class="r">Alerts</th></tr></thead>
+      <tbody>{% for c in metrics.coverage %}<tr><td>{{ c.name }}</td><td class="r mono">{{ c.rules }}</td><td class="r mono">{{ c.alerts }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+  </section>
+  {% endif %}
+
+  <section class="card">
     <div class="card-head"><h2>Top noisy rules · {{ period_label | lower }}</h2><span class="meta">up to 25, by alert count</span></div>
     {% if rows %}
     <div class="scroll"><table>
