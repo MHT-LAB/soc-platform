@@ -438,6 +438,7 @@ def test_the_rules_check_fails_when_it_cannot_sign_in() -> None:
     said: list[str] = []
     code = rules_deploy.check(ENV, said.append, lambda _o, _k: ListsRules(LcError("http_401")))
     assert code == rules_deploy.FAILED and "could not sign in" in said[0]
+    assert said[0].endswith("(http_401)")  # the step's code, so a failure says which part
 
 
 @pytest.mark.parametrize("drop", ["SOC_RULES_LC_KEY", "SOC_RULES_LC_OID"])

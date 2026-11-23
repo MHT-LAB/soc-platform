@@ -144,7 +144,9 @@ class RulesClient(LcClient):
             enabled = meta.get("enabled")
             if enabled is not None and not isinstance(enabled, bool):
                 raise LcError("bad_shape")
-            tags = meta.get("tags", [])
+            # The platform sends `null` for a rule with no tags (seen live on every rule).
+            tags = meta.get("tags")
+            tags = [] if tags is None else tags
             if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
                 raise LcError("bad_shape")
             etag = sys_meta.get("etag") if isinstance(sys_meta, dict) else None
@@ -523,8 +525,9 @@ def check(
         return REFUSED
     try:
         count = len(client_for(oid, key).list_rules())
-    except LcError:
-        say("check failed: could not sign in and list the rules")
+    except LcError as exc:
+        # The code (http_403, bad_shape, ...) says which part failed; it is never a value.
+        say(f"check failed: could not sign in and list the rules ({exc.code})")
         return FAILED
     say(f"check ok: signed in and listed {count} rule(s); nothing was changed")
     return OK
