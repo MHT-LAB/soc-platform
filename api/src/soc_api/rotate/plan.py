@@ -50,6 +50,7 @@ class Row:
     due: date | None
     status: str  # overdue | no_record | due_soon | this_session | ok | not_ready
     revoke_pending: bool
+    provisionable: bool = False  # not ready, has a complete spec, and no key was ever made
 
     def days_text(self, today: date) -> str:
         if self.due is None:
@@ -76,7 +77,10 @@ def classify(key: KeyFile, ks: KeyState | None, today: date, after: date) -> Row
         status = "this_session"
     else:
         status = "ok"
-    return Row(key, last, due, status, pending and key.ready)
+    provisionable = (
+        key.method == "automatic" and not key.ready and key.provision is not None and ks is None
+    )
+    return Row(key, last, due, status, pending and key.ready, provisionable)
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,21 @@ class Plan:
         )
 
     @property
+    def provisions(self) -> tuple[Row, ...]:
+        """Keys an approved run would create: a random value first (it needs no vendor), then
+        the vendor keys, each group by id, so the one every other file depends on is first."""
+        rows = [r for r in self.rows if r.provisionable]
+        return tuple(
+            sorted(
+                rows,
+                key=lambda r: (
+                    r.key.provision.vendor != "self" if r.key.provision else 1,
+                    r.key.id,
+                ),
+            )
+        )
+
+    @property
     def manual_session(self) -> tuple[Row, ...]:
         return tuple(r for r in self.rows if r.key.method == "manual" and r.status in ACTIONABLE)
 
@@ -114,6 +133,7 @@ class Plan:
             ),
             "automatic": len(self.automatic_actions),
             "manual_session": len(self.manual_session),
+            "to_create": len(self.provisions),
         }
 
     @property
@@ -133,7 +153,10 @@ class Plan:
             ]
             for r in self.automatic_actions
         )
-        payload = json.dumps({"commit": self.commit, "actions": actions}, separators=(",", ":"))
+        doc: dict[str, object] = {"commit": self.commit, "actions": actions}
+        if self.provisions:  # left out when empty, so a plan without any keeps its old hash
+            doc["create"] = sorted(r.key.id for r in self.provisions)
+        payload = json.dumps(doc, separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
     def summary(self) -> str:
@@ -142,7 +165,7 @@ class Plan:
             f"overdue={c['overdue']} no_record={c['no_record']} due_soon={c['due_soon']} "
             f"this_session={c['this_session']} ok={c['ok']} not_ready={c['not_ready']} "
             f"revoke_pending={c['revoke_pending']} automatic={c['automatic']} "
-            f"manual_session={c['manual_session']}"
+            f"manual_session={c['manual_session']} to_create={c['to_create']}"
         )
 
 
@@ -193,6 +216,19 @@ def render(plan: Plan) -> list[str]:
     auto = plan.automatic_actions
     lines += ["", f"Automatic keys to rotate ({len(auto)}):"]
     lines += [_line(r, plan.today) for r in auto] or ["  none"]
+    create = plan.provisions
+    if create:
+        lines += ["", f"Keys to create for the first time ({len(create)}):"]
+        for r in create:
+            spec = r.key.provision
+            assert spec is not None  # noqa: S101 - a provisionable row always has its spec
+            what = (
+                "a random value"
+                if spec.vendor == "self"
+                else f"a vendor key, {len(spec.perms)} permission(s)"
+            )
+            files = ", ".join(c.env_file for c in spec.consumers)
+            lines.append(f"  {r.key.id:<28} {what}; goes to {files}")
     manual = plan.manual_session
     lines += ["", f"Manual keys for the {plan.session} session ({len(manual)}):"]
     for r in manual:

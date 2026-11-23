@@ -6,8 +6,9 @@
                                                  a person did these keys by hand: write them down
     python -m soc_api.rotate --apply HASH        rotate the automatic keys of the approved plan
     python -m soc_api.rotate --preflight         the read calls of an apply, nothing changed
+    python -m soc_api.rotate --provision HASH    create the keys the plan lists "to create"
 
-The last two run on the host (deploy/rotate.sh starts them), not in the container: they need
+The last three run on the host (deploy/rotate.sh starts them), not in the container: they need
 the rights on standard input, the vendor and the secrets manager over the network, and the
 consumer's env file and service. See soc_api.rotate.apply.
 
@@ -41,7 +42,8 @@ DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MAX_PROBLEMS_SHOWN = 20
 MAX_RECORD_IDS = 20  # one record line each, and rotate.sh keeps 20 lines
 USAGE = (
-    "usage: rotate [--plan [--quiet] | --record ID [ID ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]]"
+    "usage: rotate [--plan [--quiet] | --record ID [ID ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]"
+    " | --preflight | --apply HASH | --provision HASH]"
 )
 
 
@@ -73,7 +75,7 @@ class Config:
 
 @dataclass(frozen=True)
 class Args:
-    mode: str  # approve | plan | record | apply | preflight
+    mode: str  # approve | plan | record | apply | preflight | provision
     quiet: bool = False
     plan_hash: str = ""
     key_ids: tuple[str, ...] = ()
@@ -101,6 +103,10 @@ def parse_args(argv: list[str]) -> Args:
         if len(argv) != 2 or not st.HASH_RE.fullmatch(argv[1]):
             raise UsageError(USAGE)
         return Args("apply", plan_hash=argv[1])
+    if argv[0] == "--provision":
+        if len(argv) != 2 or not st.HASH_RE.fullmatch(argv[1]):
+            raise UsageError(USAGE)
+        return Args("provision", plan_hash=argv[1])
     if argv == ["--preflight"]:
         return Args("preflight")
     if argv[0] == "--record":
@@ -265,17 +271,19 @@ def _approve(
     commit12 = cfg.commit[:12]
     for line in render(plan):
         say(line)
-    if not plan.automatic_actions:
+    if not plan.automatic_actions and not plan.provisions:
         say("")
-        say("Nothing automatic is due: there is nothing to approve.")
+        say("Nothing automatic is due and no key is waiting to be created: nothing to approve.")
         _finish(
             cfg, say, record_line(moment, run_id, "approve", "nothing-to-approve", commit=commit12)
         )
         return OK
     say("")
     say(
-        f"Plan {plan.plan_hash}. This build makes no change to any key; "
-        "it only records the approval."
+        f"Plan {plan.plan_hash}. Approving makes no change to any key; "
+        "it only records the approval. "
+        "Then `rotate.sh --apply` rotates the automatic keys and `rotate.sh --provision` "
+        "creates the keys listed to create (an approval is good for one of them)."
     )
     if not confirm(f"Approve plan {plan.plan_hash} for 30 minutes? Type yes: "):
         say("Not confirmed: nothing was changed.")
@@ -402,16 +410,17 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"refused: {exc}")
         return REFUSED
-    if args.mode in ("apply", "preflight"):
+    if args.mode in ("apply", "preflight", "provision"):
         return _host_run(cfg, args)
     return run(cfg, args, tty_confirm)
 
 
 def _host_run(cfg: Config, args: Args) -> int:
-    """The two modes that touch the network, the consumer and the secrets manager."""
+    """The modes that touch the network, the consumer and the secrets manager."""
     import time
 
     from soc_api.rotate import apply as ap
+    from soc_api.rotate import provision as pv
     from soc_api.rotate.consumer import HostConsumer
     from soc_api.rotate.lc import LimaCharlieKeys
     from soc_api.rotate.rights import Rights, read_rights
@@ -444,6 +453,8 @@ def _host_run(cfg: Config, args: Args) -> int:
     try:
         if args.mode == "preflight":
             return ap.run_preflight(**common)  # type: ignore[arg-type]
+        if args.mode == "provision":
+            return pv.run_provision(plan_hash=args.plan_hash, **common)  # type: ignore[arg-type]
         return ap.run_apply(plan_hash=args.plan_hash, **common)  # type: ignore[arg-type]
     except KeyboardInterrupt:
         print("INTERRUPTED: anything done for the key in progress was undone (see above)")

@@ -119,3 +119,30 @@ class SecretsManager:
                 raise RotateError("bad_name")
             body = {**self._scope(path), "secretValue": value.reveal()}
             self._call("PATCH", f"{self._base}/api/v3/secrets/raw/{name}", body)  # [C]
+
+    def create(self, path: str, name: str, value: Secret) -> None:
+        """A new value. The service refuses a name that is already there, so a create can never
+        overwrite a live key's value."""
+        with _step("secrets_create"):
+            if not NAME_RE.fullmatch(name):
+                raise RotateError("bad_name")
+            body = {**self._scope(path), "secretValue": value.reveal()}
+            self._call("POST", f"{self._base}/api/v3/secrets/raw/{name}", body)  # [C]
+
+    def delete(self, path: str, name: str) -> None:
+        with _step("secrets_delete"):
+            if not NAME_RE.fullmatch(name):
+                raise RotateError("bad_name")
+            self._call(
+                "DELETE", f"{self._base}/api/v3/secrets/raw/{name}", self._scope(path)
+            )  # [C]
+
+    def exists(self, path: str, name: str) -> bool:
+        """Whether the name is already there: a 404 is "no"; anything else is an error."""
+        try:
+            self.get(path, name)
+        except RotateError as exc:
+            if exc.code == "secrets_read_http_404":
+                return False
+            raise
+        return True

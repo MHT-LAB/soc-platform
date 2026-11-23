@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from soc_api.rotate.keys import ENV_FILE_RE, ENV_RE, SERVICE_RE, SUPPORTED_CHECKS
+from soc_api.rotate.keys import ENV_FILE_RE, ENV_RE, PROVISION_CHECKS, SERVICE_RE
 from soc_api.rotate.net import RotateError
 from soc_api.rotate.rights import Secret
 
@@ -26,12 +26,14 @@ VALUE_RE = re.compile(r"[A-Za-z0-9._-]{16,128}")
 # name -> (compose service to run it in, the command in that container)
 CHECKS: dict[str, tuple[str, tuple[str, ...]]] = {
     "posture_check": ("posture", ("python", "-m", "soc_api.posture", "check")),
+    # signs in with the new rules key and lists the rules (changes nothing, prints no name)
+    "rules_plan": ("rules", ("python", "-m", "soc_api.rules_deploy", "check")),
 }
 RESTART_TIMEOUT_S = 300
 CHECK_TIMEOUT_S = 240
 KEPT_ENV = ("PATH", "HOME", "SOC_STATE_DIR", "SOC_OVERLAY")
 
-assert set(CHECKS) == set(SUPPORTED_CHECKS)  # noqa: S101 - one list in two places must agree
+assert set(CHECKS) == set(PROVISION_CHECKS)  # noqa: S101 - one list in two places must agree
 
 
 def _sync_dir(folder: Path) -> None:
@@ -123,6 +125,73 @@ class HostConsumer:
             except OSError:
                 pass  # the caller's rollback reports what is left
             raise RotateError("env_readback_failed")
+
+    def has_var(self, env_file: str, var: str) -> bool:
+        """Whether the file already has a line for this variable (a missing file has none)."""
+        if not ENV_RE.fullmatch(var):
+            raise RotateError("bad_value")
+        path = self._path(env_file)
+        if not path.exists():
+            return False
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            raise RotateError("env_unreadable") from None
+        return any(line.startswith(f"{var}=") for line in text.split("\n"))
+
+    def add(self, env_file: str, var: str, value: Secret) -> bool:
+        """First use of a variable: append its line to the file, or create the file (mode 600)
+        when it does not exist yet. Never replaces a line that is there. Returns whether the
+        file was created, which `remove` needs to undo it."""
+        if not ENV_RE.fullmatch(var) or not VALUE_RE.fullmatch(value.reveal()):
+            raise RotateError("bad_value")
+        path = self._path(env_file)
+        line = f"{var}={value.reveal()}\n"
+        if not path.exists():
+            try:
+                folder = path.parent.stat()
+                like = os.stat_result((0o100600, 0, 0, 1, folder.st_uid, folder.st_gid, 0, 0, 0, 0))
+                _write_new(path, line, like)
+                _sync_dir(path.parent)
+            except OSError:
+                path.unlink(missing_ok=True)
+                raise RotateError("env_write_failed") from None
+            return True
+        if self.has_var(env_file, var):
+            raise RotateError("env_var_present")
+        prev = Path(f"{path}.prev")
+        if prev.exists():
+            raise RotateError("prev_exists")
+        try:
+            original = path.read_text(encoding="utf-8")
+            info = path.stat()
+            staged = path.with_name(f".{path.name}.new")
+            _write_new(prev, original, info)
+            staged.unlink(missing_ok=True)
+            _write_new(
+                staged,
+                original + ("" if original.endswith("\n") or not original else "\n") + line,
+                info,
+            )
+            os.replace(staged, path)
+            _sync_dir(path.parent)
+        except (OSError, UnicodeDecodeError):
+            path.with_name(f".{path.name}.new").unlink(missing_ok=True)
+            prev.unlink(missing_ok=True)
+            raise RotateError("env_write_failed") from None
+        if not self.has_var(env_file, var):
+            raise RotateError("env_readback_failed")
+        return False
+
+    def remove(self, env_file: str, created: bool) -> None:
+        """Undo `add`: delete a file it created, or put back the one it extended."""
+        if created:
+            try:
+                self._path(env_file).unlink(missing_ok=True)
+            except OSError:
+                raise RotateError("restore_failed") from None
+        else:
+            self.restore(env_file)
 
     def restore(self, env_file: str) -> None:
         path = self._path(env_file)

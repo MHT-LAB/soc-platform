@@ -226,5 +226,7 @@ def test_children_get_no_stdin_no_output_and_a_minimal_environment(root: Path) -
 
 
 def test_the_checks_this_build_runs_are_exactly_the_ones_a_key_file_may_name() -> None:
-    assert set(CHECKS) == set(SUPPORTED_CHECKS)
+    # a rotation may name only the checks it can undo around; first creation also has rules_plan
+    assert set(CHECKS) == set(consumer.PROVISION_CHECKS)
+    assert set(SUPPORTED_CHECKS) < set(CHECKS)
     assert consumer.VALUE_RE.fullmatch(NEW)

@@ -8,6 +8,10 @@
 #   rotate.sh --preflight         the read calls of an apply (logins, the vendor's key list,
 #                                 the stored value's name); changes nothing
 #   rotate.sh --apply <plan-hash> rotate the automatic keys of the plan that was approved
+#   rotate.sh --provision <plan-hash>
+#                                 create the keys the approved plan lists "to create" (first
+#                                 creation: a vendor key, or a random value, into the secrets
+#                                 manager and the env files; rights on standard input like --apply)
 #
 # The first three only plan and record: they run in a container with no network. The approve and
 # --record modes ask for a typed yes, so they refuse at once without a terminal (run them from
@@ -67,7 +71,7 @@ OUT="$STATE/rotate"
 LOG="$STATE/rotate.log"
 
 usage() {
-  echo "usage: rotate.sh [--plan [--quiet] | --record <id> [<id> ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD] | --preflight | --apply <plan-hash>]" >&2
+  echo "usage: rotate.sh [--plan [--quiet] | --record <id> [<id> ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD] | --preflight | --apply <plan-hash> | --provision <plan-hash>]" >&2
   exit 2
 }
 
@@ -101,6 +105,11 @@ else
     --apply)
       [[ $# -eq 2 && "$2" =~ $HASH_RE ]] || usage
       ARGS+=(--apply "$2")
+      HOST_MODE=1
+      ;;
+    --provision)
+      [[ $# -eq 2 && "$2" =~ $HASH_RE ]] || usage
+      ARGS+=(--provision "$2")
       HOST_MODE=1
       ;;
     --record)
@@ -196,7 +205,7 @@ if [[ -n "$HOST_MODE" ]]; then
     [[ "$PSIG" == G ]] \
       || die "the soc-platform checkout's head commit signature does not verify (git status '$PSIG')"
   fi
-  command -v python3 >/dev/null || die "python3 is needed on the host for --preflight and --apply"
+  command -v python3 >/dev/null || die "python3 is needed on the host for --preflight, --apply and --provision"
   # An empty environment on purpose, and -I so no PYTHON* variable or stray folder is read.
   # Standard input is the saved original (descriptor 3): it carries the rights.
   env -i PATH="$PATH" HOME="${HOME:-/root}" SOC_STATE_DIR="$STATE" \

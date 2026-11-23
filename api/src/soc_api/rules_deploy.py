@@ -509,7 +509,30 @@ def tty_confirm(prompt: str) -> bool:
         return False
 
 
-def main() -> int:
+def check(
+    env: Mapping[str, str],
+    say: Callable[[str], None] = print,
+    client_for: Callable[[str, str], Backend] = RulesClient,
+) -> int:
+    """Sign in with the settings file's key and list the rules, nothing else: the health check
+    the key rotator runs after it creates the rules key. Reads only the key and the
+    organization, writes nothing and prints a count, never a rule name."""
+    key, oid = env.get("SOC_RULES_LC_KEY", ""), env.get("SOC_RULES_LC_OID", "")
+    if not (KEY_RE.fullmatch(key) and OID_RE.fullmatch(oid)):
+        say("refused: SOC_RULES_LC_KEY or SOC_RULES_LC_OID is missing or malformed")
+        return REFUSED
+    try:
+        count = len(client_for(oid, key).list_rules())
+    except LcError:
+        say("check failed: could not sign in and list the rules")
+        return FAILED
+    say(f"check ok: signed in and listed {count} rule(s); nothing was changed")
+    return OK
+
+
+def main(argv: list[str] | None = None) -> int:
+    if (sys.argv[1:] if argv is None else argv) == ["check"]:
+        return check(os.environ)
     try:
         cfg = Config.from_env(os.environ)
     except ConfigError as exc:
