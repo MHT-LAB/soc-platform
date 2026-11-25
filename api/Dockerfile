@@ -36,8 +36,12 @@ ENV PATH=/app/.venv/bin:$PATH \
 # two HIGH CVEs (CVE-2026-85091, CVE-2026-76844). Debian's fix is in trixie-security, but the upstream
 # python image hasn't been rebuilt with it yet. Remove this step at the first base-image bump whose
 # image already has +deb13u1 or newer (check: dpkg-query -W zlib1g).
+# Same for libzstd1 (2026-11-25): the base ships 1.5.7+dfsg-1, HIGH CVE-2026-124851, fixed in
+# +deb13u1 (check: dpkg-query -W libzstd1).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends --only-upgrade zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && apt-get install -y --no-install-recommends --only-upgrade \
+      zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+      libzstd1=1.5.7+dfsg-1+deb13u1 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 10001 soc \
