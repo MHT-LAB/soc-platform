@@ -245,6 +245,9 @@ class StubDb:
     def rules_drift_health(self) -> int:
         return 0
 
+    def reconcile_gap_s(self) -> int:
+        return 0
+
 
 def worker(db: StubDb, deadman: w.Deadman | None) -> w.Worker:
     ntfy = w.Ntfy("http://127.0.0.1:1", TOPIC, allow_http=True)  # never used by an idle pass

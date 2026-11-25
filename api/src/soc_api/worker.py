@@ -412,6 +412,12 @@ class Db:
         checked, wrong = rows[0]
         return int(wrong or 0) if checked else 0
 
+    def reconcile_gap_s(self) -> int:
+        """Seconds of detections the catch-up worker skipped and nobody has backfilled (0: none).
+        Needs migration 0022."""
+        _, rows = self._run("SELECT reconcile_gap_health()")
+        return int(rows[0][0] or 0)
+
     def backup_health(self) -> tuple[float, int | None]:
         """(seconds since the last good dump or since the migration, size of that dump or None)."""
         _, rows = self._run("SELECT age_s, bytes FROM backup_health()")
@@ -477,15 +483,26 @@ STALE_TEXT = {
     "posture_quiet": "The posture collector has not completed a run in over 30 minutes.",
     "backup_old": "The last good database backup is over 13 hours old.",
     "rules_drift": "Detection rules differ from what was deployed from git.",
+    "reconcile_gap": "The catch-up worker skipped detections older than a day. Run the backfill.",
 }
+# Reasons that only change when something happens (a person edits or deploys, a long outage
+# ends): once one has cleared, its next appearance is a new event and pages at once. The
+# others can flap around a threshold, so they keep their repeat window.
+FORGET_WHEN_CLEAR = ("rules_drift", "reconcile_gap")
 
 
-def stale_text(reason: str, rules_drift: int = 0) -> str:
+def stale_text(reason: str, rules_drift: int = 0, reconcile_gap_s: int = 0) -> str:
     """The push text for a reason. Counts and fixed words only: never a rule name, which is
     the push-server rule (the Rules tab names them)."""
     if reason == "rules_drift" and rules_drift > 0:
         what = "change" if rules_drift == 1 else "changes"
         return f"{rules_drift} detection rule {what} outside git. Open the Rules tab."
+    if reason == "reconcile_gap" and reconcile_gap_s > 0:
+        hours = max(1, round(reconcile_gap_s / 3600))
+        return (
+            f"The catch-up worker skipped about {hours} h of detections older than a day. "
+            "Run the backfill."
+        )
     return STALE_TEXT[reason]
 
 
@@ -498,6 +515,7 @@ def stale_reasons(
     posture_runs: int = 0,
     posture_quiet: float | None = None,
     rules_drift: int = 0,
+    reconcile_gap: int = 0,
 ) -> dict[str, bool]:
     """Which STALE conditions hold right now. The worker pushes on these; the console's
     banner shows the same ones, so both read the thresholds from here."""
@@ -510,6 +528,7 @@ def stale_reasons(
         "posture_quiet": posture_runs > 0 and (posture_quiet or 0) > limits.posture_stale_s,
         "backup_old": backup_age > limits.backup_stale_s,
         "rules_drift": rules_drift > 0,
+        "reconcile_gap": reconcile_gap > 0,
     }
 
 
@@ -761,15 +780,18 @@ class Worker:
         backup_age, _ = self.db.backup_health()
         posture_runs, posture_quiet = self.db.posture_health()
         drifted = self.db.rules_drift_health()
+        gap_s = self.db.reconcile_gap_s()
         firing = stale_reasons(
-            c, sources, quiet, backup_age, self.limits, posture_runs, posture_quiet, drifted
+            c, sources, quiet, backup_age, self.limits, posture_runs, posture_quiet, drifted, gap_s
         )
-        # Drift changes only when a person acts (an edit in the web app, a deploy), so once it
-        # has cleared, the next drift is a new event and pages at once instead of waiting out
-        # the six hours of the last one (found live 2026-11-25). The other reasons keep their
-        # window: they can flap around a threshold and would page every check.
-        if not firing["rules_drift"] and self.db.state_get("stale_rules_drift"):
-            self.db.state_set("stale_rules_drift", "")
+        # Drift changes only when a person acts (an edit in the web app, a deploy), a gap only
+        # after a long outage or a backfill. Once one has cleared, its next appearance is a new
+        # event and pages at once instead of waiting out the six hours of the last one (found
+        # live 2026-11-25). The other reasons keep their window: they can flap around a
+        # threshold and would page every check.
+        for reason in FORGET_WHEN_CLEAR:
+            if not firing[reason] and self.db.state_get(f"stale_{reason}"):
+                self.db.state_set(f"stale_{reason}", "")
         for reason, is_firing in firing.items():
             if not is_firing:
                 continue
@@ -783,7 +805,7 @@ class Worker:
             if not self._may_try(f"stale_{reason}", now):
                 continue
             delivery = self.ntfy.publish(
-                title="SOC STALE", message=stale_text(reason, drifted), priority=5
+                title="SOC STALE", message=stale_text(reason, drifted, gap_s), priority=5
             )
             log.warning(
                 "heartbeat kind=stale reason=%s outcome=%s code=%s",

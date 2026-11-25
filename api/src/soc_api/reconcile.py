@@ -394,6 +394,19 @@ class CursorDb(Db):
     def fail(self, source: str, code: str) -> None:
         self._run("SELECT reconcile_cursor_fail(%s, %s)", (source, code))
 
+    def note_gap(self, source: str, start: datetime, end: datetime) -> None:
+        """Remember a stretch of time that will not be fetched (migration 0022)."""
+        self._run("SELECT reconcile_gap_note(%s, %s, %s)", (source, start, end))
+
+    def gap_start(self, source: str) -> datetime | None:
+        _, rows = self._run("SELECT reconcile_gap_get(%s)", (source,))
+        return rows[0][0]  # type: ignore[no-any-return]
+
+    def clear_gap(self, source: str, since: datetime) -> bool:
+        """Say everything from `since` was fetched; True when that closed the recorded gap."""
+        _, rows = self._run("SELECT reconcile_gap_clear(%s, %s)", (source, since))
+        return bool(rows[0][0])
+
 
 # ---- the service ----
 
@@ -454,12 +467,14 @@ class Reconciler:
         self.clock = clock
         self.health_file = health_file
         self.counts = Counts()
+        self.gap: tuple[int, int] | None = None  # what the last plan() skipped
         self._done: OrderedDict[str, None] = OrderedDict()
 
     # -- planning --
 
     def plan(self, now: datetime, cursor: datetime | None) -> list[tuple[int, int]]:
         lim = self.limits
+        self.gap = None
         end = int((now - timedelta(seconds=lim.lag_s)).timestamp())
         if cursor is None:
             start = end - self.first_lookback_s
@@ -470,6 +485,7 @@ class Reconciler:
                 log.warning(
                     "reconcile gap seconds=%d fetched=%d", floor - start, lim.max_lookback_s
                 )
+                self.gap = (start, floor)
                 start = floor
         windows: list[tuple[int, int]] = []
         if start >= end:
@@ -488,11 +504,39 @@ class Reconciler:
     def run_once(self) -> Counts:
         self.counts = Counts()
         now = self.clock()
-        for a, b in self.plan(now, self.cursor.get(self.source)):
+        windows = self.plan(now, self.cursor.get(self.source))
+        if self.gap:
+            # written down before anything is fetched: the cursor is about to jump over it,
+            # and after that nothing else would remember it (the pager raises STALE from this)
+            self.cursor.note_gap(
+                self.source,
+                datetime.fromtimestamp(self.gap[0], UTC),
+                datetime.fromtimestamp(self.gap[1], UTC),
+            )
+        for a, b in windows:
             self._window(a, b)
             self.cursor.advance(self.source, datetime.fromtimestamp(b, UTC))
             self.counts.windows += 1
         return self.counts
+
+    def backfill(self, since: datetime) -> bool:
+        """Fetch everything from `since` up to the live edge, window by window, whatever the
+        24-hour limit says, and store it like any other find (a detection that is already here
+        is a duplicate, so a rerun costs nothing). The cursor is not touched. Returns whether
+        this closed the recorded gap. A window that cannot be completed raises LcError and
+        leaves the gap open: run it again."""
+        self.counts = Counts()
+        lim = self.limits
+        end = int((self.clock() - timedelta(seconds=lim.lag_s)).timestamp())
+        a = int(since.timestamp())
+        while a < end:
+            b = min(a + lim.chunk_s, end)
+            self._window(a, b)
+            self.counts.windows += 1
+            if b >= end:
+                break
+            a = b - lim.chunk_overlap_s
+        return self.cursor.clear_gap(self.source, since)
 
     def _remember(self, detect_id: str) -> None:
         self._done[detect_id] = None
@@ -672,13 +716,94 @@ def check(cfg: Config, minutes: int) -> int:
     return 0
 
 
+# ---- the backfill command ----
+
+BACKFILL_MAX_DAYS = 30
+BACKFILL_MAX_ENRICH = 50000  # whole-record fetches in one backfill (a normal run allows 200)
+BACKFILL_NOTICE = (
+    "Backfilled detections are stored like any other find: the pager makes cases for them and "
+    "may push for them (marked as late; the usual limit per ten minutes still holds back the "
+    "rest and says so). Nothing is deleted or changed."
+)
+
+
+def parse_since(value: str, now: datetime) -> datetime:
+    """A date (`2026-11-20`, midnight UTC) or a date and time (`2026-11-20T08:30`, UTC unless it
+    carries an offset or Z). Must be in the past and at most BACKFILL_MAX_DAYS back."""
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        since = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError("--since must look like 2026-11-20 or 2026-11-20T08:30Z") from None
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    if since >= now - timedelta(minutes=5):
+        raise ValueError("--since must be in the past")
+    if since < now - timedelta(days=BACKFILL_MAX_DAYS):
+        raise ValueError(f"--since is more than {BACKFILL_MAX_DAYS} days back; that is too far")
+    return since.astimezone(UTC)
+
+
+def backfill_command(
+    reconciler: Reconciler,
+    cursor: CursorDb,
+    source: str,
+    since_text: str | None,
+    *,
+    yes: bool,
+    interactive: bool,
+    now: datetime,
+    ask: Callable[[str], str] = input,
+) -> int:
+    """`backfill [--since T] [--yes]`. Without --since it starts where the recorded gap starts."""
+    try:
+        if since_text:
+            since = parse_since(since_text, now)
+        else:
+            recorded = cursor.gap_start(source)
+            if recorded is None:
+                print("no gap is recorded: give --since")
+                return 2
+            since = parse_since(recorded.astimezone(UTC).isoformat(), now)
+    except ValueError as exc:
+        print(exc)
+        return 2
+    print(f"backfill from {since:%Y-%m-%d %H:%M} UTC to now")
+    print(BACKFILL_NOTICE)
+    if not yes:
+        if not interactive:
+            print("not on a terminal: run it by hand, or pass --yes")
+            return 2
+        if ask("Type yes to continue: ").strip() != "yes":
+            print("nothing done")
+            return 1
+    try:
+        closed = reconciler.backfill(since)
+    except LcError as exc:
+        print(f"backfill stopped: {exc.code} ({reconciler.counts.line()}); run it again")
+        return 1
+    except (StoreUnavailable, psycopg.Error):
+        print(f"backfill stopped: the database failed ({reconciler.counts.line()}); run it again")
+        return 1
+    print(f"backfill ok: {reconciler.counts.line()} gap={'closed' if closed else 'none-recorded'}")
+    return 0
+
+
 # ---- the command line ----
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m soc_api.reconcile")
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "once", "check"])
+    parser.add_argument(
+        "command", nargs="?", default="run", choices=["run", "once", "check", "backfill"]
+    )
     parser.add_argument("--minutes", type=int, default=60)
+    parser.add_argument(
+        "--since", help="backfill: where to start (2026-11-20 or 2026-11-20T08:30Z)"
+    )
+    parser.add_argument("--yes", action="store_true", help="backfill: do not ask")
     args = parser.parse_args(argv)
     configure_logging()
     try:
@@ -701,9 +826,20 @@ def main(argv: list[str]) -> int:
         categories=cfg.categories,
         first_lookback_s=cfg.first_lookback_s,
         interval_s=cfg.interval_s,
+        limits=Limits(max_enrich=BACKFILL_MAX_ENRICH) if args.command == "backfill" else None,
         health_file=cfg.health_file,
     )
     try:
+        if args.command == "backfill":
+            return backfill_command(
+                reconciler,
+                cursor,
+                cfg.source,
+                args.since,
+                yes=args.yes,
+                interactive=sys.stdin.isatty(),
+                now=datetime.now(UTC),
+            )
         if args.command == "once":
             return 0 if reconciler.cycle() else 1
         stopping = False

@@ -125,6 +125,9 @@ def test_the_reconcile_login_can_call_only_its_own_functions_and_the_webhooks(fx
         "reconcile_cursor_get",
         "reconcile_cursor_advance",
         "reconcile_cursor_fail",
+        "reconcile_gap_note",
+        "reconcile_gap_get",
+        "reconcile_gap_clear",
     }
 
 

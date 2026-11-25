@@ -707,7 +707,26 @@ replaces the database, so it is an owner's decision, not a technician's.** You n
 private key (`SOC_BACKUP_AGE_KEY` in the secrets manager, or the paper copy in the safe). It is
 typed at a hidden prompt: never put it in a command, a file or a message. A backup holds the
 data as of its time (at most six hours old); alerts newer than that come back through the
-catch-up worker, which looks back up to 24 hours.
+catch-up worker, which looks back up to 24 hours. If the host was down, or the set is older than
+that, the stretch beyond 24 hours is not fetched: the worker writes it down (the cursor's gap) and
+the pager sends "SOC STALE: the catch-up worker skipped about N h of detections" until it is
+filled with the backfill command below.
+
+**Backfill.** Run on the host as root, after the catch-up worker is back and healthy:
+
+    deploy/soc-compose.sh exec reconcile python -m soc_api.reconcile backfill
+
+With no `--since` it starts where the recorded gap starts; `--since 2026-11-20` or
+`--since 2026-11-20T08:30Z` (UTC unless it carries an offset) names the start when no gap is
+recorded, for example after restoring from a set older than the worker's cursor. It is limited to
+the last 30 days. It shows the span and says what happens (the pager makes cases for backfilled
+detections and may push for them, marked late, within the usual limit per ten minutes), then
+asks for a typed `yes`; without a terminal it refuses unless `--yes` is given. It fetches window
+by window with the same rules as the worker, never moves the cursor, stores each detection once
+(running it again costs nothing), and closes the recorded gap only if it started at or before the
+gap's start. A window that fails stops it with a code and no content: run it again. The STALE
+push repeats every six hours while a gap is open, and a gap that appears after one was closed
+pushes at once.
 
 **What `deploy/restore.sh <set>` does.** Checks the set's checksums, then asks for the key. Starts
 the database container, makes sure the dump is readable, and **refuses unless the database is

@@ -1171,3 +1171,298 @@ def test_an_impossible_detection_time_is_stored_as_unknown_and_never_blocks_the_
     rows = dict(fx.rows("SELECT event_id, detected_at FROM alert"))
     assert rows["d1"] is None and rows["d2"] is not None
     assert fx.one("SELECT raw->'gen_time' FROM alert WHERE event_id = 'd1'")[0] == gen_time
+
+
+# ---- R6: a skipped stretch is remembered and can be backfilled ----
+
+
+def cursor_at(fx: Fixture, ago: str, source: str = "src-a") -> None:
+    fx.run(
+        "INSERT INTO reconcile_cursor (source_id, window_end, last_success) "
+        "SELECT id, now() - %s::interval, now() FROM source WHERE slug = %s",
+        (ago, source),
+    )
+
+
+def gap_row(fx: Fixture) -> tuple[Any, Any]:
+    return fx.one("SELECT gap_from, gap_to FROM reconcile_cursor")  # type: ignore[no-any-return]
+
+
+def window_end(fx: Fixture) -> Any:
+    return fx.one("SELECT window_end FROM reconcile_cursor")[0]
+
+
+def test_a_gap_over_a_day_is_written_down_before_the_cursor_jumps_over_it(
+    fx: Fixture, lc: FakeLc
+) -> None:
+    clock = Clock()
+    cursor_at(fx, "5 days")
+    before = window_end(fx)
+    make(fx, lc, clock=clock, limits=r.Limits(max_windows=100)).run_once()
+    start, end = gap_row(fx)
+    assert abs((end - (clock.now - timedelta(days=1))).total_seconds()) < 2
+    assert abs((start - (before - timedelta(seconds=600))).total_seconds()) < 2
+    with fx.db.connect("soc_worker") as c:
+        seconds = c.execute("SELECT reconcile_gap_health()").fetchone()[0]
+    assert abs(seconds - (4 * 86400 + 600)) < 5
+    assert window_end(fx) > before  # the cursor did move on, so only the gap row remembers
+
+
+def test_a_cursor_within_a_day_records_no_gap(fx: Fixture, lc: FakeLc) -> None:
+    cursor_at(fx, "20 hours")
+    make(fx, lc).run_once()
+    assert gap_row(fx) == (None, None)
+    with fx.db.connect("soc_worker") as c:
+        assert c.execute("SELECT reconcile_gap_health()").fetchone() == (0,)
+
+
+def test_the_gap_stays_recorded_after_later_runs_and_a_second_gap_widens_it(
+    fx: Fixture, lc: FakeLc
+) -> None:
+    clock = Clock()
+    cursor_at(fx, "5 days")
+    rec = make(fx, lc, clock=clock, limits=r.Limits(max_windows=100))
+    rec.run_once()
+    first = gap_row(fx)
+    rec.run_once()
+    assert gap_row(fx) == first  # a normal run does not clear or move it
+    later = clock.now + timedelta(days=9)
+    rec.cursor.note_gap("src-a", later - timedelta(days=3), later - timedelta(days=1))
+    start, end = gap_row(fx)
+    assert start == first[0] and end > first[1]  # wider at the far end, never narrower
+    rec.cursor.note_gap("src-a", first[0] + timedelta(hours=1), first[1] - timedelta(hours=1))
+    assert gap_row(fx) == (start, end)
+
+
+def test_a_backfill_fetches_older_than_a_day_and_leaves_the_cursor_alone(
+    fx: Fixture, lc: FakeLc
+) -> None:
+    clock = Clock()
+    cursor_at(fx, "1 minute")
+    moved = window_end(fx)
+    lc.records = [
+        record("old1", at=clock.now - timedelta(days=3, hours=2)),
+        record("old2", at=clock.now - timedelta(days=2, hours=5), host="host-2"),
+    ]
+    rec = make(fx, lc, clock=clock)
+    assert rec.backfill(clock.now - timedelta(days=4)) is False  # no gap was recorded
+    assert rec.counts.inserted == 2 and rec.counts.windows >= 90
+    assert [e for (e, *_) in stored(fx)] == ["old1", "old2"]
+    assert window_end(fx) == moved
+
+
+def test_a_backfill_run_twice_stores_each_detection_once(fx: Fixture, lc: FakeLc) -> None:
+    clock = Clock()
+    cursor_at(fx, "1 minute")
+    lc.records = [record("old1", at=clock.now - timedelta(days=3))]
+    since = clock.now - timedelta(days=4)
+    make(fx, lc, clock=clock).backfill(since)
+    again = make(fx, lc, clock=clock)
+    again.backfill(since)
+    assert again.counts.inserted == 0 and again.counts.duplicate == 1
+    assert len(stored(fx)) == 1
+
+
+def test_a_backfill_closes_the_gap_only_when_it_starts_at_or_before_the_gap(
+    fx: Fixture, lc: FakeLc
+) -> None:
+    clock = Clock()
+    cursor_at(fx, "5 days")
+    rec = make(fx, lc, clock=clock, limits=r.Limits(max_windows=100))
+    rec.run_once()
+    start, _ = gap_row(fx)
+    assert rec.backfill(start + timedelta(hours=1)) is False  # starts inside the hole
+    assert gap_row(fx)[0] == start
+    assert rec.backfill(start) is True
+    assert gap_row(fx) == (None, None)
+    with fx.db.connect("soc_worker") as c:
+        assert c.execute("SELECT reconcile_gap_health()").fetchone() == (0,)
+
+
+def test_a_backfill_that_could_not_finish_leaves_the_gap_open(fx: Fixture, lc: FakeLc) -> None:
+    clock = Clock()
+    cursor_at(fx, "5 days")
+    rec = make(fx, lc, clock=clock, limits=r.Limits(max_windows=100))
+    rec.run_once()
+    start, _ = gap_row(fx)
+    lc.fail_nth_list = lc.lists_served + 3
+    with pytest.raises(r.LcError):
+        rec.backfill(start)
+    assert gap_row(fx)[0] == start
+    assert rec.backfill(start) is True  # the rerun finishes and closes it
+
+
+def test_a_backfill_is_not_cut_off_by_the_per_run_window_limit(fx: Fixture, lc: FakeLc) -> None:
+    clock = Clock()
+    cursor_at(fx, "1 minute")
+    rec = make(fx, lc, clock=clock, limits=r.Limits(max_windows=2))
+    rec.backfill(clock.now - timedelta(days=5))
+    assert rec.counts.windows > 100
+
+
+def test_the_gap_functions_refuse_bad_input_and_unknown_sources(fx: Fixture, lc: FakeLc) -> None:
+    import psycopg
+
+    cursor_at(fx, "1 minute")
+    cursor = make(fx, lc).cursor
+    when = now()
+    for source, a, b in (
+        ("src-a", when, when),
+        ("src-a", when, when - timedelta(hours=1)),
+        ("src-a", when - timedelta(days=4000), when),
+        ("nope", when - timedelta(hours=2), when),
+    ):
+        with pytest.raises(psycopg.errors.RaiseException):
+            cursor.note_gap(source, a, b)
+    assert gap_row(fx) == (None, None)
+    with pytest.raises(psycopg.errors.RaiseException):
+        cursor.clear_gap("nope", when)
+
+
+def test_only_the_right_logins_can_run_the_gap_functions(fx: Fixture) -> None:
+    def can(role: str, function: str) -> bool:
+        return bool(fx.one("SELECT has_function_privilege(%s, %s, 'EXECUTE')", (role, function))[0])
+
+    for function in (
+        "reconcile_gap_note(text, timestamptz, timestamptz)",
+        "reconcile_gap_get(text)",
+        "reconcile_gap_clear(text, timestamptz)",
+    ):
+        assert can("soc_reconcile", function), function
+        for other in ("soc_worker", "soc_console", "soc_ingest", "soc_posture"):
+            assert not can(other, function), (other, function)
+    assert can("soc_worker", "reconcile_gap_health()")
+    for other in ("soc_reconcile", "soc_console", "soc_ingest", "soc_posture"):
+        assert not can(other, "reconcile_gap_health()"), other
+
+
+def test_downgrading_removes_the_gap_and_upgrading_brings_it_back(db: TestDb, fx: Fixture) -> None:
+    from soc_api import db as soc_db
+
+    url = db.sqlalchemy_url()
+    soc_db.downgrade(url, "0021")
+    assert (
+        fx.rows(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'reconcile_cursor' AND column_name IN ('gap_from', 'gap_to')"
+        )
+        == []
+    )
+    assert fx.one("SELECT to_regprocedure('reconcile_gap_health()')::text") == (None,)
+    soc_db.upgrade(url)
+    cursor_at(fx, "1 minute")
+    assert gap_row(fx) == (None, None)
+
+
+# ---- the backfill command ----
+
+
+def test_since_accepts_a_date_or_a_time_and_refuses_the_rest() -> None:
+    n = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
+    assert r.parse_since("2026-11-20", n) == datetime(2026, 11, 20, tzinfo=UTC)
+    assert r.parse_since("2026-11-20T08:30Z", n) == datetime(2026, 11, 20, 8, 30, tzinfo=UTC)
+    assert r.parse_since("2026-11-20T08:30:00-05:00", n) == datetime(
+        2026, 11, 20, 13, 30, tzinfo=UTC
+    )
+    for bad in ("", "yesterday", "2026-13-01", "2026-11-25T11:58Z", "2026-12-25", "2026-10-01"):
+        with pytest.raises(ValueError, match="--since"):
+            r.parse_since(bad, n)
+
+
+class Typed:
+    def __init__(self, *answers: str) -> None:
+        self.answers = list(answers)
+        self.asked = 0
+
+    def __call__(self, _prompt: str) -> str:
+        self.asked += 1
+        return self.answers.pop(0)
+
+
+def run_backfill(
+    fx: Fixture,
+    lc: FakeLc,
+    since: str | None,
+    *,
+    yes: bool = False,
+    interactive: bool = True,
+    ask: Typed | None = None,
+    clock: Clock | None = None,
+) -> int:
+    clock = clock or Clock()
+    rec = make(fx, lc, clock=clock)
+    return r.backfill_command(
+        rec,
+        rec.cursor,  # type: ignore[arg-type]
+        "src-a",
+        since,
+        yes=yes,
+        interactive=interactive,
+        now=clock.now,
+        ask=ask or Typed(),
+    )
+
+
+def test_the_command_shows_the_paging_notice_and_needs_a_typed_yes(
+    fx: Fixture, lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = Clock()
+    cursor_at(fx, "1 minute")
+    lc.records = [record("old1", at=clock.now - timedelta(days=3))]
+    since = (clock.now - timedelta(days=4)).strftime("%Y-%m-%dT%H:%MZ")
+    typed = Typed("no")
+    assert run_backfill(fx, lc, since, ask=typed, clock=clock) == 1
+    out = capsys.readouterr().out
+    assert "may push for them" in out and "nothing done" in out
+    assert typed.asked == 1 and stored(fx) == []
+    assert run_backfill(fx, lc, since, ask=Typed("yes"), clock=clock) == 0
+    assert "backfill ok" in capsys.readouterr().out and len(stored(fx)) == 1
+
+
+def test_without_a_terminal_the_command_refuses_unless_told_yes(
+    fx: Fixture, lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = Clock()
+    cursor_at(fx, "1 minute")
+    since = (clock.now - timedelta(days=4)).strftime("%Y-%m-%d")
+    assert run_backfill(fx, lc, since, interactive=False, clock=clock) == 2
+    assert "not on a terminal" in capsys.readouterr().out
+    assert run_backfill(fx, lc, since, interactive=False, yes=True, clock=clock) == 0
+
+
+def test_without_since_the_command_starts_where_the_recorded_gap_starts(
+    fx: Fixture, lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = Clock()
+    assert run_backfill(fx, lc, None, yes=True, clock=clock) == 2  # no cursor, no gap
+    assert "no gap is recorded" in capsys.readouterr().out
+    cursor_at(fx, "5 days")
+    make(fx, lc, clock=clock, limits=r.Limits(max_windows=100)).run_once()
+    assert gap_row(fx)[0] is not None
+    lc.records = [record("gap1", at=clock.now - timedelta(days=3))]
+    assert run_backfill(fx, lc, None, yes=True, clock=clock) == 0
+    assert "gap=closed" in capsys.readouterr().out
+    assert gap_row(fx) == (None, None) and [e for (e, *_) in stored(fx)] == ["gap1"]
+
+
+def test_the_command_reports_a_failed_window_and_leaves_the_gap_open(
+    fx: Fixture, lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = Clock()
+    cursor_at(fx, "5 days")
+    make(fx, lc, clock=clock, limits=r.Limits(max_windows=100)).run_once()
+    lc.fail_nth_list = lc.lists_served + 2
+    assert run_backfill(fx, lc, None, yes=True, clock=clock) == 1
+    out = capsys.readouterr().out
+    assert "backfill stopped" in out and "run it again" in out
+    assert gap_row(fx)[0] is not None
+    assert KEY not in out and TOKEN not in out
+
+
+def test_a_since_that_is_too_far_back_or_in_the_future_is_refused_before_anything_runs(
+    fx: Fixture, lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cursor_at(fx, "1 minute")
+    assert run_backfill(fx, lc, "2020-01-01", yes=True) == 2
+    assert run_backfill(fx, lc, "2999-01-01", yes=True) == 2
+    assert capsys.readouterr().out.count("--since") == 2 and lc.lists() == []
