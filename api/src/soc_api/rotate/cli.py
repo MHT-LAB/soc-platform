@@ -259,6 +259,24 @@ def run(
     return _record(cfg, args, state, plan, confirm, say, moment, run_id, today)
 
 
+def _next_steps(plan: Plan) -> list[str]:
+    """The hash on a line of its own and the exact command that uses it, so nobody has to
+    pick it out of a sentence."""
+    lines = ["", f"PLAN HASH (copy this): {plan.plan_hash}", ""]
+    steps = []
+    if plan.automatic_actions:
+        steps.append(f"rotate.sh --apply {plan.plan_hash}")
+    if plan.provisions:
+        steps.append(f"rotate.sh --provision {plan.plan_hash}")
+    if len(steps) == 1:
+        lines.append("Next, from the operator's machine with the rights on stdin:")
+    else:
+        lines.append("Next, from the operator's machine with the rights on stdin, ONE of these")
+        lines.append("(an approval is good for one run):")
+    lines.extend(f"  {step}" for step in steps)
+    return lines
+
+
 def _approve(
     cfg: Config,
     plan: Plan,
@@ -302,6 +320,8 @@ def _approve(
         say("FAILED: could not write state.json")
         return FAILED
     say(f"Approved plan {plan.plan_hash} until {st.stamp(moment + st.APPROVAL_MAX_AGE)}.")
+    for line in _next_steps(plan):
+        say(line)
     _finish(
         cfg,
         say,

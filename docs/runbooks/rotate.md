@@ -27,7 +27,7 @@ read-only.
 
 | Command | Runs | What it does |
 |---|---|---|
-| `deploy/rotate.sh` | container, no network | the plan, then a typed `yes` (**needs a terminal**, see below). Approving writes the plan's short hash and the register commit to `state.json`, good for 30 minutes and for one apply. |
+| `deploy/rotate.sh` | container, no network | the plan, then a typed `yes` (**needs a terminal**, see below). Approving writes the plan's short hash and the register commit to `state.json`, good for 30 minutes and for one apply. After the `yes` it prints the hash on its own line, `PLAN HASH (copy this): <hash>`, and the exact `--apply` or `--provision` command that uses it. |
 | `deploy/rotate.sh --plan [--quiet]` | container, no network | the plan only, asks nothing (the daily timer runs `--plan --quiet`) |
 | `deploy/rotate.sh --record <id> [<id> ...] [--date YYYY-MM-DD] [--due YYYY-MM-DD]` | container, no network | a person rotated these keys by hand: write them down after one typed `yes` (**needs a terminal**). Up to 20 ids, one register fetch, one record line per key; the same `--date` and `--due` apply to all of them. An id that is unknown, replaced on exposure only, or listed twice refuses the whole run before anything is asked. The date defaults to today (New York time) and cannot be in the future. `--due` is for a key whose due date was set by hand. Makes no vendor call. |
 | `deploy/rotate.sh --preflight` | **host**, rights on stdin | the read calls of an apply: log in to both services, list the vendor's keys, check each automatic key's live permissions and that its stored value can be read. **Changes nothing**, needs no approval. |
