@@ -539,3 +539,6 @@ def test_a_plan_with_only_keys_to_create_can_be_approved(tmp_path: Path) -> None
     text = "\n".join(said)
     assert "Keys to create for the first time (1):" in text
     assert "nothing to approve" not in text and "rotate.sh --provision" in text
+    assert f"PLAN HASH (copy this): {plan.plan_hash}" in said
+    assert f"  rotate.sh --provision {plan.plan_hash}" in said
+    assert f"  rotate.sh --apply {plan.plan_hash}" not in said

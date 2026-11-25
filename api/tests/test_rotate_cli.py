@@ -229,6 +229,25 @@ def test_approving_records_this_exact_plan_for_thirty_minutes(env: Env) -> None:
     assert "makes no change to any key" in env.text()
 
 
+def test_the_hash_stands_on_its_own_line_with_the_command_that_uses_it(env: Env) -> None:
+    assert env.go(Args("approve")) == OK
+    state = env.state()
+    assert state.approval is not None
+    plan_hash = state.approval.plan_hash
+    lines = env.text().splitlines()
+    assert f"PLAN HASH (copy this): {plan_hash}" in lines
+    assert f"  rotate.sh --apply {plan_hash}" in lines
+    assert not any(
+        "--provision" in line
+        for line in lines[lines.index(f"PLAN HASH (copy this): {plan_hash}") :]
+    )
+
+
+def test_a_declined_approval_shows_no_hash_to_copy(env: Env) -> None:
+    assert env.go(Args("approve"), answer=False) == DECLINED
+    assert "PLAN HASH" not in env.text()
+
+
 def test_not_typing_yes_changes_nothing(env: Env) -> None:
     assert env.go(Args("approve"), answer=False) == DECLINED
     assert not (env.state_dir / "state.json").exists()
