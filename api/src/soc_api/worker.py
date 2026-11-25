@@ -764,6 +764,12 @@ class Worker:
         firing = stale_reasons(
             c, sources, quiet, backup_age, self.limits, posture_runs, posture_quiet, drifted
         )
+        # Drift changes only when a person acts (an edit in the web app, a deploy), so once it
+        # has cleared, the next drift is a new event and pages at once instead of waiting out
+        # the six hours of the last one (found live 2026-11-25). The other reasons keep their
+        # window: they can flap around a threshold and would page every check.
+        if not firing["rules_drift"] and self.db.state_get("stale_rules_drift"):
+            self.db.state_set("stale_rules_drift", "")
         for reason, is_firing in firing.items():
             if not is_firing:
                 continue

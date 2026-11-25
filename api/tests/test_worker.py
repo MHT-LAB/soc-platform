@@ -1168,6 +1168,76 @@ def test_the_catch_up_stale_push_repeats_only_every_six_hours_and_stops_on_recov
     assert len(stale_pushes(ntfy_server)) == 2
 
 
+def set_drift(fx: Fixture, wrong: int) -> None:
+    """The rules drift state as the collector leaves it: `wrong` rules missing (0 = clean)."""
+    fx.run("DELETE FROM rules_drift")
+    fx.run(
+        "INSERT INTO rules_drift (singleton, manifest, missing_count, missing, updated_at) "
+        "VALUES (true, 'ok', %s, '{}', now())",
+        (wrong,),
+    )
+
+
+def drift_pushes(fake: FakeNtfy) -> list[dict[str, Any]]:
+    return [p for p in stale_pushes(fake) if "outside git" in p["message"]]
+
+
+def test_drift_that_comes_back_after_it_cleared_pages_at_once_not_after_six_hours(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    set_drift(fx, 1)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1  # still drifting: the repeat window holds
+    set_drift(fx, 0)  # a deploy put the rule back
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1
+    set_drift(fx, 2)  # someone edits another rule an hour later
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 2
+
+
+def test_drift_still_present_is_not_repeated_inside_six_hours_and_is_after(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    set_drift(fx, 1)
+    worker.tick()
+    for _ in range(3):
+        clock.advance(seconds=301)
+        worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1
+    clock.advance(hours=6)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 2
+
+
+def test_only_drift_forgets_its_repeat_window_when_it_clears(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    """A condition that can flap around a threshold (the catch-up worker's quiet time) keeps
+    its six hours, or it would page every check; drift only changes when a person acts."""
+    quiet_cursor(fx, last_success_min=40)
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    worker.tick()
+    assert len(stale_pushes(ntfy_server)) == 1
+    fx.run("UPDATE reconcile_cursor SET last_success = now()")
+    clock.advance(seconds=301)
+    worker.tick()
+    fx.run("UPDATE reconcile_cursor SET last_success = now() - interval '40 minutes'")
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(stale_pushes(ntfy_server)) == 1
+
+
 def test_the_workers_lateness_limit_reaches_the_title(fx: Fixture, ntfy_server: FakeNtfy) -> None:
     fx.alert()
     fx.run("UPDATE alert SET detected_at = received_at - interval '20 minutes'")
