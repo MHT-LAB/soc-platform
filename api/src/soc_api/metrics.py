@@ -32,7 +32,7 @@ COUNTERS = {
     "pages_failed": ("soc_pages_failed_total", "Pushes that failed.", None),
     "cases_acked": ("soc_cases_acknowledged_total", "Cases acknowledged by a person.", None),
 }
-KINDS = {"page", "repage1", "repage2"}
+KINDS = {"page", "repage1", "repage2", "reopen", "raised"}
 BOUND = re.compile(r"^[0-9]{1,6}$")
 HISTOGRAM = "soc_ack_latency_seconds"
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
