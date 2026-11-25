@@ -1466,3 +1466,37 @@ def test_a_since_that_is_too_far_back_or_in_the_future_is_refused_before_anythin
     assert run_backfill(fx, lc, "2020-01-01", yes=True) == 2
     assert run_backfill(fx, lc, "2999-01-01", yes=True) == 2
     assert capsys.readouterr().out.count("--since") == 2 and lc.lists() == []
+
+
+def gap_beyond_the_limit(fx: Fixture) -> None:
+    cursor_at(fx, "1 minute")
+    fx.run(
+        "UPDATE reconcile_cursor SET gap_from = now() - interval '40 days', "
+        "gap_to = now() - interval '38 days'"
+    )
+
+
+def test_a_gap_older_than_the_limit_is_fetched_from_the_limit_and_closed_only_when_told(
+    fx: Fixture, lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = Clock()
+    gap_beyond_the_limit(fx)
+    typed = Typed("yes", "no")
+    assert run_backfill(fx, lc, None, ask=typed, clock=clock) == 0
+    out = capsys.readouterr().out
+    assert "more than 30 days back" in out and "gap=left-open" in out
+    assert gap_row(fx)[0] is not None and typed.asked == 2
+    first = int(lc.lists()[0]["query"]["start"])
+    assert abs(first - int((clock.now - timedelta(days=30)).timestamp())) < 120
+    assert run_backfill(fx, lc, None, ask=Typed("yes", "close"), clock=clock) == 0
+    assert "gap=closed" in capsys.readouterr().out and gap_row(fx) == (None, None)
+
+
+def test_a_gap_older_than_the_limit_is_never_closed_without_a_person(
+    fx: Fixture, lc: FakeLc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gap_beyond_the_limit(fx)
+    typed = Typed()
+    assert run_backfill(fx, lc, None, yes=True, interactive=False, ask=typed) == 0
+    assert "gap=left-open" in capsys.readouterr().out
+    assert gap_row(fx)[0] is not None and typed.asked == 0

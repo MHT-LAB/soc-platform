@@ -757,7 +757,12 @@ def backfill_command(
     now: datetime,
     ask: Callable[[str], str] = input,
 ) -> int:
-    """`backfill [--since T] [--yes]`. Without --since it starts where the recorded gap starts."""
+    """`backfill [--since T] [--yes]`. Without --since it starts where the recorded gap starts.
+
+    A recorded gap that starts beyond the 30-day limit cannot be fetched whole: the backfill
+    starts at the limit, and the gap is closed only if a person, at the terminal, types that
+    the older part stays missing. Without that it stays open and keeps paging."""
+    beyond: datetime | None = None
     try:
         if since_text:
             since = parse_since(since_text, now)
@@ -766,11 +771,19 @@ def backfill_command(
             if recorded is None:
                 print("no gap is recorded: give --since")
                 return 2
-            since = parse_since(recorded.astimezone(UTC).isoformat(), now)
+            limit = now - timedelta(days=BACKFILL_MAX_DAYS) + timedelta(minutes=1)
+            if recorded < limit:
+                beyond = recorded
+            since = parse_since(max(recorded, limit).astimezone(UTC).isoformat(), now)
     except ValueError as exc:
         print(exc)
         return 2
     print(f"backfill from {since:%Y-%m-%d %H:%M} UTC to now")
+    if beyond is not None:
+        print(
+            f"the recorded gap starts {beyond:%Y-%m-%d %H:%M} UTC, more than {BACKFILL_MAX_DAYS} "
+            "days back: what came before the start above cannot be fetched here"
+        )
     print(BACKFILL_NOTICE)
     if not yes:
         if not interactive:
@@ -787,6 +800,16 @@ def backfill_command(
     except (StoreUnavailable, psycopg.Error):
         print(f"backfill stopped: the database failed ({reconciler.counts.line()}); run it again")
         return 1
+    if beyond is not None and not closed:
+        if (
+            interactive
+            and ask("Type close to close the gap anyway (the older part stays missing): ").strip()
+            == "close"
+        ):
+            closed = cursor.clear_gap(source, beyond)
+        else:
+            print(f"backfill ok: {reconciler.counts.line()} gap=left-open (older than the limit)")
+            return 0
     print(f"backfill ok: {reconciler.counts.line()} gap={'closed' if closed else 'none-recorded'}")
     return 0
 

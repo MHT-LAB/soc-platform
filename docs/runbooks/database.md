@@ -719,7 +719,9 @@ filled with the backfill command below.
 With no `--since` it starts where the recorded gap starts; `--since 2026-11-20` or
 `--since 2026-11-20T08:30Z` (UTC unless it carries an offset) names the start when no gap is
 recorded, for example after restoring from a set older than the worker's cursor. It is limited to
-the last 30 days. It shows the span and says what happens (the pager makes cases for backfilled
+the last 30 days: a recorded gap that starts further back is fetched from the limit, and the gap is
+closed only if you type `close` at the second prompt, accepting that the older part stays missing
+(without a terminal it stays open and keeps paging). It shows the span and says what happens (the pager makes cases for backfilled
 detections and may push for them, marked late, within the usual limit per ten minutes), then
 asks for a typed `yes`; without a terminal it refuses unless `--yes` is given. It fetches window
 by window with the same rules as the worker, never moves the cursor, stores each detection once
