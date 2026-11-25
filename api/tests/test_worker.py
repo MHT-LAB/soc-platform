@@ -1168,6 +1168,152 @@ def test_the_catch_up_stale_push_repeats_only_every_six_hours_and_stops_on_recov
     assert len(stale_pushes(ntfy_server)) == 2
 
 
+def set_drift(fx: Fixture, wrong: int) -> None:
+    """The rules drift state as the collector leaves it: `wrong` rules missing (0 = clean)."""
+    fx.run("DELETE FROM rules_drift")
+    fx.run(
+        "INSERT INTO rules_drift (singleton, manifest, missing_count, missing, updated_at) "
+        "VALUES (true, 'ok', %s, '{}', now())",
+        (wrong,),
+    )
+
+
+def drift_pushes(fake: FakeNtfy) -> list[dict[str, Any]]:
+    return [p for p in stale_pushes(fake) if "outside git" in p["message"]]
+
+
+def test_drift_that_comes_back_after_it_cleared_pages_at_once_not_after_six_hours(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    set_drift(fx, 1)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1  # still drifting: the repeat window holds
+    set_drift(fx, 0)  # a deploy put the rule back
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1
+    set_drift(fx, 2)  # someone edits another rule an hour later
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 2
+
+
+def test_drift_still_present_is_not_repeated_inside_six_hours_and_is_after(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    set_drift(fx, 1)
+    worker.tick()
+    for _ in range(3):
+        clock.advance(seconds=301)
+        worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 1
+    clock.advance(hours=6)
+    worker.tick()
+    assert len(drift_pushes(ntfy_server)) == 2
+
+
+def test_only_drift_forgets_its_repeat_window_when_it_clears(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    """A condition that can flap around a threshold (the catch-up worker's quiet time) keeps
+    its six hours, or it would page every check; drift only changes when a person acts."""
+    quiet_cursor(fx, last_success_min=40)
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    worker.tick()
+    assert len(stale_pushes(ntfy_server)) == 1
+    fx.run("UPDATE reconcile_cursor SET last_success = now()")
+    clock.advance(seconds=301)
+    worker.tick()
+    fx.run("UPDATE reconcile_cursor SET last_success = now() - interval '40 minutes'")
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(stale_pushes(ntfy_server)) == 1
+
+
+def set_gap(fx: Fixture, days_from: float | None = 3, days_to: float = 1) -> None:
+    """A skipped stretch on the catch-up cursor, as the catch-up worker leaves it."""
+    fx.run(
+        "UPDATE reconcile_cursor SET gap_from = CASE WHEN %s::float8 IS NULL THEN NULL "
+        "ELSE now() - make_interval(days => 0, secs => %s::float8 * 86400) END, "
+        "gap_to = CASE WHEN %s::float8 IS NULL THEN NULL "
+        "ELSE now() - make_interval(secs => %s::float8 * 86400) END",
+        (days_from, days_from, days_from, days_to),
+    )
+
+
+def gap_pushes(fake: FakeNtfy) -> list[dict[str, Any]]:
+    return [p for p in stale_pushes(fake) if "skipped about" in p["message"]]
+
+
+def test_a_skipped_stretch_raises_stale_with_hours_only_and_repeats_every_six_hours(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    quiet_cursor(fx, last_success_min=1)
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    worker.tick()
+    assert gap_pushes(ntfy_server) == []  # a healthy cursor with no gap says nothing
+    set_gap(fx)
+    clock.advance(seconds=301)
+    worker.tick()
+    [push] = gap_pushes(ntfy_server)
+    assert push["priority"] == 5 and push["title"] == "SOC STALE"
+    assert push["message"] == (
+        "The catch-up worker skipped about 48 h of detections older than a day. Run the backfill."
+    )
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(gap_pushes(ntfy_server)) == 1
+    clock.advance(hours=6)
+    worker.tick()
+    assert len(gap_pushes(ntfy_server)) == 2
+
+
+def test_a_gap_that_was_backfilled_and_a_new_one_later_pages_at_once(
+    fx: Fixture, ntfy_server: FakeNtfy
+) -> None:
+    quiet_cursor(fx, last_success_min=1)
+    clock = Clock()
+    worker = make_worker(fx, ntfy_server, clock=clock)
+    set_gap(fx)
+    worker.tick()
+    assert len(gap_pushes(ntfy_server)) == 1
+    set_gap(fx, None)  # the backfill closed it
+    clock.advance(seconds=301)
+    worker.tick()
+    set_gap(fx, 9, 7)  # a later outage
+    clock.advance(seconds=301)
+    worker.tick()
+    assert len(gap_pushes(ntfy_server)) == 2
+
+
+def test_the_gap_text_rounds_to_hours_and_the_reason_needs_a_positive_gap() -> None:
+    assert w.stale_text("reconcile_gap", 0, 90_000).startswith(
+        "The catch-up worker skipped about 25 h"
+    )
+    assert "about 1 h" in w.stale_text("reconcile_gap", 0, 60)
+    assert w.stale_text("reconcile_gap") == w.STALE_TEXT["reconcile_gap"]
+    counts = {"oldest_pending_page_s": 0, "failed_last_24h": 0, "oldest_unassigned_alert_s": 0}
+    kwargs: dict[str, Any] = {
+        "counts": counts,
+        "sources": 0,
+        "quiet": None,
+        "backup_age": 0.0,
+        "limits": w.Limits(),
+    }
+    assert w.stale_reasons(**kwargs)["reconcile_gap"] is False
+    assert w.stale_reasons(**kwargs, reconcile_gap=0)["reconcile_gap"] is False
+    assert w.stale_reasons(**kwargs, reconcile_gap=3600)["reconcile_gap"] is True
+
+
 def test_the_workers_lateness_limit_reaches_the_title(fx: Fixture, ntfy_server: FakeNtfy) -> None:
     fx.alert()
     fx.run("UPDATE alert SET detected_at = received_at - interval '20 minutes'")

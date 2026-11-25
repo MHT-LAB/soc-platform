@@ -320,8 +320,18 @@ def _activity_cases(
     spec: dict[str, Any],
     rng: random.Random,
     now: datetime,
+    times: random.Random | None = None,
 ) -> None:
-    """Cases with their alerts, pages, acknowledgements and closes."""
+    """Cases with their alerts, pages, acknowledgements and closes.
+
+    Two random streams: `rng` decides what happens (rule, host, ids, how many alerts, how long
+    things take) and `times` decides when. Which draws the times need depends on the hour the
+    seed runs (busy hours accept more often), and a conditional draw on the shared stream
+    would move every later case; so `times` has its own stream, and every draw on `rng`
+    happens whatever the case's age turns out to be. The same seed then makes the same cases at
+    any hour; only their times, and what follows from their age, differ.
+    """
+    times = times or random.Random(f"{spec['seed']}:times")  # noqa: S311 - synthetic demo data
     days = int(spec["days"])
     analyst = str(spec["analyst"])
     rules = spec["rules"]
@@ -331,8 +341,8 @@ def _activity_cases(
 
     def when() -> datetime:
         while True:
-            at = now - timedelta(seconds=days * 86400 * rng.random() ** 1.5)
-            if rng.random() < hour_weight[at.hour]:
+            at = now - timedelta(seconds=days * 86400 * times.random() ** 1.5)
+            if times.random() < hour_weight[at.hour]:
                 return at
 
     cases: list[dict[str, Any]] = []
@@ -352,15 +362,19 @@ def _activity_cases(
         host = rng.choice(spec["hosts"])
         opened = when()
         if n < 4:  # a few recent open ones for the queue
-            opened = now - timedelta(minutes=rng.randint(6, 170))
+            opened = now - timedelta(minutes=times.randint(6, 170))
         case_id = uuid.UUID(int=rng.getrandbits(128), version=4)
         age = (now - opened).total_seconds()
         lane = rule["lane"]
+        # both draws are made for every case; the age only picks which one counts
+        old_status = rng.choices(["closed", "acknowledged", "open"], [0.88, 0.1, 0.02])[0]
+        mid_status = rng.choices(["acknowledged", "open", "closed"], [0.5, 0.4, 0.1])[0]
+        close_after = rng.randint(600, 21600)
         status = "open"
         if age > 4 * 3600:
-            status = rng.choices(["closed", "acknowledged", "open"], [0.88, 0.1, 0.02])[0]
+            status = old_status
         elif age > 1800:
-            status = rng.choices(["acknowledged", "open", "closed"], [0.5, 0.4, 0.1])[0]
+            status = mid_status
         if n < 4:
             status = "open" if n % 2 else "acknowledged"
         # quiet cases close within the hour, except the pinned recent ones: they keep
@@ -369,9 +383,7 @@ def _activity_cases(
             status = "closed"
         closed_at = None
         if status == "closed":
-            closed_at = min(
-                opened + timedelta(seconds=rng.randint(600, 21600)), now - timedelta(minutes=1)
-            )
+            closed_at = min(opened + timedelta(seconds=close_after), now - timedelta(minutes=1))
         note = "Reviewed with the owner; expected activity." if closed_at else None
         cases.append(
             {
@@ -387,8 +399,9 @@ def _activity_cases(
         )
         for j in range(rng.randint(1, 7 if lane != "paged" else 4)):
             received = opened + timedelta(minutes=j * rng.randint(1, 12))
+            back = rng.randint(30, 120)
             if received > now:
-                received = now - timedelta(seconds=rng.randint(30, 120))
+                received = now - timedelta(seconds=back)
             alerts.append(
                 {
                     "id": uuid.UUID(int=rng.getrandbits(128), version=4),
@@ -416,9 +429,10 @@ def _activity_cases(
             created = opened + timedelta(seconds=1)
             failed = n == 20 and age > 3 * 86400
             sent = created + timedelta(seconds=9.5 if rng.random() < 0.02 else rng.uniform(1, 4.5))
+            ack_after = rng.randint(40, 1500)
             acked_at = None
             if status in ("acknowledged", "closed") and not failed:
-                acked_at = sent + timedelta(seconds=rng.randint(40, 1500))
+                acked_at = sent + timedelta(seconds=ack_after)
                 event(case_id, acked_at, analyst, "acked")
             pages.append(
                 {

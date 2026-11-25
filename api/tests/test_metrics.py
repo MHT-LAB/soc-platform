@@ -233,6 +233,54 @@ def test_the_numbers_on_a_seeded_database(fx: Fixture) -> None:
     assert s['soc_ack_latency_seconds_bucket{le="+Inf"}'] == 2
 
 
+def test_the_reopen_and_raised_pushes_are_counted_by_kind(fx: Fixture) -> None:
+    seeded(fx)
+    for kind, status, copies in (
+        ("reopen", "sent", 2),
+        ("raised", "sent", 1),
+        ("raised", "failed", 1),
+    ):
+        for _ in range(copies):
+            fx.run(
+                "INSERT INTO notification (client_id, case_id, channel, kind, status, sent_at) "
+                "SELECT client_id, case_id, channel, %s, %s, now() FROM notification "
+                "WHERE kind = 'page' LIMIT 1",
+                (kind, status),
+            )
+    s = page(fx)
+    assert s['soc_pages_sent_total{kind="reopen"}'] == 2
+    assert s['soc_pages_sent_total{kind="raised"}'] == 1
+    assert s['soc_pages_sent_total{kind="page"}'] == 2  # the others are unchanged
+    assert s["soc_pages_failed_total"] == 2  # a failed raised push is a failed push
+
+
+def test_a_kind_outside_the_fixed_list_never_becomes_a_label() -> None:
+    rows = [("pages_sent", "reopen", 3.0), ("pages_sent", 'x"} 9\n#', 1.0)]
+    lines = [
+        line
+        for line in metrics.render(rows).splitlines()
+        if line.startswith("soc_pages_sent_total{")
+    ]
+    assert lines == ['soc_pages_sent_total{kind="reopen"} 3']
+
+
+def test_the_kind_swap_matches_the_0009_definition_exactly_once_and_undoes_exactly() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    versions = Path(__file__).resolve().parents[1] / "src" / "soc_api" / "migrations" / "versions"
+    spec = importlib.util.spec_from_file_location("mig_0021", next(versions.glob("0021_*.py")))
+    assert spec and spec.loader
+    m21 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m21)
+    source = next(versions.glob("0009_*.py")).read_text()
+    for old, new in m21.SWAPS:
+        assert source.count(old) == 1, old
+        forward = source.replace(old, new)
+        assert forward.count(new) == 1
+        assert forward.replace(new, old) == source
+
+
 def test_a_new_database_is_all_zero_and_no_source_slug_appears(fx: Fixture) -> None:
     text = page_text(fx)
     assert "src-a" not in text and "src-b" not in text
@@ -260,7 +308,20 @@ def test_nothing_a_client_or_sender_wrote_reaches_the_output(fx: Fixture) -> Non
     text = TestClient(create_console_app(settings)).get("/metrics", headers=HEADERS).text
     for word in ("zebra", "Zebra", "client-a", "internal", "summary", "actor"):
         assert word not in text
-    allowed = {"src-a", "src-b", "page", "repage1", "repage2", "60", "300", "900", "3600", "14400"}
+    allowed = {
+        "src-a",
+        "src-b",
+        "page",
+        "repage1",
+        "repage2",
+        "reopen",
+        "raised",
+        "60",
+        "300",
+        "900",
+        "3600",
+        "14400",
+    }
     assert {label for _, label, _ in rows(fx) if label} <= allowed
 
 
@@ -312,6 +373,20 @@ def test_the_login_still_reads_no_table_and_the_writer_cannot_read_a_source_slug
         assert not can(column, "SELECT"), column
     for column in ("id", "slug", "secret_ref", "enabled"):
         assert not can(column, "UPDATE") and not can(column, "INSERT"), column
+
+
+def test_downgrading_to_0020_restores_the_original_definition_and_upgrading_redoes_it(
+    db: TestDb, fx: Fixture
+) -> None:
+    url = db.sqlalchemy_url()
+    query = "SELECT pg_get_functiondef('pipeline_metrics()'::regprocedure)"
+    head = fx.one(query)[0]
+    assert "('reopen'), ('raised')" in head
+    soc_db.downgrade(url, "0020")
+    old = fx.one(query)[0]
+    assert "reopen" not in old and "('page'), ('repage1'), ('repage2'))" in old
+    soc_db.upgrade(url)
+    assert fx.one(query)[0] == head
 
 
 def test_downgrading_removes_it_and_upgrading_brings_it_back(db: TestDb, fx: Fixture) -> None:
