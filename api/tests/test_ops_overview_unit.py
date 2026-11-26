@@ -130,6 +130,8 @@ def test_health_uses_the_pagers_own_thresholds() -> None:
         ("sensors_online", 3, "Endpoint sensors", "warn"),
         ("org_errors", 2, "Posture collector", "warn"),
         ("reconcile_errors", 1, "Catch-up worker", "warn"),
+        ("reconcile_gap_s", 7200, "Catch-up worker", "down"),
+        ("rules_drift", 2, "Posture collector", "down"),
     ):
         d2 = copy.deepcopy(d)
         d2["health"][key] = value
@@ -146,6 +148,17 @@ def test_health_uses_the_pagers_own_thresholds() -> None:
     )
     s3 = states(d3)
     assert s3["Posture collector"] == s3["Catch-up worker"] == s3["Endpoint sensors"] == "idle"
+
+
+def test_the_system_page_says_what_to_do_about_a_skipped_stretch() -> None:
+    d = doc()
+    d["health"]["reconcile_gap_s"] = 4 * 86400 + 600
+    [row] = [r for r in ov.health(d) if r["name"] == "Catch-up worker"]
+    assert row["state"] == "down"
+    assert row["detail"] == "skipped about 96 h of older detections; run the backfill"
+    d["health"]["reconcile_gap_s"] = 0
+    [row] = [r for r in ov.health(d) if r["name"] == "Catch-up worker"]
+    assert row["state"] == "up" and "backfill" not in row["detail"]
 
 
 def test_a_cased_lane_outside_the_fixed_set_is_other_and_a_missing_verdict_is_not_analyzed() -> (

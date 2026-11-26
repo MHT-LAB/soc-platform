@@ -3,13 +3,14 @@
 The numbers come from console_health() (migration 0010); the decision is the worker's own
 stale_reasons() with its default limits, so the banner and the "SOC STALE" push can never
 disagree about a threshold. The text names the condition and how old it is, in fixed
-sentences with numbers only: nothing from a client, an alert or the database's own error
+sentences with numbers only (rule drift and a skipped stretch of detections use the pager's own
+sentences): nothing from a client, an alert or the database's own error
 messages.
 """
 
 from typing import Any
 
-from soc_api.worker import Limits, stale_reasons
+from soc_api.worker import Limits, stale_reasons, stale_text
 
 LIMITS = Limits()
 
@@ -32,6 +33,9 @@ def notices(health: dict[str, Any]) -> list[str]:
     """One sentence per condition that holds; an empty list when the pipeline is healthy."""
     quiet = health["reconcile_quiet_s"]
     posture = health["posture_quiet_s"]
+    # Both arrived with migration 0023; absent or NULL reads as "none".
+    drift = int(health.get("rules_drift") or 0)
+    gap = int(health.get("reconcile_gap_s") or 0)
     firing = stale_reasons(
         {
             "oldest_pending_page_s": health["oldest_pending_page_s"],
@@ -44,6 +48,8 @@ def notices(health: dict[str, Any]) -> list[str]:
         LIMITS,
         int(health["posture_runs"]),
         None if posture is None else float(posture),
+        drift,
+        gap,
     )
     out: list[str] = []
     if firing["pages_pending"]:
@@ -59,6 +65,10 @@ def notices(health: dict[str, Any]) -> list[str]:
         out.append(f"The catch-up worker has not completed a run for {age(float(quiet or 0))}.")
     if firing["posture_quiet"]:
         out.append(f"The posture collector has not completed a run for {age(float(posture or 0))}.")
+    if firing["rules_drift"]:
+        out.append(stale_text("rules_drift", rules_drift=drift))
+    if firing["reconcile_gap"]:
+        out.append(stale_text("reconcile_gap", reconcile_gap_s=gap))
     if firing["backup_old"]:
         out.append(f"The last good database backup is {age(float(health['backup_age_s']))} old.")
     return out

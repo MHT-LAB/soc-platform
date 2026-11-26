@@ -348,6 +348,7 @@ def stale_firing(data: dict[str, Any]) -> dict[str, bool]:
         count(h["posture_runs"]),
         number(h["posture_quiet_s"]),
         count(h.get("rules_drift")),
+        count(h.get("reconcile_gap_s")),
     )
 
 
@@ -422,6 +423,9 @@ def health(data: dict[str, Any]) -> list[dict[str, str]]:
         catchup = ("idle", "not set up")
     elif firing["reconcile_quiet"]:
         catchup = ("down", f"no completed run for {dur(quiet)}")
+    elif firing["reconcile_gap"]:
+        hours = max(1, round(count(h.get("reconcile_gap_s")) / 3600))
+        catchup = ("down", f"skipped about {hours} h of older detections; run the backfill")
     elif count(h["reconcile_errors"]):
         catchup = (
             "warn",

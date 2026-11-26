@@ -814,3 +814,31 @@ def test_downgrade_restores_the_0017_definitions_exactly(fx: Fixture) -> None:
     assert drift_snapshot(fx) == after_down
     soc_db.upgrade(url)
     assert drift_snapshot(fx) == head
+
+
+def test_the_console_counts_drift_exactly_as_the_pager_does(
+    fx: Fixture, posture_db: p.PostureDb
+) -> None:
+    steps = [
+        base_doc(None, A=None),  # not checked: 0
+        base_doc(CLEAN, A="ok"),
+        base_doc(
+            {"manifest": "ok", "missing_count": 2, "missing": ["X", "Y"]},
+            A="changed",
+            B="unmanaged",
+            C="ok",
+        ),
+        base_doc({"manifest": "bad", "missing_count": 0, "missing": []}, A="ok"),
+        base_doc(manifest_doc(at=AT + 3600), A="ok"),
+        base_doc(manifest_doc(at=AT), A="ok"),  # an older whole deploy put back: stale
+        base_doc({"manifest": "none", "missing_count": 0, "missing": []}, A="ok"),  # absent
+    ]
+    seen: list[int] = []
+    for step in steps:
+        posture_db.record(step)
+        checked, wrong = fx.one("SELECT checked, wrong FROM rules_drift_health()")
+        with fx.db.connect("soc_console") as c:
+            shown = c.execute("SELECT rules_drift FROM console_health()").fetchone()[0]
+        assert shown == (wrong if checked else 0), step
+        seen.append(shown)
+    assert seen == [0, 0, 4, 1, 0, 1, 1]
