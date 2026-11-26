@@ -444,7 +444,7 @@ def console_health(fx: Fixture) -> dict[str, Any]:
     return dict(zip(names, row, strict=True))
 
 
-def test_console_health_keeps_its_columns_and_adds_two(fx: Fixture) -> None:
+def test_console_health_keeps_its_columns_and_adds_four(fx: Fixture) -> None:
     names = list(console_health(fx))
     assert names == [
         "oldest_pending_page_s",
@@ -455,6 +455,8 @@ def test_console_health_keeps_its_columns_and_adds_two(fx: Fixture) -> None:
         "backup_age_s",
         "posture_runs",
         "posture_quiet_s",
+        "rules_drift",
+        "reconcile_gap_s",
     ]
 
 

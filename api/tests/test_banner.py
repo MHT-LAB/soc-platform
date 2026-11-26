@@ -30,6 +30,8 @@ HEALTHY: dict[str, Any] = {
     "backup_age_s": 60.0,
     "posture_runs": 0,
     "posture_quiet_s": None,
+    "rules_drift": 0,
+    "reconcile_gap_s": 0,
 }
 
 
@@ -55,6 +57,12 @@ def test_a_healthy_pipeline_gives_no_notices() -> None:
             {"posture_runs": 4, "posture_quiet_s": 2700.0},
             "posture collector has not completed a run for 45 minutes",
         ),
+        ({"rules_drift": 1}, "1 detection rule change outside git. Open the Rules tab."),
+        ({"rules_drift": 3}, "3 detection rule changes outside git. Open the Rules tab."),
+        (
+            {"reconcile_gap_s": 4 * 86400 + 600},
+            "skipped about 96 h of detections older than a day. Run the backfill.",
+        ),
     ],
 )
 def test_each_condition_is_named_with_its_age(change: dict[str, Any], words: str) -> None:
@@ -78,6 +86,22 @@ def test_the_limits_are_the_pagers_and_a_value_at_the_limit_is_not_degraded(
     change: dict[str, Any],
 ) -> None:
     assert banner.notices({**HEALTHY, **change}) == []
+
+
+def test_the_banner_uses_the_pagers_own_words_for_drift_and_a_gap() -> None:
+    from soc_api.worker import stale_text
+
+    lines = banner.notices({**HEALTHY, "rules_drift": 2, "reconcile_gap_s": 7200})
+    assert lines == [
+        stale_text("rules_drift", rules_drift=2),
+        stale_text("reconcile_gap", reconcile_gap_s=7200),
+    ]
+
+
+def test_a_health_row_from_before_0023_and_a_null_read_as_none() -> None:
+    old = {k: v for k, v in HEALTHY.items() if k not in ("rules_drift", "reconcile_gap_s")}
+    assert banner.notices(old) == []
+    assert banner.notices({**HEALTHY, "rules_drift": None, "reconcile_gap_s": None}) == []
 
 
 def test_several_conditions_give_several_lines() -> None:
@@ -208,6 +232,37 @@ def test_a_backup_twelve_hours_old_is_not_degraded(fx: Fixture) -> None:
     assert "Pipeline degraded" not in shown(fx, "/console")
 
 
+def test_a_skipped_stretch_of_detections_shows_the_banner_until_it_is_backfilled(
+    fx: Fixture,
+) -> None:
+    fx.run(
+        "INSERT INTO reconcile_cursor (source_id, window_end, last_success, started_at, "
+        "gap_from, gap_to) SELECT id, now(), now(), now() - interval '3 hours', "
+        "now() - interval '3 days', now() - interval '1 day' FROM source WHERE slug = 'src-a'"
+    )
+    text = shown(fx, "/console")
+    assert "skipped about 48 h of detections older than a day. Run the backfill." in text
+    fx.run("UPDATE reconcile_cursor SET gap_from = NULL, gap_to = NULL")
+    assert "Pipeline degraded" not in shown(fx, "/console")
+
+
+def test_rules_changed_outside_git_show_the_banner_until_they_are_put_back(fx: Fixture) -> None:
+    fx.run(
+        "INSERT INTO rule_inventory (namespace, name, enabled, drift, updated_at) "
+        "VALUES ('general', 'T - One', true, 'changed', now()), "
+        "('general', 'T - Two', true, 'unmanaged', now())"
+    )
+    fx.run(
+        "INSERT INTO rules_drift (singleton, manifest, missing_count, missing) "
+        "VALUES (true, 'ok', 0, '{}')"
+    )
+    text = shown(fx, "/console")
+    assert "2 detection rule changes outside git. Open the Rules tab." in text
+    assert "T - One" not in text  # the banner counts; the Rules tab names
+    fx.run("UPDATE rule_inventory SET drift = 'ok'")
+    assert "Pipeline degraded" not in shown(fx, "/console")
+
+
 def test_the_banner_goes_away_when_the_condition_clears(fx: Fixture) -> None:
     fx.run("UPDATE backup_state SET last_ok_at = now() - interval '14 hours'")
     assert "Pipeline degraded" in shown(fx, "/console")
@@ -292,7 +347,7 @@ def test_the_login_reads_no_table_and_the_writer_sees_only_the_health_columns(
 
     for table, columns in (
         ("backup_state", ("started_at", "last_ok_at")),
-        ("reconcile_cursor", ("last_success", "started_at")),
+        ("reconcile_cursor", ("last_success", "started_at", "gap_from", "gap_to")),
     ):
         for column in columns:
             assert can(table, column, "SELECT") and not can(table, column, "UPDATE"), column
@@ -314,5 +369,41 @@ def test_downgrading_removes_it_and_upgrading_brings_it_back(db: TestDb, fx: Fix
             "'last_ok_at', 'SELECT')"
         ).fetchone() == (False,)
     soc_db.upgrade(url)
+    with fx.db.connect("soc_console") as c:
+        assert c.execute("SELECT * FROM console_health()").fetchone() is not None
+
+
+def test_downgrading_0023_restores_both_functions_exactly_and_upgrading_redoes_it(
+    db: TestDb, fx: Fixture
+) -> None:
+    url = db.sqlalchemy_url()
+
+    def definitions() -> tuple[str, str]:
+        row = fx.one(
+            "SELECT pg_get_functiondef('console_health()'::regprocedure), "
+            "pg_get_functiondef('ops_overview(integer, text)'::regprocedure)"
+        )
+        return str(row[0]), str(row[1])
+
+    def can_read_gap() -> bool:
+        return bool(
+            fx.one(
+                "SELECT has_column_privilege("
+                "'soc_console_writer', 'reconcile_cursor', 'gap_to', 'SELECT')"
+            )[0]
+        )
+
+    new = definitions()
+    assert can_read_gap() and "reconcile_gap_s" in new[0] and "reconcile_gap_s" in new[1]
+    soc_db.downgrade(url, "0022")
+    old = definitions()
+    assert not can_read_gap()
+    assert "reconcile_gap_s" not in old[0] and "reconcile_gap_s" not in old[1]
+    # ...and it is the definition a database that never had 0023 has
+    soc_db.downgrade(url, "0010")
+    soc_db.upgrade(url, "0022")
+    assert definitions() == old
+    soc_db.upgrade(url)
+    assert definitions() == new
     with fx.db.connect("soc_console") as c:
         assert c.execute("SELECT * FROM console_health()").fetchone() is not None

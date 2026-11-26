@@ -1208,6 +1208,23 @@ def test_a_gap_over_a_day_is_written_down_before_the_cursor_jumps_over_it(
     assert window_end(fx) > before  # the cursor did move on, so only the gap row remembers
 
 
+def test_the_console_reads_the_same_gap_the_pager_reads(fx: Fixture, lc: FakeLc) -> None:
+    cursor_at(fx, "5 days")
+    make(fx, lc, clock=Clock(), limits=r.Limits(max_windows=100)).run_once()
+
+    def numbers() -> tuple[int, int]:
+        with fx.db.connect("soc_console") as c:
+            console = c.execute("SELECT reconcile_gap_s FROM console_health()").fetchone()[0]
+        with fx.db.connect("soc_worker") as c:
+            pager = c.execute("SELECT reconcile_gap_health()").fetchone()[0]
+        return console, pager
+
+    console, pager = numbers()
+    assert console == pager and abs(console - (4 * 86400 + 600)) < 5
+    fx.run("UPDATE reconcile_cursor SET gap_from = NULL, gap_to = NULL")
+    assert numbers() == (0, 0)
+
+
 def test_a_cursor_within_a_day_records_no_gap(fx: Fixture, lc: FakeLc) -> None:
     cursor_at(fx, "20 hours")
     make(fx, lc).run_once()
