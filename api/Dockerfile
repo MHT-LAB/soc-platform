@@ -3,7 +3,7 @@
 # Dependabot proposes digest bumps as PRs.
 
 # ---- build: resolve dependencies from the lockfile into /app/.venv ----
-FROM python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS build
+FROM python:3.12-slim-trixie@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b AS build
 
 # uv is copied from its digest-pinned release image rather than pip-installed, so the tool
 # that writes the signed virtual environment is fixed by hash (ADR 0005). Dependabot
@@ -21,7 +21,7 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
 # ---- runtime: no build tools, no root ----
-FROM python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS runtime
+FROM python:3.12-slim-trixie@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b AS runtime
 
 ARG VERSION=0.0.0-dev
 ARG GIT_SHA=unknown
